@@ -71,7 +71,7 @@ Services start automatically:
 
 - **[Local Development](docs/local-development.md)** — Docker Compose setup, service verification, database configuration
 - **[Message Contracts](docs/contracts.md)** — Protobuf definitions, versioning, breaking-change checks
-- **[Publisher Guide](src/MessageBridge.Publisher/README.md)** — Direct & outbox modes, registration, usage examples
+- **[Publisher Guide](docs/publisher.md)** — Direct & outbox modes, registration, usage examples
 - **[Sample Client](samples/MessageBridge.SampleClient/README.md)** — Complete working example (direct & outbox)
 - **[Operations](docs/operations.md)** — Health checks, retries, error queues, idempotency, cleanup
 - **[Deployment](docs/deployment.md)** — Container configuration, CloudAMQP setup, secrets, production decisions
@@ -176,7 +176,7 @@ dotnet test MessageBridge.sln
 
 ```bash
 # Unit tests only
-dotnet test MessageBridge.sln -p MessageBridge.Domain --logger "console;verbosity=detailed"
+dotnet test tests/MessageBridge.Domain.Tests/MessageBridge.Domain.Tests.csproj --filter Category=Unit --logger "console;verbosity=detailed"
 
 # Integration tests only (requires Docker Compose running)
 dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj
