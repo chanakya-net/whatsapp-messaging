@@ -28,9 +28,6 @@ jobs:
         with:
           dotnet-version: "10.0.x"
           include-prerelease: true
-          cache: true
-          cache-dependency-path: |
-            **/*.csproj
 
       - name: Restore solution
         run: dotnet restore MessageBridge.sln
@@ -50,9 +47,6 @@ jobs:
         with:
           dotnet-version: "10.0.x"
           include-prerelease: true
-          cache: true
-          cache-dependency-path: |
-            **/*.csproj
 
       - name: Restore for formatting
         run: dotnet restore MessageBridge.sln
@@ -75,9 +69,6 @@ jobs:
         with:
           dotnet-version: "10.0.x"
           include-prerelease: true
-          cache: true
-          cache-dependency-path: |
-            **/*.csproj
 
       - name: Restore for build
         run: dotnet restore MessageBridge.sln
@@ -100,9 +91,6 @@ jobs:
         with:
           dotnet-version: "10.0.x"
           include-prerelease: true
-          cache: true
-          cache-dependency-path: |
-            **/*.csproj
 
       - name: Restore for tests
         run: dotnet restore MessageBridge.sln
@@ -132,9 +120,6 @@ jobs:
         with:
           dotnet-version: "10.0.x"
           include-prerelease: true
-          cache: true
-          cache-dependency-path: |
-            **/*.csproj
 
       - name: Restore for integration tests
         run: dotnet restore MessageBridge.sln
@@ -179,9 +164,6 @@ jobs:
         with:
           dotnet-version: "10.0.x"
           include-prerelease: true
-          cache: true
-          cache-dependency-path: |
-            **/*.csproj
 
       - name: Restore for sample build
         run: dotnet restore MessageBridge.sln
@@ -204,9 +186,6 @@ jobs:
         with:
           dotnet-version: "10.0.x"
           include-prerelease: true
-          cache: true
-          cache-dependency-path: |
-            **/*.csproj
 
       - name: Restore for packing
         run: dotnet restore MessageBridge.sln
