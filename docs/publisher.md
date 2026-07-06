@@ -80,7 +80,7 @@ Outbox configuration options:
 
 ## Request DTOs
 
-### WhatsApp
+### WhatsApp Request DTO
 
 `SendWhatsAppMessageRequest` includes:
 
@@ -92,7 +92,7 @@ Outbox configuration options:
 - `MessageId`
 - `CorrelationId`
 
-### Email
+### Email Request DTO
 
 `SendEmailConfirmationRequest` includes:
 

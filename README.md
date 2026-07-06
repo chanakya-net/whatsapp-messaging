@@ -28,12 +28,13 @@ dotnet test MessageBridge.sln
 ```
 
 Services start automatically:
+
 - **RabbitMQ**: `localhost:5672` (management UI: `http://localhost:15672`, credentials: `guest/guest`)
 - **PostgreSQL**: `localhost:5432` (database: `messagebridge_dev`, credentials: `dev/dev`)
 
 ## Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │  Application Code                                   │
 │  └─ IMessageBridgePublisher (DI)                    │
@@ -79,6 +80,7 @@ Services start automatically:
 ## Publishing Messages
 
 ### Direct Mode
+
 Publishes directly to RabbitMQ (lowest latency):
 
 ```csharp
@@ -102,6 +104,7 @@ await publisher.PublishWhatsAppMessageAsync(new SendWhatsAppMessageRequest
 ```
 
 ### Outbox Mode
+
 Transactional outbox pattern (guarantees delivery):
 
 ```csharp
@@ -146,7 +149,7 @@ See [Deployment](docs/deployment.md) for secrets configuration in production.
 
 ## Project Structure
 
-```
+```text
 ├── src/
 │   ├── MessageBridge.Contracts/          # Protobuf definitions
 │   ├── MessageBridge.Domain/             # Business logic (dependency-free)
@@ -207,7 +210,7 @@ Use the markdown and link checks above before publishing doc-only changes.
 ## Commands Reference
 
 | Command | Purpose |
-|---------|---------|
+| --- | --- |
 | `docker-compose up -d` | Start local RabbitMQ & PostgreSQL |
 | `docker-compose down` | Stop services |
 | `docker-compose ps` | Check service status & health |
