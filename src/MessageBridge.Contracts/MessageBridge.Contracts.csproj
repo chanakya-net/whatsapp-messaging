@@ -2,15 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-  </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="ErrorOr" Version="2.1.1" />
-  </ItemGroup>
-
-  <PropertyGroup>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Protobuf_ProtocFullPath Condition="'$(PROTOC)' != ''">$(PROTOC)</Protobuf_ProtocFullPath>
     <Protobuf_ProtocFullPath Condition="'$(Protobuf_ProtocFullPath)' == '' and Exists('/opt/homebrew/bin/protoc')">/opt/homebrew/bin/protoc</Protobuf_ProtocFullPath>
     <Protobuf_ProtocFullPath Condition="'$(Protobuf_ProtocFullPath)' == '' and Exists('/usr/local/bin/protoc')">/usr/local/bin/protoc</Protobuf_ProtocFullPath>
@@ -21,8 +13,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="ErrorOr" />
     <PackageReference Include="Grpc.Tools" Version="2.70.0" PrivateAssets="All" />
-    <PackageReference Include="Google.Protobuf" Version="3.28.0" />
+    <PackageReference Include="Google.Protobuf" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
   </ItemGroup>
 
 </Project>
