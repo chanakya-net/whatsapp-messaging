@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MessageBridge.Contracts", "src/MessageBridge.Contracts\MessageBridge.Contracts.csproj", "{C7D3FE8B-5E5B-4E4A-AF8D-2E5F5B1B3C7F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MessageBridge.Contracts.Tests", "tests\MessageBridge.Contracts.Tests\MessageBridge.Contracts.Tests.csproj", "{FA95D4D3-5B9D-48AF-8C2D-1B8D3C6A2A7E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C7D3FE8B-5E5B-4E4A-AF8D-2E5F5B1B3C7F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C7D3FE8B-5E5B-4E4A-AF8D-2E5F5B1B3C7F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C7D3FE8B-5E5B-4E4A-AF8D-2E5F5B1B3C7F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C7D3FE8B-5E5B-4E4A-AF8D-2E5F5B1B3C7F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FA95D4D3-5B9D-48AF-8C2D-1B8D3C6A2A7E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FA95D4D3-5B9D-48AF-8C2D-1B8D3C6A2A7E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FA95D4D3-5B9D-48AF-8C2D-1B8D3C6A2A7E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FA95D4D3-5B9D-48AF-8C2D-1B8D3C6A2A7E}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {8F8C5D0A-7A3D-4B2E-9A5D-2DFE5F7E6A9B}
+	EndGlobalSection
+EndGlobal

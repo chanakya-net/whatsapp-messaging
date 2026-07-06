@@ -16,12 +16,14 @@ public class ContractGenerationTests
             RecipientPhoneNumber = "+14155552671",
             TemplateName = "welcome",
             TemplateLanguage = "en",
+            TemplateParameters = { { "first_name", "Alex" } },
             CorrelationId = "corr-456",
             RequestedAtUtc = Timestamp.FromDateTime(DateTime.UtcNow)
         };
 
         Assert.NotNull(cmd);
         Assert.Equal("msg-123", cmd.MessageId);
+        Assert.Equal("Alex", cmd.TemplateParameters["first_name"]);
     }
 
     [Fact]
@@ -34,6 +36,7 @@ public class ContractGenerationTests
             RecipientPhoneNumber = "+14155552671",
             TemplateName = "welcome",
             TemplateLanguage = "en",
+            TemplateParameters = { { "first_name", "Alex" }, { "code", "123" } },
             CorrelationId = "corr-456",
             RequestedAtUtc = Timestamp.FromDateTime(DateTime.UtcNow)
         };
@@ -46,6 +49,8 @@ public class ContractGenerationTests
         Assert.Equal(original.RecipientPhoneNumber, deserialized.RecipientPhoneNumber);
         Assert.Equal(original.TemplateName, deserialized.TemplateName);
         Assert.Equal(original.TemplateLanguage, deserialized.TemplateLanguage);
+        Assert.Equal(original.TemplateParameters["first_name"], deserialized.TemplateParameters["first_name"]);
+        Assert.Equal(original.TemplateParameters["code"], deserialized.TemplateParameters["code"]);
         Assert.Equal(original.CorrelationId, deserialized.CorrelationId);
         Assert.NotNull(deserialized.RequestedAtUtc);
         Assert.Equal(original.RequestedAtUtc.Seconds, deserialized.RequestedAtUtc.Seconds);

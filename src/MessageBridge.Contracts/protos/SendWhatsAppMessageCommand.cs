@@ -118,14 +118,16 @@ public class SendWhatsAppMessageCommand
         }
         foreach (var pair in _templateParameters)
         {
-            output.WriteRawTag(50);
-            var subOutput = new CodedOutputStream(new System.IO.MemoryStream());
-            subOutput.WriteString("key", pair.Key);
-            subOutput.WriteString("value", pair.Value);
-            subOutput.Flush();
-            var ms = (System.IO.MemoryStream)subOutput.InternalStream;
-            output.WriteRawVarint32((uint)ms.Length);
-            output.WriteRawBytes(ms.ToArray());
+            var entryStream = new System.IO.MemoryStream();
+            var entryOutput = new CodedOutputStream(entryStream);
+            entryOutput.WriteTag(1, WireFormat.WireType.LengthDelimited);
+            entryOutput.WriteString(pair.Key);
+            entryOutput.WriteTag(2, WireFormat.WireType.LengthDelimited);
+            entryOutput.WriteString(pair.Value);
+            entryOutput.Flush();
+
+            output.WriteTag(6, WireFormat.WireType.LengthDelimited);
+            output.WriteBytes(ByteString.CopyFrom(entryStream.ToArray()));
         }
         if (!string.IsNullOrEmpty(_correlationId))
         {
@@ -160,16 +162,16 @@ public class SendWhatsAppMessageCommand
                 case 34: _templateName = input.ReadString(); break;
                 case 42: _templateLanguage = input.ReadString(); break;
                 case 50:
-                    var subInput = input.ReadMessage(null);
-                    var mapEntry = new CodedInputStream(subInput as System.IO.MemoryStream);
+                    var mapEntryBytes = input.ReadBytes();
+                    var mapEntryInput = new CodedInputStream(mapEntryBytes.ToByteArray());
                     string mapKey = "";
                     string mapValue = "";
                     uint mapTag;
-                    while ((mapTag = mapEntry.ReadTag()) != 0)
+                    while ((mapTag = mapEntryInput.ReadTag()) != 0)
                     {
-                        if (mapTag == 10) mapKey = mapEntry.ReadString();
-                        else if (mapTag == 18) mapValue = mapEntry.ReadString();
-                        else mapEntry.SkipLastField();
+                        if (mapTag == 10) mapKey = mapEntryInput.ReadString();
+                        else if (mapTag == 18) mapValue = mapEntryInput.ReadString();
+                        else mapEntryInput.SkipLastField();
                     }
                     _templateParameters[mapKey] = mapValue;
                     break;
