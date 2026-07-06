@@ -1,213 +1,172 @@
 # MessageBridge Publisher Guide
 
-The Publisher package provides a typed, transport-agnostic API for publishing WhatsApp and email confirmation commands.
+`MessageBridge.Publisher` provides a typed API for publishing WhatsApp and email confirmation commands.
 
-## Overview
+## API Surface
 
-`MessageBridge.Publisher` exposes two main methods via `IMessageBridgePublisher`:
+`IMessageBridgePublisher` exposes:
 
-- `PublishWhatsAppMessageAsync(SendWhatsAppMessageRequest request, CancellationToken cancellationToken = default)`
-- `PublishEmailConfirmationAsync(SendEmailConfirmationRequest request, CancellationToken cancellationToken = default)`
+- `Task<ErrorOr<MessageBridgePublisherResult>> PublishWhatsAppMessageAsync(SendWhatsAppMessageRequest request, CancellationToken cancellationToken = default)`
+- `Task<ErrorOr<MessageBridgePublisherResult>> PublishEmailConfirmationAsync(SendEmailConfirmationRequest request, CancellationToken cancellationToken = default)`
 
-The Publisher handles:
-
-- Request validation
-- Message ID generation (ULID by default)
-- Correlation ID propagation or generation
-- Tenant ID defaulting and validation
-- Protobuf serialization
-- Transport routing (exchange, queues, routing keys)
+The result type is `MessageBridgePublisherResult`, which includes the resolved `MessageId`, `CorrelationId`, and `TenantId`.
 
 ## Direct Mode
 
-**Use for:** immediate publish with lowest latency. Best for non-critical notifications.
+Use direct mode when you want a publish call to go straight to RabbitMQ.
 
 ```csharp
 services.AddMessageBridgePublisher(opts =>
 {
-    opts.DefaultTenantId = "tenant-1";  // Optional; required if RequireTenantId = true
+    opts.DefaultTenantId = "tenant-1";
     opts.ExchangeName = "messagebridge.commands";
-    opts.WhatsAppRoutingKey = "send-whatsapp-message.v1";
-    opts.EmailRoutingKey = "send-email-confirmation.v1";
+    opts.WhatsAppRoutingKey = "whatsapp.send";
+    opts.EmailRoutingKey = "email.confirmation";
 });
 
 var publisher = serviceProvider.GetRequiredService<IMessageBridgePublisher>();
 
-await publisher.PublishWhatsAppMessageAsync(new SendWhatsAppMessageRequest
+var result = await publisher.PublishWhatsAppMessageAsync(new SendWhatsAppMessageRequest
 {
     TenantId = "tenant-1",
     PhoneNumber = "+1234567890",
     TemplateId = "welcome",
-    Body = "Hello!"
+    Body = "Hello!",
+    LanguageCode = "en-US"
 });
 ```
 
-**Behavior:**
+Direct mode behavior:
 
-- Publishes synchronously to RabbitMQ
-- Returns after successful broker acknowledgment
-- No retry on transient failures (caller must retry if needed)
-- Idempotency relies on worker-side duplicate detection
+- Validates the request before publish
+- Generates `MessageId` when omitted
+- Generates `CorrelationId` from trace context or ULID when omitted
+- Returns `ErrorOr<MessageBridgePublisherResult>`
 
 ## Outbox Mode
 
-**Use for:** guaranteed at-least-once delivery within a database transaction. Recommended for production.
+Use outbox mode when you need the publish request to be stored with your database transaction and dispatched later by hosted services.
 
 ```csharp
-services.AddDbContext<AppDbContext>(opts => opts.UsePostgresql(...));
+services.AddDbContext<AppDbContext>(opts => opts.UseNpgsql(connectionString));
 services.AddMessageBridgeOutboxPublisher<AppDbContext>(opts =>
 {
     opts.BatchSize = 100;
-    opts.PollIntervalMilliseconds = 5000;
+    opts.Concurrency = 4;
+    opts.PollIntervalMilliseconds = 500;
+    opts.MaxRetryAttempts = 3;
+    opts.RetryDelayMilliseconds = 50;
+    opts.RetryBackoffMultiplier = 2.0;
+    opts.CleanupEnabled = true;
+    opts.CleanupRetentionHours = 24;
+    opts.CleanupBatchSize = 500;
 });
-
-// In your service:
-using (var transaction = await dbContext.Database.BeginTransactionAsync())
-{
-    // Insert your business data
-    dbContext.Orders.Add(myOrder);
-    
-    // Record outbox message atomically
-    await publisher.PublishWhatsAppMessageAsync(
-        new SendWhatsAppMessageRequest { /* ... */ }
-    );
-    
-    await dbContext.SaveChangesAsync();
-    await transaction.CommitAsync();
-}
 ```
 
-**Behavior:**
+The package also exposes `AddMessageBridgeOutboxDispatcher<TContext>` and `AddMessageBridgeOutboxCleanup<TContext>` if you want those hosted services separately.
 
-- Stores pending message in client application's outbox table
-- Message recorded atomically with your business transaction
-- Dispatcher runs as a hosted service in your app
-- Dispatcher publishes pending messages in batches
-- Records marked published only after broker acknowledgment
-- Failed publishes retained for inspection
-- **At-least-once guarantee:** duplicates are possible; worker idempotency handles them
+Outbox configuration options:
 
-**Configuration:**
+- `BatchSize` - messages read per dispatch batch
+- `Concurrency` - parallel publishes per batch
+- `PollIntervalMilliseconds` - dispatcher polling interval
+- `MaxRetryAttempts` - retry attempts per message publish cycle
+- `RetryDelayMilliseconds` - delay before the first retry
+- `RetryBackoffMultiplier` - multiplier applied to each retry delay
+- `CleanupEnabled` - enables cleanup hosted service
+- `CleanupRetentionHours` - keep published rows for this long
+- `CleanupBatchSize` - rows removed per cleanup pass
+- `CleanupIntervalMilliseconds` - cleanup polling interval
 
-- `BatchSize` — messages per publish batch (default: 100)
-- `PollIntervalMilliseconds` — check for pending messages (default: 5000)
-- `MaxRetries` — attempts per message (default: 5)
-- `RetentionDays` — keep published records (default: 7)
+## Request DTOs
 
-## Message IDs
+### WhatsApp
 
-IDs uniquely identify messages for idempotency.
+`SendWhatsAppMessageRequest` includes:
 
-- Publisher generates ULID if not supplied
-- Caller may provide custom string (max 128 characters)
-- Format is opaque; system uses `message_id + message_type` as deduplication key
+- `TenantId`
+- `PhoneNumber`
+- `TemplateId`
+- `Body`
+- `LanguageCode`
+- `MessageId`
+- `CorrelationId`
 
-```csharp
-var request = new SendWhatsAppMessageRequest
-{
-    MessageId = "custom-id-123",  // Optional; omit to auto-generate
-    /* ... */
-};
-```
+### Email
 
-## Correlation IDs
+`SendEmailConfirmationRequest` includes:
 
-Link messages to requests or user actions for tracing.
-
-- Publisher prefers W3C trace context (OpenTelemetry) if available
-- Fallback: generated ULID-like string
-- Caller may provide custom string (max 128 characters)
-
-```csharp
-var request = new SendWhatsAppMessageRequest
-{
-    CorrelationId = "req-abc123",  // Optional; omit for auto-generation
-    /* ... */
-};
-```
+- `TenantId`
+- `Email`
+- `ConfirmationCode`
+- `MessageId`
+- `CorrelationId`
 
 ## Tenant Behavior
 
-Multi-tenant support via required `TenantId`.
+Tenant handling matches the current options and validators:
 
-**Modes:**
-
-1. **Explicit per-request** — always pass `TenantId` on the request
-2. **Configured default** — set `DefaultTenantId` during registration (dev/test convenience)
-3. **Required explicit** — set `RequireTenantId = true` to forbid publishing without explicit tenant
+- `DefaultTenantId` is required during registration
+- If a request omits `TenantId`, the default tenant is used
+- `AllowedTenantIds` can restrict publishing to an allow-list
 
 ```csharp
-// Dev: allow default tenant
 services.AddMessageBridgePublisher(opts =>
 {
     opts.DefaultTenantId = "dev-tenant";
-    opts.RequireTenantId = false;  // Default
-});
-
-// Production: require explicit tenant
-services.AddMessageBridgePublisher(opts =>
-{
-    opts.RequireTenantId = true;  // Reject if request.TenantId is null
+    opts.AllowedTenantIds = ["dev-tenant", "qa-tenant"];
 });
 ```
 
 ## Sample Usage
 
-### WhatsApp Message
+### WhatsApp
 
 ```csharp
-await publisher.PublishWhatsAppMessageAsync(
+var whatsappResult = await publisher.PublishWhatsAppMessageAsync(
     new SendWhatsAppMessageRequest
     {
         TenantId = "acme-corp",
         PhoneNumber = "+1-555-0100",
         TemplateId = "order-confirmation",
         Body = "Your order #12345 is confirmed.",
-        CorrelationId = "order-12345"  // Links to your business transaction
-    }
-);
+        LanguageCode = "en-US",
+        CorrelationId = "order-12345"
+    });
+
+if (whatsappResult.IsError)
+{
+    logger.LogWarning("Publish failed: {Errors}", whatsappResult.Errors);
+    return;
+}
+
+logger.LogInformation("Published message {MessageId}", whatsappResult.Value.MessageId);
 ```
 
-### Email Confirmation
+### Email
 
 ```csharp
-var confirmationToken = tokenService.GenerateToken();
-
-await publisher.PublishEmailConfirmationAsync(
+var emailResult = await publisher.PublishEmailConfirmationAsync(
     new SendEmailConfirmationRequest
     {
         TenantId = "acme-corp",
-        RecipientEmail = "user@example.com",
-        RecipientName = "John Doe",
-        ConfirmationToken = confirmationToken,
-        ExpiresAtUtc = DateTime.UtcNow.AddHours(24)
-    }
-);
+        Email = "user@example.com",
+        ConfirmationCode = confirmationCode,
+        CorrelationId = "signup-12345"
+    });
 ```
 
 ## Error Handling
 
-Publisher returns `ErrorOr<Success>`. Validation errors are surfaced immediately:
+The publisher returns `ErrorOr<MessageBridgePublisherResult>`.
 
-```csharp
-var result = await publisher.PublishWhatsAppMessageAsync(request);
-
-if (result.IsError)
-{
-    foreach (var error in result.Errors)
-    {
-        logger.LogWarning("Publish failed: {Error}", error.Description);
-    }
-}
-```
-
-Expected errors (invalid input, validation failure) fail fast.
-Transient broker errors (in direct mode) propagate as exceptions; wrap in try/catch if needed.
+- Validation failures are returned as `Error.Validation(...)`
+- Transport failures in direct mode bubble up from the transport implementation
+- Callers should inspect `IsError` before using `Value`
 
 ## Security Notes
 
-- Never log full message bodies or sensitive template parameters
-- Phone numbers and emails are masked in logs: `+1***0100`, `u***@example.com`
-- Confirmation tokens and secrets are never logged
-- Connection strings and credentials use environment variables or secrets providers
-- No credentials are embedded in request DTOs
+- Never log full message bodies or confirmation codes
+- Never put secrets in request DTOs
+- Treat tenant IDs and correlation IDs as metadata, not credentials
+- Use environment variables or a secrets provider for connection strings and broker credentials

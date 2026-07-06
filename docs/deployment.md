@@ -98,11 +98,16 @@ docker run \
       "EmailRoutingKey": "email.confirmation"
     },
     "Outbox": {
-      "Enabled": true,
-      "PollIntervalMilliseconds": 5000,
       "BatchSize": 100,
+      "Concurrency": 4,
+      "PollIntervalMilliseconds": 500,
+      "MaxRetryAttempts": 3,
+      "RetryDelayMilliseconds": 50,
+      "RetryBackoffMultiplier": 2.0,
       "CleanupEnabled": true,
-      "RetentionDays": 7
+      "CleanupRetentionHours": 24,
+      "CleanupBatchSize": 500,
+      "CleanupIntervalMilliseconds": 1000
     }
   },
   "OpenTelemetry": {
@@ -528,14 +533,10 @@ var app = builder.Build();
 
 var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
 
-lifetime.ApplicationStopping.Register(async () =>
+lifetime.ApplicationStopping.Register(() =>
 {
-    // Stop accepting new messages
-    var outboxPublisher = app.Services.GetService<IOutboxPublisher>();
-    await outboxPublisher?.StopAsync();
-    
-    // Wait for in-flight messages (up to 30 seconds)
-    await Task.Delay(TimeSpan.FromSeconds(30));
+    // BackgroundService instances are stopped by the host.
+    app.Logger.LogInformation("Application stopping; hosted outbox services will drain during shutdown.");
 });
 
 app.Run();

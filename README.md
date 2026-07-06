@@ -105,11 +105,18 @@ await publisher.PublishWhatsAppMessageAsync(new SendWhatsAppMessageRequest
 Transactional outbox pattern (guarantees delivery):
 
 ```csharp
-services.AddDbContext<AppDbContext>(opts => opts.UsePostgresql(...));
+services.AddDbContext<AppDbContext>(opts => opts.UseNpgsql(...));
 services.AddMessageBridgeOutboxPublisher<AppDbContext>(opts =>
 {
     opts.BatchSize = 100;
-    opts.PollIntervalMilliseconds = 5000;
+    opts.Concurrency = 4;
+    opts.PollIntervalMilliseconds = 500;
+    opts.MaxRetryAttempts = 3;
+    opts.RetryDelayMilliseconds = 50;
+    opts.RetryBackoffMultiplier = 2.0;
+    opts.CleanupEnabled = true;
+    opts.CleanupRetentionHours = 24;
+    opts.CleanupBatchSize = 500;
 });
 ```
 
@@ -187,6 +194,15 @@ dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.
 ```bash
 dotnet run --project samples/MessageBridge.SampleClient/MessageBridge.SampleClient.csproj
 ```
+
+### Documentation Validation
+
+```bash
+markdownlint README.md docs/*.md samples/MessageBridge.SampleClient/README.md
+lychee README.md docs/*.md samples/MessageBridge.SampleClient/README.md
+```
+
+Use the markdown and link checks above before publishing doc-only changes.
 
 ## Commands Reference
 
