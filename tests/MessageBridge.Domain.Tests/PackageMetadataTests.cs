@@ -36,6 +36,26 @@ public class PackageMetadataTests
     }
 
     [Fact]
+    public void Package_Projects_Should_Not_Generate_Packages_During_Build()
+    {
+        var solutionRoot = FindSolutionRoot();
+        var packageProjects = new[]
+        {
+            "src/MessageBridge.Contracts/MessageBridge.Contracts.csproj",
+            "src/MessageBridge.Publisher/MessageBridge.Publisher.csproj",
+            "src/MessageBridge.Publisher.EntityFrameworkCore/MessageBridge.Publisher.EntityFrameworkCore.csproj",
+        };
+
+        foreach (var project in packageProjects)
+        {
+            var projectFile = LoadXml(Path.Combine(solutionRoot, project));
+            var generatesPackageOnBuild = projectFile.Descendants("GeneratePackageOnBuild").Any();
+
+            Assert.False(generatesPackageOnBuild, $"{project} should be packed explicitly by the publish workflow.");
+        }
+    }
+
+    [Fact]
     public void Solution_Should_Have_EditorConfig()
     {
         var solutionRoot = FindSolutionRoot();
