@@ -10,4 +10,19 @@
     <PackageReference Include="ErrorOr" Version="2.1.1" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <Protobuf_ProtocFullPath Condition="'$(PROTOC)' != ''">$(PROTOC)</Protobuf_ProtocFullPath>
+    <Protobuf_ProtocFullPath Condition="'$(Protobuf_ProtocFullPath)' == '' and Exists('/opt/homebrew/bin/protoc')">/opt/homebrew/bin/protoc</Protobuf_ProtocFullPath>
+    <Protobuf_ProtocFullPath Condition="'$(Protobuf_ProtocFullPath)' == '' and Exists('/usr/local/bin/protoc')">/usr/local/bin/protoc</Protobuf_ProtocFullPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Protobuf Include="protos/messagebridge/contracts/v1/*.proto" GrpcServices="None" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.Tools" Version="2.70.0" PrivateAssets="All" />
+    <PackageReference Include="Google.Protobuf" Version="3.28.0" />
+  </ItemGroup>
+
 </Project>
