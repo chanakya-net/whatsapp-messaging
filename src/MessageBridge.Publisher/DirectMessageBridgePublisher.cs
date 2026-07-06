@@ -7,7 +7,7 @@ using Microsoft.Extensions.Options;
 
 namespace MessageBridge.Publisher;
 
-public sealed class DirectMessageBridgePublisher : IMessageBridgePublisher
+internal sealed class DirectMessageBridgePublisher : IMessageBridgePublisher
 {
     private const string DefaultW3CCorrelation = "00000000000000000000000000000000";
 

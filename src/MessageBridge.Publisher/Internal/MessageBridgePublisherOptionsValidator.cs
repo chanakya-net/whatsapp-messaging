@@ -2,7 +2,7 @@ using Microsoft.Extensions.Options;
 
 namespace MessageBridge.Publisher.Internal;
 
-public sealed class MessageBridgePublisherOptionsValidator : IValidateOptions<MessageBridgePublisherOptions>
+internal sealed class MessageBridgePublisherOptionsValidator : IValidateOptions<MessageBridgePublisherOptions>
 {
     public ValidateOptionsResult Validate(string? name, MessageBridgePublisherOptions options)
     {

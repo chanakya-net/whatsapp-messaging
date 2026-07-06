@@ -20,7 +20,8 @@ public static class DependencyInjection
 
         services.AddOptions<MessageBridgePublisherOptions>()
             .Configure(configure)
-            .ValidateDataAnnotations();
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
 
         services.AddSingleton<IValidateOptions<MessageBridgePublisherOptions>, MessageBridgePublisherOptionsValidator>();
         services.AddSingleton<IValidator<SendWhatsAppMessageRequest>, SendWhatsAppMessageRequestValidator>();
