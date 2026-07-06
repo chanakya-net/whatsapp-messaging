@@ -1,9 +1,9 @@
-version: v1
-dirs:
-  - protos
+version: v2
+modules:
+  - path: protos
 breaking:
   use:
     - FILE
 lint:
   use:
-    - DEFAULT
+    - STANDARD

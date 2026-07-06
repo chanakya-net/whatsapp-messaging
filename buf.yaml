@@ -1,9 +1,9 @@
-version: v1
-dirs:
-  - src/MessageBridge.Contracts/protos
+version: v2
+modules:
+  - path: src/MessageBridge.Contracts/protos
 breaking:
   use:
     - FILE
 lint:
   use:
-    - DEFAULT
+    - STANDARD
