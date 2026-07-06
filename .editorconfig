@@ -6,8 +6,6 @@ indent_size = 4
 end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
-charset = utf-8-bom
-
 # C# formatting
 csharp_indent_case_contents = true
 csharp_indent_switch_labels = true
@@ -23,7 +21,7 @@ csharp_new_line_before_members_in_anonymous_types = true
 csharp_new_line_between_query_expression_clauses = true
 
 # Code style rules
-csharp_prefer_braces = true:warning
+csharp_prefer_braces = true:suggestion
 csharp_prefer_simple_using_statement = true:suggestion
 csharp_style_var_for_built_in_types = false:suggestion
 csharp_style_var_when_type_is_apparent = true:suggestion

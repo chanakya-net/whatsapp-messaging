@@ -3,6 +3,7 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <WarningsNotAsErrors>$(WarningsNotAsErrors);CA1711;CA1716;CA1724</WarningsNotAsErrors>
     <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
@@ -18,6 +19,10 @@
 
   <PropertyGroup Label="Package Metadata Defaults">
     <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
+    <PackageReadmeFile Condition="'$(PackageReadmeFile)' == '' and Exists('$(MSBuildProjectDirectory)/README.md')">README.md</PackageReadmeFile>
+    <PackageProjectUrl Condition="'$(PackageProjectUrl)' == ''">https://github.com/chanakya-net/whatsapp-messaging</PackageProjectUrl>
+    <RepositoryType Condition="'$(RepositoryType)' == ''">git</RepositoryType>
+    <RepositoryUrl Condition="'$(RepositoryUrl)' == ''">https://github.com/chanakya-net/whatsapp-messaging</RepositoryUrl>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <Deterministic>true</Deterministic>
   </PropertyGroup>

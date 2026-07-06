@@ -1,20 +1,38 @@
+using System.Xml.Linq;
+
 namespace MessageBridge.Domain.Tests;
 
 public class PackageMetadataTests
 {
     [Fact]
-    public void All_Projects_Should_Have_PackageLicenseExpression()
+    public void Directory_Build_Props_Should_Define_Shared_Metadata()
     {
         var solutionRoot = FindSolutionRoot();
-        var projects = Directory.GetFiles(solutionRoot, "*.csproj", SearchOption.AllDirectories);
+        var buildProps = LoadXml(Path.Combine(solutionRoot, "Directory.Build.props"));
 
-        Assert.NotEmpty(projects);
-        foreach (var project in projects)
-        {
-            var content = File.ReadAllText(project);
-            Assert.True(content.Contains("PackageLicenseExpression"),
-                $"Project {Path.GetFileName(project)} missing PackageLicenseExpression");
-        }
+        Assert.Equal("latest", GetPropertyValue(buildProps, "LangVersion"));
+        Assert.Equal("enable", GetPropertyValue(buildProps, "Nullable"));
+        Assert.Equal("enable", GetPropertyValue(buildProps, "ImplicitUsings"));
+        Assert.Equal("true", GetPropertyValue(buildProps, "GenerateDocumentationFile"));
+        Assert.Equal("true", GetPropertyValue(buildProps, "Deterministic"));
+        Assert.Equal("true", GetPropertyValue(buildProps, "PublishRepositoryUrl"));
+        Assert.Equal("true", GetPropertyValue(buildProps, "EmbedUntrackedSources"));
+        Assert.Equal("AGPL-3.0-only", GetPropertyValue(buildProps, "PackageLicenseExpression"));
+        Assert.Equal("README.md", GetPropertyValue(buildProps, "PackageReadmeFile"));
+        Assert.Equal("https://github.com/chanakya-net/whatsapp-messaging", GetPropertyValue(buildProps, "PackageProjectUrl"));
+        Assert.Equal("git", GetPropertyValue(buildProps, "RepositoryType"));
+        Assert.Equal("https://github.com/chanakya-net/whatsapp-messaging", GetPropertyValue(buildProps, "RepositoryUrl"));
+        Assert.Equal("snupkg", GetPropertyValue(buildProps, "SymbolPackageFormat"));
+    }
+
+    [Fact]
+    public void Directory_Packages_Props_Should_Enable_Central_Package_Management()
+    {
+        var solutionRoot = FindSolutionRoot();
+        var packagesProps = LoadXml(Path.Combine(solutionRoot, "Directory.Packages.props"));
+
+        Assert.Equal("true", GetPropertyValue(packagesProps, "ManagePackageVersionsCentrally"));
+        Assert.Equal("1.1.1", GetPackageVersion(packagesProps, "Microsoft.SourceLink.GitHub"));
     }
 
     [Fact]
@@ -25,20 +43,27 @@ public class PackageMetadataTests
         Assert.True(File.Exists(editorConfig), "Solution missing .editorconfig");
     }
 
-    [Fact]
-    public void Solution_Should_Have_DirectoryBuildProps()
+    private static XDocument LoadXml(string path)
     {
-        var solutionRoot = FindSolutionRoot();
-        var dirProps = Path.Combine(solutionRoot, "Directory.Build.props");
-        Assert.True(File.Exists(dirProps), "Solution missing Directory.Build.props");
+        Assert.True(File.Exists(path), $"Missing expected file: {Path.GetFileName(path)}");
+        return XDocument.Load(path);
     }
 
-    [Fact]
-    public void Solution_Should_Have_DirectoryPackagesProps()
+    private static string GetPropertyValue(XDocument document, string propertyName)
     {
-        var solutionRoot = FindSolutionRoot();
-        var dirPkgProps = Path.Combine(solutionRoot, "Directory.Packages.props");
-        Assert.True(File.Exists(dirPkgProps), "Solution missing Directory.Packages.props");
+        return document
+            .Descendants(propertyName)
+            .LastOrDefault()?.Value
+            ?? throw new InvalidOperationException($"Missing property '{propertyName}'");
+    }
+
+    private static string GetPackageVersion(XDocument document, string packageId)
+    {
+        return document
+            .Descendants("PackageVersion")
+            .SingleOrDefault(element => string.Equals(element.Attribute("Include")?.Value, packageId, StringComparison.Ordinal))
+            ?.Attribute("Version")?.Value
+            ?? throw new InvalidOperationException($"Missing package version '{packageId}'");
     }
 
     private static string FindSolutionRoot()
@@ -50,6 +75,7 @@ public class PackageMetadataTests
                 return current;
             current = Directory.GetParent(current)?.FullName;
         }
+
         throw new InvalidOperationException("Could not find solution root");
     }
 }

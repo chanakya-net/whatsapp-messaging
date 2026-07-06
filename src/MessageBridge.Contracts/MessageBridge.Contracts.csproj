@@ -14,7 +14,7 @@
 
   <ItemGroup>
     <PackageReference Include="ErrorOr" />
-    <PackageReference Include="Grpc.Tools" Version="2.70.0" PrivateAssets="All" />
+    <PackageReference Include="Grpc.Tools" PrivateAssets="All" />
     <PackageReference Include="Google.Protobuf" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
   </ItemGroup>
