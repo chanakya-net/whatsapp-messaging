@@ -42,7 +42,7 @@ public class ContractGenerationTests
         };
 
         var serialized = original.ToByteArray();
-        var deserialized = SendWhatsAppMessageCommand.ParseFrom(serialized);
+        var deserialized = SendWhatsAppMessageCommand.Parser.ParseFrom(serialized);
 
         Assert.Equal(original.MessageId, deserialized.MessageId);
         Assert.Equal(original.TenantId, deserialized.TenantId);
@@ -94,7 +94,7 @@ public class ContractGenerationTests
         };
 
         var serialized = original.ToByteArray();
-        var deserialized = SendEmailConfirmationCommand.ParseFrom(serialized);
+        var deserialized = SendEmailConfirmationCommand.Parser.ParseFrom(serialized);
 
         Assert.Equal(original.MessageId, deserialized.MessageId);
         Assert.Equal(original.TenantId, deserialized.TenantId);
