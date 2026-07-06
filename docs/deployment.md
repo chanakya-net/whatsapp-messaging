@@ -4,7 +4,7 @@ Production deployment of MessageBridge: container configuration, CloudAMQP TLS, 
 
 ## Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │  Application (Kubernetes Pod)           │
 │  └─ MessageBridge Worker Service        │
@@ -79,22 +79,24 @@ PostgreSQL uses two bindings:
 - `MESSAGEBRIDGE_CONNECTION_STRING` feeds the processing store and outbox startup path in `MessageBridge.Infrastructure`
 - `ConnectionStrings:DefaultConnection` feeds the DbContext used by MassTransit registration and the readiness probe in `MessageBridge.Worker`
 
-| Setting | Path in Config | Example | Notes |
-|---------|----------------|---------|-------|
-| Environment | `ASPNETCORE_ENVIRONMENT` | `Production` | Controls `appsettings.json` variant |
-| Processing store connection | `MESSAGEBRIDGE_CONNECTION_STRING` | `Host=postgres.cloud;...` | Read by `AddMessageBridgeProcessingStore` |
-| Worker DbContext / readiness connection | `ConnectionStrings:DefaultConnection` | `Host=postgres.cloud;...` | Read by MassTransit registration and `PostgresReadinessProbe` |
-| RabbitMQ host | `RabbitMq:Host` | `amqp-broker-123.cloudamqp.com` | Read by AddMessageBridgeMassTransit |
-| RabbitMQ port | `RabbitMq:Port` | `5671` | Use 5671 for TLS, 5672 for plaintext (not recommended) |
-| RabbitMQ username | `RabbitMq:Username` | (from secret) | CloudAMQP username |
-| RabbitMq password | `RabbitMq:Password` | (from secret) | CloudAMQP password (DO NOT commit) |
-| RabbitMQ vhost | `RabbitMq:VirtualHost` | `/` | CloudAMQP vhost (usually `/`) |
-| RabbitMQ TLS | `RabbitMq:UseSsl` | `true` | Enable TLS for CloudAMQP |
-| Observability service name | `Observability:ServiceName` | `MessageBridge.Worker` | Service name for traces and metrics |
-| Observability OTLP endpoint | `Observability:OtlpEndpoint` | `http://otlp-collector:4318` | Optional; if provided, enables distributed traces |
-| Observability metrics endpoint | `Observability:MetricsEndpointEnabled` | `true` | Enable `/metrics` Prometheus endpoint |
+| Setting                                 | Path in Config                         | Example                         | Notes                                                                     |
+| --------------------------------------- | -------------------------------------- | ------------------------------- | ------------------------------------------------------------------------- |
+| Environment                             | `ASPNETCORE_ENVIRONMENT`               | `Production`                    | Controls `appsettings.json` variant                                       |
+| Processing store connection             | `MESSAGEBRIDGE_CONNECTION_STRING`      | `Host=postgres.cloud;...`       | Read by `AddMessageBridgeProcessingStore`                                 |
+| Worker DbContext / readiness connection | `ConnectionStrings:DefaultConnection`  | `Host=postgres.cloud;...`       | Read by MassTransit registration and `PostgresReadinessProbe`             |
+| RabbitMQ host                           | `RabbitMq:Host`                        | `amqp-broker-123.cloudamqp.com` | Read by AddMessageBridgeMassTransit                                       |
+| RabbitMQ port                           | `RabbitMq:Port`                        | `5671`                          | Use 5671 with `RabbitMq:UseSsl=true`; 5672 is plaintext (not recommended) |
+| RabbitMQ username                       | `RabbitMq:Username`                    | (from secret)                   | CloudAMQP username                                                        |
+| RabbitMq password                       | `RabbitMq:Password`                    | (from secret)                   | CloudAMQP password (DO NOT commit)                                        |
+| RabbitMQ vhost                          | `RabbitMq:VirtualHost`                 | `/`                             | CloudAMQP vhost (usually `/`)                                             |
+| RabbitMQ TLS                            | `RabbitMq:UseSsl`                      | `true`                          | Enable TLS for CloudAMQP                                                  |
+| Observability service name              | `Observability:ServiceName`            | `MessageBridge.Worker`          | Service name for traces and metrics                                       |
+| Observability OTLP endpoint             | `Observability:OtlpEndpoint`           | `http://otlp-collector:4318`    | Optional; if provided, enables distributed traces                         |
+| Observability metrics endpoint          | `Observability:MetricsEndpointEnabled` | `true`                          | Enable `/metrics` Prometheus endpoint                                     |
 
 ### Configuration Examples
+
+These examples show the worker's runtime configuration. `MessageBridge.Publisher` and `MessageBridge.Outbox` options are configured in application startup code when you consume those packages; they are not auto-bound from this file by the worker.
 
 #### appsettings.Production.json
 
@@ -123,18 +125,16 @@ PostgreSQL uses two bindings:
     "OtlpEndpoint": "http://otlp-collector:4318/v1/traces"
   },
   "MessageBridge": {
-    "Publisher": {
-      "ExchangeName": "messagebridge.commands",
-      "WhatsAppRoutingKey": "whatsapp.send",
-      "EmailRoutingKey": "email.confirmation"
+    "Topology": {
+      "EnvironmentPrefix": "prod"
     },
-    "Outbox": {
-      "BatchSize": 100,
-      "Concurrency": 4,
-      "PollIntervalMilliseconds": 500,
-      "MaxRetryAttempts": 3,
-      "RetryDelayMilliseconds": 50,
-      "RetryBackoffMultiplier": 2.0,
+    "TransportRetry": {
+      "ImmediateRetryCount": 3,
+      "DelayedRedeliveryIntervals": ["00:05:00", "00:15:00", "01:00:00"]
+    },
+    "ProcessingHistory": {
+      "RecoveryEnabled": true,
+      "StaleThresholdMinutes": 30,
       "CleanupEnabled": true,
       "CleanupRetentionHours": 24,
       "CleanupBatchSize": 500,
@@ -179,6 +179,7 @@ services:
 ```
 
 Environment file (`.env.prod`):
+
 ```bash
 ConnectionStrings__DefaultConnection=Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=your-password;SslMode=Require;
 MESSAGEBRIDGE_CONNECTION_STRING=Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=your-password;SslMode=Require;
@@ -235,7 +236,9 @@ kubectl create secret generic messagebridge-secrets \
 These literal keys are injected by `envFrom` as-is, so the pod sees the same `IConfiguration` binding names the worker already consumes.
 
 Reference in deployment:
-kubectl apply -f - <<EOF
+
+```bash
+kubectl apply -f - <<'EOF'
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -244,11 +247,11 @@ spec:
   template:
     spec:
       containers:
-      - name: worker
-        image: messagebridge:latest
-        envFrom:
-        - secretRef:
-            name: messagebridge-secrets
+        - name: worker
+          image: messagebridge:latest
+          envFrom:
+            - secretRef:
+                name: messagebridge-secrets
 EOF
 ```
 
@@ -290,26 +293,13 @@ MessageBridge connects to CloudAMQP (managed RabbitMQ) in production.
 
 ### TLS Configuration
 
-CloudAMQP requires TLS for security. MassTransit automatically enables TLS when connecting to port 5671.
+CloudAMQP requires TLS for production deployments.
 
-```csharp
-// In Program.cs
-services.AddMassTransit(cfg =>
-{
-    cfg.UsingRabbitMq((ctx, cfg) =>
-    {
-        cfg.Host(new Uri($"amqps://{host}:{port}/{vhost}"), h =>
-        {
-            h.Username(username);
-            h.Password(password);
-            h.UseCluster(c => { }); // Optional: for HA setup
-        });
-        
-        // TLS is automatically enabled for amqps:// scheme
-        // CA certificate validation is enabled by default
-    });
-});
-```
+- If you configure decomposed fields (`RabbitMq:Host`, `RabbitMq:Port`, `RabbitMq:Username`, `RabbitMq:Password`, `RabbitMq:VirtualHost`), set `RabbitMq:UseSsl=true` to enable TLS.
+- If you configure `RabbitMq:ConnectionString`, use an `amqps://` URI to select TLS explicitly.
+- Port `5671` is the usual TLS port, but the port number alone does not turn TLS on in the decomposed configuration path.
+
+The current transport wiring enables TLS only when the options require it, so the documentation must match the configuration shape you choose.
 
 ### Certificate Pinning (Advanced)
 
@@ -331,6 +321,7 @@ For extra security, pin the CloudAMQP certificate:
    - Encryption: at rest and in transit
 
 2. **Create application user** (least privilege):
+
    ```sql
    CREATE USER app WITH PASSWORD 'generated-secure-password';
    CREATE DATABASE messagebridge OWNER app;
@@ -339,7 +330,8 @@ For extra security, pin the CloudAMQP certificate:
    ```
 
 3. **Connection string**:
-   ```
+
+   ```text
    Host=postgres.rds.amazonaws.com;Port=5432;Database=messagebridge;Username=app;Password=...;SslMode=Require;
    ```
 
@@ -378,7 +370,7 @@ metadata:
     app: messagebridge
     component: worker
 spec:
-  replicas: 3  # HA setup
+  replicas: 3 # HA setup
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -399,45 +391,45 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
       containers:
-      - name: worker
-        image: messagebridge:latest
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: 8080
-          name: http
-        env:
-        - name: ASPNETCORE_ENVIRONMENT
-          value: "Production"
-        envFrom:
-        - secretRef:
-            name: messagebridge-secrets
-        resources:
-          requests:
-            memory: "512Mi"
-            cpu: "250m"
-          limits:
-            memory: "1Gi"
-            cpu: "1000m"
-        livenessProbe:
-          httpGet:
-            path: /health/live
-            port: http
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 3
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /health/ready
-            port: http
-          initialDelaySeconds: 10
-          periodSeconds: 5
-          timeoutSeconds: 3
-          failureThreshold: 1
-        lifecycle:
-          preStop:
-            exec:
-              command: ["/bin/sh", "-c", "sleep 15"]  # Graceful shutdown window
+        - name: worker
+          image: messagebridge:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: "Production"
+          envFrom:
+            - secretRef:
+                name: messagebridge-secrets
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 1
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 15"] # Graceful shutdown window
 ---
 apiVersion: v1
 kind: Service
@@ -449,9 +441,9 @@ spec:
     app: messagebridge
     component: worker
   ports:
-  - port: 8080
-    targetPort: http
-    protocol: TCP
+    - port: 8080
+      targetPort: http
+      protocol: TCP
   type: ClusterIP
 ---
 apiVersion: policy/v1
@@ -460,7 +452,7 @@ metadata:
   name: messagebridge-worker
   namespace: production
 spec:
-  minAvailable: 2  # Always keep 2 pods running
+  minAvailable: 2 # Always keep 2 pods running
   selector:
     matchLabels:
       app: messagebridge
@@ -485,18 +477,18 @@ spec:
   minReplicas: 3
   maxReplicas: 10
   metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 70
-  - type: Resource
-    resource:
-      name: memory
-      target:
-        type: Utilization
-        averageUtilization: 80
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
 ```
 
 ## Monitoring & Observability
@@ -519,16 +511,16 @@ Use the `Observability` section to control traces and the Prometheus scrape endp
 
 ```yaml
 scrape_configs:
-  - job_name: 'messagebridge'
+  - job_name: "messagebridge"
     kubernetes_sd_configs:
-    - role: pod
-      namespaces:
-        names:
-        - production
+      - role: pod
+        namespaces:
+          names:
+            - production
     relabel_configs:
-    - source_labels: [__meta_kubernetes_pod_label_app]
-      action: keep
-      regex: messagebridge
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: messagebridge
 ```
 
 ### Log Aggregation
@@ -583,6 +575,7 @@ app.Run();
 ```
 
 Kubernetes sends SIGTERM on pod termination:
+
 1. `preStop` hook waits 15 seconds (for load balancer drain)
 2. Application processes in-flight requests
 3. Pod is forcibly killed after `terminationGracePeriodSeconds` (default 30s)
@@ -635,7 +628,7 @@ The following decisions require manual intervention and cannot be automated:
 
 ### 3. Retention Policies
 
-- **Outbox retention** (default 7 days) — adjust based on compliance requirements
+- **Outbox retention** (package default: 24 hours) — adjust based on compliance requirements
 - **Backup frequency** — per data protection policy
 
 **Action**: Update configuration, schedule backups, implement retention cleanup jobs.
