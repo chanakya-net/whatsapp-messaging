@@ -51,33 +51,41 @@ ENTRYPOINT ["dotnet", "MessageBridge.Worker.dll"]
 # Build image
 docker build -t messagebridge:latest .
 
-# Run container
+# Run container with configuration via environment / JSON
 docker run \
   -p 8080:8080 \
-  -e RABBITMQ_HOST=rabbitmq.local \
-  -e RABBITMQ_PORT=5671 \
-  -e RABBITMQ_USERNAME=admin \
-  -e RABBITMQ_PASSWORD=$(cat /run/secrets/rabbitmq_password) \
-  -e DATABASE_CONNECTION_STRING="Host=postgres.local;Port=5432;Database=messagebridge;Username=app;Password=$(cat /run/secrets/db_password);" \
+  -e ASPNETCORE_ENVIRONMENT=Production \
+  -e "ConnectionStrings__MessageBridge=Host=postgres.local;Port=5432;Database=messagebridge;Username=app;Password=$(cat /run/secrets/db_password);" \
+  -e "RabbitMq__Host=rabbitmq.local" \
+  -e "RabbitMq__Port=5671" \
+  -e "RabbitMq__Username=admin" \
+  -e "RabbitMq__Password=$(cat /run/secrets/rabbitmq_password)" \
+  -e "RabbitMq__VirtualHost=/" \
+  -e "RabbitMq__UseSsl=true" \
+  -e "Observability__ServiceName=MessageBridge.Worker" \
+  -e "Observability__MetricsEndpointEnabled=true" \
   messagebridge:latest
 ```
 
 ## Environment Configuration
 
-### Required Environment Variables
+### Required Configuration
 
-| Variable | Example | Notes |
-|----------|---------|-------|
-| `ASPNETCORE_ENVIRONMENT` | `Production` | Controls `appsettings.json` variant |
-| `RABBITMQ_HOST` | `amqp-broker-123.cloudamqp.com` | CloudAMQP hostname |
-| `RABBITMQ_PORT` | `5671` | Use 5671 for TLS, 5672 for plaintext (not recommended) |
-| `RABBITMQ_USERNAME` | (from secret) | CloudAMQP username |
-| `RABBITMQ_PASSWORD` | (from secret) | CloudAMQP password (DO NOT commit) |
-| `RABBITMQ_VIRTUAL_HOST` | `/` | CloudAMQP vhost (usually `/`) |
-| `DATABASE_CONNECTION_STRING` | (from secret) | PostgreSQL connection string |
-| `MESSAGEBRIDGE_EXCHANGE_NAME` | `messagebridge.commands` | RabbitMQ exchange name |
-| `MESSAGEBRIDGE_WHATSAPP_ROUTING_KEY` | `whatsapp.send` | Routing key for WhatsApp messages |
-| `MESSAGEBRIDGE_EMAIL_ROUTING_KEY` | `email.confirmation` | Routing key for email messages |
+The worker binds configuration from `appsettings.json` and environment variables using the [Options pattern](https://learn.microsoft.com/en-us/dotnet/core/extensions/options).
+
+| Setting | Path in Config | Example | Notes |
+|---------|----------------|---------|-------|
+| Environment | `ASPNETCORE_ENVIRONMENT` | `Production` | Controls `appsettings.json` variant |
+| PostgreSQL connection | `ConnectionStrings:MessageBridge` | `Host=postgres.cloud;...` | Read by AddMessageBridgeProcessingStore |
+| RabbitMQ host | `RabbitMq:Host` | `amqp-broker-123.cloudamqp.com` | Read by AddMessageBridgeMassTransit |
+| RabbitMQ port | `RabbitMq:Port` | `5671` | Use 5671 for TLS, 5672 for plaintext (not recommended) |
+| RabbitMQ username | `RabbitMq:Username` | (from secret) | CloudAMQP username |
+| RabbitMq password | `RabbitMq:Password` | (from secret) | CloudAMQP password (DO NOT commit) |
+| RabbitMQ vhost | `RabbitMq:VirtualHost` | `/` | CloudAMQP vhost (usually `/`) |
+| RabbitMQ TLS | `RabbitMq:UseSsl` | `true` | Enable TLS for CloudAMQP |
+| Observability service name | `Observability:ServiceName` | `MessageBridge.Worker` | Service name for traces and metrics |
+| Observability OTLP endpoint | `Observability:OtlpEndpoint` | `http://otlp-collector:4318` | Optional; if provided, enables distributed traces |
+| Observability metrics endpoint | `Observability:MetricsEndpointEnabled` | `true` | Enable `/metrics` Prometheus endpoint |
 
 ### Configuration Examples
 
@@ -90,6 +98,22 @@ docker run \
       "Default": "Information",
       "MessageBridge": "Information"
     }
+  },
+  "ConnectionStrings": {
+    "MessageBridge": "Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=from-secret;SslMode=Require;"
+  },
+  "RabbitMq": {
+    "Host": "amqp-broker-123.cloudamqp.com",
+    "Port": 5671,
+    "Username": "from-secret",
+    "Password": "from-secret",
+    "VirtualHost": "/",
+    "UseSsl": true
+  },
+  "Observability": {
+    "ServiceName": "MessageBridge.Worker",
+    "MetricsEndpointEnabled": true,
+    "OtlpEndpoint": "http://otlp-collector:4318/v1/traces"
   },
   "MessageBridge": {
     "Publisher": {
@@ -109,18 +133,13 @@ docker run \
       "CleanupBatchSize": 500,
       "CleanupIntervalMilliseconds": 1000
     }
-  },
-  "OpenTelemetry": {
-    "Exporters": {
-      "Jaeger": {
-        "Endpoint": "http://jaeger-collector:4318/v1/traces"
-      }
-    }
   }
 }
 ```
 
 #### docker-compose.prod.yml (Reference)
+
+For production with secrets managed externally (e.g., Kubernetes Secrets, Azure Key Vault), pass configuration via environment variables:
 
 ```yaml
 version: "3.8"
@@ -132,15 +151,16 @@ services:
       - "8080:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: Production
-      RABBITMQ_HOST: ${RABBITMQ_HOST}
-      RABBITMQ_PORT: 5671
-      RABBITMQ_USERNAME_FILE: /run/secrets/rabbitmq_username
-      RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_password
-      DATABASE_CONNECTION_STRING_FILE: /run/secrets/db_connection_string
-    secrets:
-      - rabbitmq_username
-      - rabbitmq_password
-      - db_connection_string
+      ConnectionStrings__MessageBridge: ${DB_CONNECTION_STRING}
+      RabbitMq__Host: ${RABBITMQ_HOST}
+      RabbitMq__Port: "5671"
+      RabbitMq__Username: ${RABBITMQ_USERNAME}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD}
+      RabbitMq__VirtualHost: "/"
+      RabbitMq__UseSsl: "true"
+      Observability__ServiceName: MessageBridge.Worker
+      Observability__MetricsEndpointEnabled: "true"
+      Observability__OtlpEndpoint: ${OTLP_ENDPOINT:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
       interval: 10s
@@ -148,15 +168,18 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
-
-secrets:
-  rabbitmq_username:
-    file: ${SECRETS_DIR}/rabbitmq_username.txt
-  rabbitmq_password:
-    file: ${SECRETS_DIR}/rabbitmq_password.txt
-  db_connection_string:
-    file: ${SECRETS_DIR}/db_connection_string.txt
 ```
+
+Environment file (`.env.prod`):
+```bash
+DB_CONNECTION_STRING=Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=your-password;SslMode=Require;
+RABBITMQ_HOST=amqp-broker-123.cloudamqp.com
+RABBITMQ_USERNAME=your-username
+RABBITMQ_PASSWORD=your-password
+OTLP_ENDPOINT=http://otlp-collector:4318/v1/traces
+```
+
+Then run: `docker-compose --env-file .env.prod up`
 
 ## Secrets Management
 
