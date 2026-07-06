@@ -1,26 +1,31 @@
 using ErrorOr;
+using FluentValidation;
 using MassTransit;
 using MessageBridge.Contracts.V1;
 using MessageBridge.Infrastructure.Messaging.Mappers;
-using Wolverine;
+using MessageBridge.Application.Messages;
 
 namespace MessageBridge.Infrastructure.Messaging.Consumers;
 
 public sealed class SendWhatsAppMessageConsumer : IConsumer<SendWhatsAppMessageCommand>
 {
-    private readonly IMessageBus _messageBus;
+    private readonly MessageProcessingCoordinator _coordinator;
+    private readonly IValidator<SendWhatsAppMessage> _validator;
 
-    public SendWhatsAppMessageConsumer(IMessageBus messageBus)
+    public SendWhatsAppMessageConsumer(
+        MessageProcessingCoordinator coordinator,
+        IValidator<SendWhatsAppMessage> validator)
     {
-        _messageBus = messageBus;
+        _coordinator = coordinator;
+        _validator = validator;
     }
 
     public async Task Consume(ConsumeContext<SendWhatsAppMessageCommand> context)
     {
-        var result = await _messageBus.InvokeAsync<ErrorOr<Success>>(
+        await _coordinator.ConsumeAsync(
+            context,
             context.Message.ToApplicationCommand(),
+            _validator,
             context.CancellationToken);
-
-        ConsumerDispatchFailure.ThrowIfError(nameof(SendWhatsAppMessageCommand), result);
     }
 }

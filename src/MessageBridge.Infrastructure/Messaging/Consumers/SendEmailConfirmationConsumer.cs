@@ -1,26 +1,31 @@
 using ErrorOr;
+using FluentValidation;
 using MassTransit;
+using MessageBridge.Application.Messages;
 using MessageBridge.Contracts.V1;
 using MessageBridge.Infrastructure.Messaging.Mappers;
-using Wolverine;
 
 namespace MessageBridge.Infrastructure.Messaging.Consumers;
 
 public sealed class SendEmailConfirmationConsumer : IConsumer<SendEmailConfirmationCommand>
 {
-    private readonly IMessageBus _messageBus;
+    private readonly MessageProcessingCoordinator _coordinator;
+    private readonly IValidator<SendEmailConfirmation> _validator;
 
-    public SendEmailConfirmationConsumer(IMessageBus messageBus)
+    public SendEmailConfirmationConsumer(
+        MessageProcessingCoordinator coordinator,
+        IValidator<SendEmailConfirmation> validator)
     {
-        _messageBus = messageBus;
+        _coordinator = coordinator;
+        _validator = validator;
     }
 
     public async Task Consume(ConsumeContext<SendEmailConfirmationCommand> context)
     {
-        var result = await _messageBus.InvokeAsync<ErrorOr<Success>>(
+        await _coordinator.ConsumeAsync(
+            context,
             context.Message.ToApplicationCommand(),
+            _validator,
             context.CancellationToken);
-
-        ConsumerDispatchFailure.ThrowIfError(nameof(SendEmailConfirmationCommand), result);
     }
 }

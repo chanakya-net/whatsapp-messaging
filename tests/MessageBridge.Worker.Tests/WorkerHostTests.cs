@@ -4,9 +4,11 @@ using System.Reflection;
 using Google.Protobuf.WellKnownTypes;
 using MassTransit;
 using MessageBridge.Application.Abstractions;
+using MessageBridge.Application.Persistence;
 using MessageBridge.Contracts.V1;
 using MessageBridge.Application.Messages;
 using MessageBridge.Application.Providers;
+using MessageBridge.Domain.Processing;
 using MessageBridge.Infrastructure.Messaging.Consumers;
 using MessageBridge.Infrastructure.Messaging.Mappers;
 using MessageBridge.Infrastructure.Messaging.Options;
@@ -18,6 +20,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Wolverine;
 using Shouldly;
 using Xunit;
+using HandlerProcessingStore = MessageBridge.Application.Abstractions.IMessageProcessingStore;
+using LifecycleProcessingStore = MessageBridge.Application.Persistence.IMessageProcessingStore;
 
 namespace MessageBridge.Worker.Tests;
 
@@ -130,6 +134,7 @@ public sealed class WorkerHostTests
     {
         var sender = new TrackingWhatsAppMessageSender();
         var store = new TrackingMessageProcessingStore();
+        var lifecycleStore = new TrackingLifecycleMessageProcessingStore();
         var tenantConfigProvider = new TrackingTenantConfigurationProvider();
         var rateLimiter = new TrackingProviderRateLimiter();
 
@@ -139,6 +144,7 @@ public sealed class WorkerHostTests
                 services,
                 whatsAppSender: sender,
                 store: store,
+                lifecycleStore: lifecycleStore,
                 tenantConfigProvider: tenantConfigProvider,
                 rateLimiter: rateLimiter));
 
@@ -160,6 +166,7 @@ public sealed class WorkerHostTests
         await consumer.Consume(CreateConsumeContext(contract));
         sender.Messages.Count.ShouldBe(1);
         store.RecordedMessageIds.ShouldContain("message-001");
+        lifecycleStore.GetRequired("message-001", nameof(SendWhatsAppMessageCommand)).Status.ShouldBe(ProcessingStatus.Completed);
         tenantConfigProvider.CallCount.ShouldBe(1);
         rateLimiter.CallCount.ShouldBe(1);
         sender.Messages[0].TemplateParameters.ShouldNotBeNull();
@@ -170,6 +177,7 @@ public sealed class WorkerHostTests
     {
         var sender = new TrackingEmailConfirmationSender();
         var store = new TrackingMessageProcessingStore();
+        var lifecycleStore = new TrackingLifecycleMessageProcessingStore();
         var tenantConfigProvider = new TrackingTenantConfigurationProvider();
         var rateLimiter = new TrackingProviderRateLimiter();
 
@@ -179,6 +187,7 @@ public sealed class WorkerHostTests
                 services,
                 emailSender: sender,
                 store: store,
+                lifecycleStore: lifecycleStore,
                 tenantConfigProvider: tenantConfigProvider,
                 rateLimiter: rateLimiter));
 
@@ -200,6 +209,7 @@ public sealed class WorkerHostTests
         await consumer.Consume(CreateConsumeContext(contract));
         sender.Emails.Count.ShouldBe(1);
         store.RecordedMessageIds.ShouldContain("message-002");
+        lifecycleStore.GetRequired("message-002", nameof(SendEmailConfirmationCommand)).Status.ShouldBe(ProcessingStatus.Completed);
         tenantConfigProvider.CallCount.ShouldBe(1);
         rateLimiter.CallCount.ShouldBe(1);
         sender.Emails[0].RecipientEmailAddress.ShouldBe("user@example.com");
@@ -285,7 +295,8 @@ public sealed class WorkerHostTests
         {
             ["RabbitMq:Host"] = "localhost",
             ["RabbitMq:Username"] = "guest",
-            ["RabbitMq:Password"] = "guest"
+            ["RabbitMq:Password"] = "guest",
+            ["MessageBridge:TransportRetry:EnableErrorQueueForwarding"] = "false"
         };
 
     private static ConsumeContext<TMessage> CreateConsumeContext<TMessage>(TMessage message)
@@ -296,13 +307,15 @@ public sealed class WorkerHostTests
         IServiceCollection services,
         IWhatsAppMessageSender? whatsAppSender = null,
         IEmailConfirmationSender? emailSender = null,
-        IMessageProcessingStore? store = null,
+        HandlerProcessingStore? store = null,
+        LifecycleProcessingStore? lifecycleStore = null,
         ITenantConfigurationProvider? tenantConfigProvider = null,
         IProviderRateLimiter? rateLimiter = null)
     {
         services.AddSingleton<IWhatsAppMessageSender>(whatsAppSender ?? new TrackingWhatsAppMessageSender());
         services.AddSingleton<IEmailConfirmationSender>(emailSender ?? new TrackingEmailConfirmationSender());
-        services.AddSingleton<IMessageProcessingStore>(store ?? new TrackingMessageProcessingStore());
+        services.AddSingleton<HandlerProcessingStore>(store ?? new TrackingMessageProcessingStore());
+        services.AddSingleton<LifecycleProcessingStore>(lifecycleStore ?? new TrackingLifecycleMessageProcessingStore());
         services.AddSingleton<ITenantConfigurationProvider>(tenantConfigProvider ?? new TrackingTenantConfigurationProvider());
         services.AddSingleton<IProviderRateLimiter>(rateLimiter ?? new TrackingProviderRateLimiter());
     }
@@ -349,7 +362,7 @@ public sealed class WorkerHostTests
         }
     }
 
-    private sealed class TrackingMessageProcessingStore : IMessageProcessingStore
+    private sealed class TrackingMessageProcessingStore : HandlerProcessingStore
     {
         public List<string> RecordedMessageIds { get; } = [];
 
@@ -357,6 +370,77 @@ public sealed class WorkerHostTests
         {
             RecordedMessageIds.Add(messageId);
             return Task.FromResult<ErrorOr<Success>>(new Success());
+        }
+    }
+
+    private sealed class TrackingLifecycleMessageProcessingStore : LifecycleProcessingStore
+    {
+        private readonly Dictionary<(string MessageId, string MessageType), MessageProcessingSnapshot> _records = [];
+
+        public Task<CreateMessageProcessingResult> CreateAsync(
+            CreateMessageProcessingRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var key = (request.MessageId, request.MessageType);
+            if (_records.TryGetValue(key, out var existing))
+            {
+                return Task.FromResult(
+                    new CreateMessageProcessingResult(CreateMessageProcessingOutcome.Duplicate, existing));
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var created = new MessageProcessingSnapshot(
+                Guid.NewGuid(),
+                request.MessageId,
+                request.MessageType,
+                ProcessingStatus.Received,
+                request.PayloadHash,
+                request.Provider,
+                new Dictionary<string, string?>(request.ProviderMetadata),
+                null,
+                1,
+                now,
+                now,
+                null);
+            _records[key] = created;
+            return Task.FromResult(
+                new CreateMessageProcessingResult(CreateMessageProcessingOutcome.Created, created));
+        }
+
+        public Task<MessageProcessingSnapshot?> GetAsync(
+            string messageId,
+            string messageType,
+            CancellationToken cancellationToken = default)
+        {
+            _records.TryGetValue((messageId, messageType), out var snapshot);
+            return Task.FromResult(snapshot);
+        }
+
+        public Task<MessageProcessingSnapshot> UpdateStatusAsync(
+            string messageId,
+            string messageType,
+            ProcessingStatus status,
+            string? failureReason = null,
+            CancellationToken cancellationToken = default)
+        {
+            var current = GetRequired(messageId, messageType);
+            var updatedAt = DateTimeOffset.UtcNow;
+            var updated = current with
+            {
+                Status = status,
+                FailureReason = failureReason,
+                UpdatedAt = updatedAt,
+                ProcessedAt = status is ProcessingStatus.Completed or ProcessingStatus.Failed or ProcessingStatus.Rejected
+                    ? updatedAt
+                    : null
+            };
+            _records[(messageId, messageType)] = updated;
+            return Task.FromResult(updated);
+        }
+
+        public MessageProcessingSnapshot GetRequired(string messageId, string messageType)
+        {
+            return _records[(messageId, messageType)];
         }
     }
 
