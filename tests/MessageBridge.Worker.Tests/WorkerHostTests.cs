@@ -295,8 +295,7 @@ public sealed class WorkerHostTests
         {
             ["RabbitMq:Host"] = "localhost",
             ["RabbitMq:Username"] = "guest",
-            ["RabbitMq:Password"] = "guest",
-            ["MessageBridge:TransportRetry:EnableErrorQueueForwarding"] = "false"
+            ["RabbitMq:Password"] = "guest"
         };
 
     private static ConsumeContext<TMessage> CreateConsumeContext<TMessage>(TMessage message)

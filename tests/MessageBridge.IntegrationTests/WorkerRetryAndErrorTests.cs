@@ -100,6 +100,7 @@ public sealed class WorkerRetryAndErrorTests : IAsyncLifetime
         attempts.Count.ShouldBe(4);
         record.Status.ShouldBe(ProcessingStatus.Completed);
         (attempts[3] - attempts[0]).ShouldBeLessThan(TimeSpan.FromSeconds(5));
+        (await harness.GetQueueDepthAsync("send-whats-app-message_error")).ShouldBe(0);
     }
 
     [Fact]
@@ -113,15 +114,22 @@ public sealed class WorkerRetryAndErrorTests : IAsyncLifetime
                 4,
                 Error.Failure("Provider.Send", "temporary outage token=secret-value")));
 
-        await using var harness = await StartHarnessAsync(bus, [250.Milliseconds(), 500.Milliseconds(), 1.Seconds()]);
+        await using var harness = await StartHarnessAsync(bus, [1.Seconds(), 2.Seconds(), 3.Seconds()]);
         await harness.PublishAsync(CreateWhatsAppCommand(messageId));
 
+        var sawFailedBeforeRecovery = await harness.ObservedStatusWithinAsync(
+            messageId,
+            nameof(SendWhatsAppMessageCommand),
+            ProcessingStatus.Failed,
+            900.Milliseconds());
         var record = await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Completed);
         var attempts = bus.GetAttempts(messageId);
 
+        sawFailedBeforeRecovery.ShouldBeFalse();
         attempts.Count.ShouldBeGreaterThanOrEqualTo(5);
-        (attempts[4] - attempts[3]).ShouldBeGreaterThanOrEqualTo(150.Milliseconds());
+        (attempts[4] - attempts[3]).ShouldBeGreaterThanOrEqualTo(900.Milliseconds());
         record.Status.ShouldBe(ProcessingStatus.Completed);
+        (await harness.GetQueueDepthAsync("send-whats-app-message_error")).ShouldBe(0);
     }
 
     [Fact]
@@ -145,6 +153,8 @@ public sealed class WorkerRetryAndErrorTests : IAsyncLifetime
         record.FailureReason.ShouldNotContain("super-secret-token");
 
         await harness.WaitForQueueDepthAsync("send-whats-app-message_error", 1);
+        await Task.Delay(500);
+        (await harness.GetQueueDepthAsync("send-whats-app-message_error")).ShouldBe(1);
         bus.GetAttemptCount(messageId).ShouldBeGreaterThan(4);
     }
 
@@ -263,6 +273,33 @@ public sealed class WorkerRetryAndErrorTests : IAsyncLifetime
         {
             var (depth, _) = await GetQueueDepthWithListingAsync(queueSuffix);
             return depth;
+        }
+
+        public async Task<bool> ObservedStatusWithinAsync(
+            string messageId,
+            string messageType,
+            ProcessingStatus expectedStatus,
+            TimeSpan duration)
+        {
+            var timeoutAt = DateTimeOffset.UtcNow.Add(duration);
+
+            while (DateTimeOffset.UtcNow < timeoutAt)
+            {
+                await using var dbContext = CreateDbContext();
+                var status = await dbContext.MessageProcessingRecords
+                    .Where(item => item.MessageId == messageId && item.MessageType == messageType)
+                    .Select(item => (ProcessingStatus?)item.Status)
+                    .SingleOrDefaultAsync();
+
+                if (status == expectedStatus)
+                {
+                    return true;
+                }
+
+                await Task.Delay(50);
+            }
+
+            return false;
         }
 
         private async Task<(int Depth, string Listing)> GetQueueDepthWithListingAsync(string queueSuffix)

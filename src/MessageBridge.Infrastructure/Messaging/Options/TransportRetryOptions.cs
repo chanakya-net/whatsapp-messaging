@@ -12,7 +12,5 @@ public sealed class TransportRetryOptions
 
     public int ImmediateRetryCount { get; set; } = 3;
 
-    public bool EnableErrorQueueForwarding { get; set; } = true;
-
     public TimeSpan[] DelayedRedeliveryIntervals { get; set; } = [];
 }
