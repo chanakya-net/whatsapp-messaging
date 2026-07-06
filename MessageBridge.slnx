@@ -1,0 +1,24 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/MessageBridge.SampleClient/MessageBridge.SampleClient.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/MessageBridge.Application/MessageBridge.Application.csproj" />
+    <Project Path="src/MessageBridge.Contracts/MessageBridge.Contracts.csproj" />
+    <Project Path="src/MessageBridge.Domain/MessageBridge.Domain.csproj" />
+    <Project Path="src/MessageBridge.Infrastructure/MessageBridge.Infrastructure.csproj" />
+    <Project Path="src/MessageBridge.Publisher.EntityFrameworkCore/MessageBridge.Publisher.EntityFrameworkCore.csproj" />
+    <Project Path="src/MessageBridge.Publisher/MessageBridge.Publisher.csproj" />
+    <Project Path="src/MessageBridge.Worker/MessageBridge.Worker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MessageBridge.Application.Tests/MessageBridge.Application.Tests.csproj" />
+    <Project Path="tests/MessageBridge.Contracts.Tests/MessageBridge.Contracts.Tests.csproj" />
+    <Project Path="tests/MessageBridge.Domain.Tests/MessageBridge.Domain.Tests.csproj" />
+    <Project Path="tests/MessageBridge.Infrastructure.Tests/MessageBridge.Infrastructure.Tests.csproj" />
+    <Project Path="tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj" />
+    <Project Path="tests/MessageBridge.Publisher.EntityFrameworkCore.Tests/MessageBridge.Publisher.EntityFrameworkCore.Tests.csproj" />
+    <Project Path="tests/MessageBridge.Publisher.Tests/MessageBridge.Publisher.Tests.csproj" />
+    <Project Path="tests/MessageBridge.Worker.Tests/MessageBridge.Worker.Tests.csproj" />
+  </Folder>
+</Solution>
