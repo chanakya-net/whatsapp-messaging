@@ -1,0 +1,9 @@
+version: v1
+dirs:
+  - src/MessageBridge.Contracts/protos
+breaking:
+  use:
+    - FILE
+lint:
+  use:
+    - DEFAULT

@@ -1,0 +1,18 @@
+edition = "2024";
+
+package messagebridge.contracts.v1;
+
+option csharp_namespace = "MessageBridge.Contracts.V1";
+
+import "google/protobuf/timestamp.proto";
+
+message SendWhatsAppMessageCommand {
+  string message_id = 1;
+  string tenant_id = 2;
+  string recipient_phone_number = 3;
+  string template_name = 4;
+  string template_language = 5;
+  map<string, string> template_parameters = 6;
+  string correlation_id = 7;
+  google.protobuf.Timestamp requested_at_utc = 8;
+}
