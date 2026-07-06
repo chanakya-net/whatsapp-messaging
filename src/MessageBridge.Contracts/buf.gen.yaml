@@ -1,5 +1,7 @@
-version: v1
-
+version: v2
+clean: true
 plugins:
-  - plugin: buf.build/protocolbuffers/csharp
+  - remote: buf.build/protocolbuffers/csharp
     out: generated
+inputs:
+  - directory: protos
