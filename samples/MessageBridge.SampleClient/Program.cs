@@ -1,4 +1,5 @@
-﻿using MessageBridge.Publisher;
+﻿using MassTransit;
+using MessageBridge.Publisher;
 using MessageBridge.Publisher.EntityFrameworkCore;
 using MessageBridge.Publisher.Requests;
 using MessageBridge.SampleClient;
@@ -8,6 +9,7 @@ using Microsoft.Extensions.Logging;
 
 var services = new ServiceCollection();
 services.AddLogging(cfg => cfg.AddConsole());
+services.AddMassTransit(bus => bus.UsingInMemory());
 services.AddMessageBridgePublisher(opts =>
 {
     opts.DefaultTenantId = "sample-tenant";
@@ -60,6 +62,7 @@ else
 Console.WriteLine("\n--- Outbox Sample ---");
 var outboxServices = new ServiceCollection();
 outboxServices.AddLogging(cfg => cfg.AddConsole());
+outboxServices.AddMassTransit(bus => bus.UsingInMemory());
 outboxServices.AddDbContext<SampleDbContext>(opts => opts.UseInMemoryDatabase("samples"));
 outboxServices.AddMessageBridgePublisher(opts =>
 {
@@ -76,7 +79,6 @@ outboxServices.AddMessageBridgeOutboxPublisher<SampleDbContext>(opts =>
 });
 
 var outboxProvider = outboxServices.BuildServiceProvider();
-var outboxWriter = outboxProvider.GetRequiredService<MessageBridge.Publisher.EntityFrameworkCore.Outbox.IMessageBridgeOutboxWriter>();
 
 Console.WriteLine("✓ Outbox publisher configured (uses sample DbContext with in-memory database)");
 Console.WriteLine("  - Batch size: 100");
