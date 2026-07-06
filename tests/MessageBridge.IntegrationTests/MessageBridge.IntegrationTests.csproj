@@ -9,12 +9,15 @@
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="FluentAssertions" Version="6.12.1" />
+    <PackageReference Include="MassTransit" Version="8.4.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.5" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.5" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="RabbitMQ.Client" Version="7.1.2" />
     <PackageReference Include="Shouldly" Version="4.3.0" />
+    <PackageReference Include="Testcontainers" Version="4.8.1" />
     <PackageReference Include="Testcontainers.PostgreSql" Version="4.8.1" />
     <PackageReference Include="Testcontainers.RabbitMq" Version="4.8.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
@@ -22,13 +25,16 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Using Include="Xunit" />
-  </ItemGroup>
-
-  <ItemGroup>
+    <ProjectReference Include="..\..\src\MessageBridge.Application\MessageBridge.Application.csproj" />
     <ProjectReference Include="..\..\src\MessageBridge.Contracts\MessageBridge.Contracts.csproj" />
     <ProjectReference Include="..\..\src\MessageBridge.Domain\MessageBridge.Domain.csproj" />
     <ProjectReference Include="..\..\src\MessageBridge.Infrastructure\MessageBridge.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\MessageBridge.Publisher\MessageBridge.Publisher.csproj" />
+    <ProjectReference Include="..\..\src\MessageBridge.Worker\MessageBridge.Worker.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
   </ItemGroup>
 
 </Project>
