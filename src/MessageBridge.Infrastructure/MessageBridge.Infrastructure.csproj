@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ErrorOr" Version="2.1.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MessageBridge.Application\MessageBridge.Application.csproj" />
+    <ProjectReference Include="..\MessageBridge.Domain\MessageBridge.Domain.csproj" />
+    <ProjectReference Include="..\MessageBridge.Contracts\MessageBridge.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>
