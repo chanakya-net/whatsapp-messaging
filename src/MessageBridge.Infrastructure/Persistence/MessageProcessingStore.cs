@@ -70,7 +70,10 @@ public sealed class MessageProcessingStore(MessageBridgeDbContext dbContext) : I
         record.Status = status;
         record.FailureReason = failureReason;
         record.UpdatedAt = DateTimeOffset.UtcNow;
-        record.ProcessedAt = status is ProcessingStatus.Completed or ProcessingStatus.Failed or ProcessingStatus.Abandoned
+        record.ProcessedAt = status is ProcessingStatus.Completed
+            or ProcessingStatus.Failed
+            or ProcessingStatus.Abandoned
+            or ProcessingStatus.Rejected
             ? record.UpdatedAt
             : null;
 

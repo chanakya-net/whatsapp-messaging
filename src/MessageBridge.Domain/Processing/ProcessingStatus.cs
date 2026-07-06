@@ -6,5 +6,6 @@ public enum ProcessingStatus
     Processing = 1,
     Completed = 2,
     Failed = 3,
-    Abandoned = 4
+    Abandoned = 4,
+    Rejected = 5
 }
