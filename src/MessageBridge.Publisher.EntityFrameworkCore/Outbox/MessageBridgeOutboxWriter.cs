@@ -14,6 +14,6 @@ public sealed class MessageBridgeOutboxWriter : IMessageBridgeOutboxWriter
     public async Task WriteAsync(MessageBridgeOutboxMessage message, CancellationToken cancellationToken = default)
     {
         _context.Set<MessageBridgeOutboxMessage>().Add(message);
-        await _context.SaveChangesAsync(cancellationToken);
+        await Task.CompletedTask;
     }
 }

@@ -122,6 +122,7 @@ public class MessageBridgeOutboxStorageTests
             };
 
             await writer.WriteAsync(outboxMessage);
+            await context.SaveChangesAsync();
         }
 
         using (var context = new TestDbContext(optionsBuilder.Options))

@@ -1,6 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
-using Microsoft.EntityFrameworkCore.Infrastructure;
 
 namespace MessageBridge.Publisher.EntityFrameworkCore.Outbox;
 
