@@ -1,6 +1,5 @@
 using System.Collections.ObjectModel;
 using System.Net.Mime;
-using System.Text;
 using Google.Protobuf;
 
 namespace MessageBridge.Infrastructure.Messaging;
@@ -15,7 +14,6 @@ public sealed class MessageBridgeCommandDescriptor
         Type contractType,
         string messageUrn,
         ContentType contentType,
-        Encoding encoding,
         Func<IMessage, byte[]> serialize,
         Func<byte[], IMessage> deserialize)
     {
@@ -23,7 +21,6 @@ public sealed class MessageBridgeCommandDescriptor
         ContractType = contractType;
         MessageUrn = messageUrn;
         ContentType = contentType;
-        Encoding = encoding;
         _serialize = serialize;
         _deserialize = deserialize;
 
@@ -31,7 +28,6 @@ public sealed class MessageBridgeCommandDescriptor
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 [MessageBridgeHeaders.ContentTypeHeader] = ContentType.MediaType,
-                [MessageBridgeHeaders.EncodingHeader] = Encoding.WebName,
                 [MessageBridgeHeaders.CommandHeader] = CommandName,
                 [MessageBridgeHeaders.MessageUrnHeader] = MessageUrn
             });
@@ -44,8 +40,6 @@ public sealed class MessageBridgeCommandDescriptor
     public string MessageUrn { get; }
 
     public ContentType ContentType { get; }
-
-    public Encoding Encoding { get; }
 
     public IReadOnlyDictionary<string, string> Headers { get; }
 
@@ -63,7 +57,6 @@ public sealed class MessageBridgeCommandDescriptor
             contractType,
             messageUrn,
             new ContentType(MessageBridgeHeaders.ProtobufContentType),
-            Encoding.UTF8,
             message => serialize((TMessage)message),
             bytes => deserialize(bytes));
     }

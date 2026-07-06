@@ -1,3 +1,4 @@
+using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using MessageBridge.Contracts.V1;
 using MessageBridge.Infrastructure.Messaging;
@@ -36,11 +37,11 @@ public sealed class MessageBridgeSerializationTests
 
         payload.Descriptor.ShouldBe(MessageBridgeCommandRegistry.GetRequired<SendWhatsAppMessageCommand>());
         payload.Headers[MessageBridgeHeaders.ContentTypeHeader].ShouldBe(MessageBridgeHeaders.ProtobufContentType);
-        payload.Headers[MessageBridgeHeaders.EncodingHeader].ShouldBe(MessageBridgeHeaders.Utf8Encoding);
         payload.Headers[MessageBridgeHeaders.CommandHeader].ShouldBe(nameof(SendWhatsAppMessageCommand));
         payload.Headers[MessageBridgeHeaders.MessageUrnHeader].ShouldBe("urn:message:MessageBridge.Contracts.V1:SendWhatsAppMessageCommand");
 
         var deserialized = MessageBridgeCommandSerialization.Deserialize<SendWhatsAppMessageCommand>(payload.Body);
+        var nonGenericDeserialized = MessageBridgeCommandSerialization.Deserialize(payload.Body, payload.Descriptor);
 
         deserialized.MessageId.ShouldBe(original.MessageId);
         deserialized.TenantId.ShouldBe(original.TenantId);
@@ -52,6 +53,8 @@ public sealed class MessageBridgeSerializationTests
         deserialized.CorrelationId.ShouldBe(original.CorrelationId);
         deserialized.RequestedAtUtc.Seconds.ShouldBe(original.RequestedAtUtc.Seconds);
         deserialized.RequestedAtUtc.Nanos.ShouldBe(original.RequestedAtUtc.Nanos);
+        nonGenericDeserialized.ShouldBeOfType<SendWhatsAppMessageCommand>();
+        ((SendWhatsAppMessageCommand)nonGenericDeserialized).MessageId.ShouldBe(original.MessageId);
     }
 
     [Fact]
@@ -73,13 +76,16 @@ public sealed class MessageBridgeSerializationTests
         };
 
         var payload = MessageBridgeCommandSerialization.Serialize(original);
+        var nonGenericPayload = MessageBridgeCommandSerialization.Serialize((IMessage)original);
         var deserialized = MessageBridgeCommandSerialization.Deserialize<SendEmailConfirmationCommand>(payload.Body);
 
         payload.Descriptor.ShouldBe(MessageBridgeCommandRegistry.GetRequired<SendEmailConfirmationCommand>());
         payload.Headers[MessageBridgeHeaders.ContentTypeHeader].ShouldBe(MessageBridgeHeaders.ProtobufContentType);
-        payload.Headers[MessageBridgeHeaders.EncodingHeader].ShouldBe(MessageBridgeHeaders.Utf8Encoding);
         payload.Headers[MessageBridgeHeaders.CommandHeader].ShouldBe(nameof(SendEmailConfirmationCommand));
         payload.Headers[MessageBridgeHeaders.MessageUrnHeader].ShouldBe("urn:message:MessageBridge.Contracts.V1:SendEmailConfirmationCommand");
+        nonGenericPayload.Descriptor.ShouldBe(payload.Descriptor);
+        nonGenericPayload.Body.ShouldBe(payload.Body);
+        nonGenericPayload.Headers.ShouldBe(payload.Headers);
 
         deserialized.MessageId.ShouldBe(original.MessageId);
         deserialized.TenantId.ShouldBe(original.TenantId);
@@ -91,5 +97,20 @@ public sealed class MessageBridgeSerializationTests
         deserialized.RequestedAtUtc.Nanos.ShouldBe(original.RequestedAtUtc.Nanos);
         deserialized.ExpiresAtUtc.Seconds.ShouldBe(original.ExpiresAtUtc.Seconds);
         deserialized.ExpiresAtUtc.Nanos.ShouldBe(original.ExpiresAtUtc.Nanos);
+    }
+
+    [Fact]
+    public void Registry_Throws_For_Unregistered_Message_Type()
+    {
+        Should.Throw<KeyNotFoundException>(() => MessageBridgeCommandRegistry.GetRequired<Timestamp>());
+    }
+
+    [Fact]
+    public void Descriptor_Throws_When_Message_Type_Does_Not_Match()
+    {
+        var descriptor = MessageBridgeCommandRegistry.GetRequired<SendWhatsAppMessageCommand>();
+        var message = new SendEmailConfirmationCommand();
+
+        Should.Throw<ArgumentException>(() => descriptor.Serialize(message));
     }
 }
