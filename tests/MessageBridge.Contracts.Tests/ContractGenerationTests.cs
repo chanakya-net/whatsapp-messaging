@@ -102,5 +102,9 @@ public class ContractGenerationTests
         Assert.Equal(original.RecipientName, deserialized.RecipientName);
         Assert.Equal(original.ConfirmationToken, deserialized.ConfirmationToken);
         Assert.Equal(original.CorrelationId, deserialized.CorrelationId);
+        Assert.NotNull(deserialized.ExpiresAtUtc);
+        Assert.NotNull(deserialized.RequestedAtUtc);
+        Assert.Equal(original.ExpiresAtUtc.Seconds, deserialized.ExpiresAtUtc.Seconds);
+        Assert.Equal(original.RequestedAtUtc.Seconds, deserialized.RequestedAtUtc.Seconds);
     }
 }
