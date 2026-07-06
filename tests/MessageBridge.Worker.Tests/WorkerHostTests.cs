@@ -129,7 +129,14 @@ public sealed class WorkerHostTests
 
         var exception = Assert.Throws<InvalidOperationException>(() => factory.CreateClient());
 
-        exception.Message.ShouldContain(nameof(IWhatsAppMessageSender));
+        exception.Message.ShouldContain("Unable to resolve service for type");
+        new[]
+        {
+            nameof(IWhatsAppMessageSender),
+            nameof(IEmailConfirmationSender),
+            nameof(ITenantConfigurationProvider),
+            nameof(IProviderRateLimiter)
+        }.Any(exception.Message.Contains).ShouldBeTrue(exception.Message);
     }
 
     [Fact]
