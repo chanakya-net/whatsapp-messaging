@@ -4,9 +4,12 @@ using LegacyMessageProcessingStore = MessageBridge.Application.Abstractions.IMes
 using MessageBridge.Infrastructure.Messaging;
 using MessageBridge.Infrastructure.Messaging.Processing;
 using MessageBridge.Infrastructure.Persistence;
+using MessageBridge.Infrastructure.Providers;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using MessageBridge.Application.Providers;
+using Microsoft.Extensions.Options;
 
 namespace MessageBridge.Infrastructure;
 
@@ -18,6 +21,22 @@ public static class DependencyInjection
     {
         services.AddMessageBridgeMassTransit(configuration);
         services.AddMessageBridgeProcessingStore(configuration);
+        services.AddMessageBridgeProviders(configuration);
+        return services;
+    }
+
+    private static IServiceCollection AddMessageBridgeProviders(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddOptions<ProviderOptions>()
+            .Bind(configuration.GetSection(ProviderOptions.SectionName))
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+        services.AddSingleton<IValidateOptions<ProviderOptions>, ProviderOptionsValidator>();
+        services.AddSingleton<IWhatsAppMessageSender, PlaceholderWhatsAppMessageSender>();
+        services.AddSingleton<IEmailConfirmationSender, PlaceholderEmailConfirmationSender>();
+
         return services;
     }
 
