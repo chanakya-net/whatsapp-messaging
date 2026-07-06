@@ -55,7 +55,8 @@ docker build -t messagebridge:latest .
 docker run \
   -p 8080:8080 \
   -e ASPNETCORE_ENVIRONMENT=Production \
-  -e "ConnectionStrings__MessageBridge=Host=postgres.local;Port=5432;Database=messagebridge;Username=app;Password=$(cat /run/secrets/db_password);" \
+  -e "ConnectionStrings__DefaultConnection=Host=postgres.local;Port=5432;Database=messagebridge;Username=app;Password=$(cat /run/secrets/db_password);" \
+  -e "MESSAGEBRIDGE_CONNECTION_STRING=Host=postgres.local;Port=5432;Database=messagebridge;Username=app;Password=$(cat /run/secrets/db_password);" \
   -e "RabbitMq__Host=rabbitmq.local" \
   -e "RabbitMq__Port=5671" \
   -e "RabbitMq__Username=admin" \
@@ -73,10 +74,16 @@ docker run \
 
 The worker binds configuration from `appsettings.json` and environment variables using the [Options pattern](https://learn.microsoft.com/en-us/dotnet/core/extensions/options).
 
+PostgreSQL uses two bindings:
+
+- `MESSAGEBRIDGE_CONNECTION_STRING` feeds the processing store and outbox startup path in `MessageBridge.Infrastructure`
+- `ConnectionStrings:DefaultConnection` feeds the DbContext used by MassTransit registration and the readiness probe in `MessageBridge.Worker`
+
 | Setting | Path in Config | Example | Notes |
 |---------|----------------|---------|-------|
 | Environment | `ASPNETCORE_ENVIRONMENT` | `Production` | Controls `appsettings.json` variant |
-| PostgreSQL connection | `ConnectionStrings:MessageBridge` | `Host=postgres.cloud;...` | Read by AddMessageBridgeProcessingStore |
+| Processing store connection | `MESSAGEBRIDGE_CONNECTION_STRING` | `Host=postgres.cloud;...` | Read by `AddMessageBridgeProcessingStore` |
+| Worker DbContext / readiness connection | `ConnectionStrings:DefaultConnection` | `Host=postgres.cloud;...` | Read by MassTransit registration and `PostgresReadinessProbe` |
 | RabbitMQ host | `RabbitMq:Host` | `amqp-broker-123.cloudamqp.com` | Read by AddMessageBridgeMassTransit |
 | RabbitMQ port | `RabbitMq:Port` | `5671` | Use 5671 for TLS, 5672 for plaintext (not recommended) |
 | RabbitMQ username | `RabbitMq:Username` | (from secret) | CloudAMQP username |
@@ -100,7 +107,7 @@ The worker binds configuration from `appsettings.json` and environment variables
     }
   },
   "ConnectionStrings": {
-    "MessageBridge": "Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=from-secret;SslMode=Require;"
+    "DefaultConnection": "Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=from-secret;SslMode=Require;"
   },
   "RabbitMq": {
     "Host": "amqp-broker-123.cloudamqp.com",
@@ -151,16 +158,17 @@ services:
       - "8080:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: Production
-      ConnectionStrings__MessageBridge: ${DB_CONNECTION_STRING}
-      RabbitMq__Host: ${RABBITMQ_HOST}
-      RabbitMq__Port: "5671"
-      RabbitMq__Username: ${RABBITMQ_USERNAME}
-      RabbitMq__Password: ${RABBITMQ_PASSWORD}
-      RabbitMq__VirtualHost: "/"
-      RabbitMq__UseSsl: "true"
-      Observability__ServiceName: MessageBridge.Worker
-      Observability__MetricsEndpointEnabled: "true"
-      Observability__OtlpEndpoint: ${OTLP_ENDPOINT:-}
+      ConnectionStrings__DefaultConnection: ${ConnectionStrings__DefaultConnection}
+      MESSAGEBRIDGE_CONNECTION_STRING: ${MESSAGEBRIDGE_CONNECTION_STRING}
+      RabbitMq__Host: ${RabbitMq__Host}
+      RabbitMq__Port: ${RabbitMq__Port:-5671}
+      RabbitMq__Username: ${RabbitMq__Username}
+      RabbitMq__Password: ${RabbitMq__Password}
+      RabbitMq__VirtualHost: ${RabbitMq__VirtualHost:-/}
+      RabbitMq__UseSsl: ${RabbitMq__UseSsl:-true}
+      Observability__ServiceName: ${Observability__ServiceName:-MessageBridge.Worker}
+      Observability__MetricsEndpointEnabled: ${Observability__MetricsEndpointEnabled:-true}
+      Observability__OtlpEndpoint: ${Observability__OtlpEndpoint:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
       interval: 10s
@@ -172,11 +180,17 @@ services:
 
 Environment file (`.env.prod`):
 ```bash
-DB_CONNECTION_STRING=Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=your-password;SslMode=Require;
-RABBITMQ_HOST=amqp-broker-123.cloudamqp.com
-RABBITMQ_USERNAME=your-username
-RABBITMQ_PASSWORD=your-password
-OTLP_ENDPOINT=http://otlp-collector:4318/v1/traces
+ConnectionStrings__DefaultConnection=Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=your-password;SslMode=Require;
+MESSAGEBRIDGE_CONNECTION_STRING=Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=your-password;SslMode=Require;
+RabbitMq__Host=amqp-broker-123.cloudamqp.com
+RabbitMq__Port=5671
+RabbitMq__Username=your-username
+RabbitMq__Password=your-password
+RabbitMq__VirtualHost=/
+RabbitMq__UseSsl=true
+Observability__ServiceName=MessageBridge.Worker
+Observability__MetricsEndpointEnabled=true
+Observability__OtlpEndpoint=http://otlp-collector:4318/v1/traces
 ```
 
 Then run: `docker-compose --env-file .env.prod up`
@@ -208,11 +222,19 @@ Then run: `docker-compose --env-file .env.prod up`
 ```bash
 # Create secret from literals
 kubectl create secret generic messagebridge-secrets \
-  --from-literal=RABBITMQ_USERNAME=admin \
-  --from-literal=RABBITMQ_PASSWORD=$(openssl rand -base64 32) \
-  --from-literal=DATABASE_CONNECTION_STRING="Host=postgres.cloud;..."
+  --from-literal=ConnectionStrings__DefaultConnection="Host=postgres.cloud;..." \
+  --from-literal=MESSAGEBRIDGE_CONNECTION_STRING="Host=postgres.cloud;..." \
+  --from-literal=RabbitMq__Host=rabbitmq.cloudamqp.com \
+  --from-literal=RabbitMq__Port=5671 \
+  --from-literal=RabbitMq__Username=admin \
+  --from-literal=RabbitMq__Password=$(openssl rand -base64 32) \
+  --from-literal=RabbitMq__VirtualHost=/ \
+  --from-literal=RabbitMq__UseSsl=true
+```
 
-# Reference in deployment
+These literal keys are injected by `envFrom` as-is, so the pod sees the same `IConfiguration` binding names the worker already consumes.
+
+Reference in deployment:
 kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
@@ -479,21 +501,16 @@ spec:
 
 ## Monitoring & Observability
 
-### Metrics Export
+### Observability
 
-Enable OpenTelemetry metrics export:
+Use the `Observability` section to control traces and the Prometheus scrape endpoint:
 
 ```json
 {
-  "OpenTelemetry": {
-    "Exporters": {
-      "PrometheusMetrics": {
-        "Endpoint": "http://prometheus:9090"
-      },
-      "Jaeger": {
-        "Endpoint": "http://jaeger-collector:4318/v1/traces"
-      }
-    }
+  "Observability": {
+    "ServiceName": "MessageBridge.Worker",
+    "MetricsEndpointEnabled": true,
+    "OtlpEndpoint": "http://otlp-collector:4318/v1/traces"
   }
 }
 ```
