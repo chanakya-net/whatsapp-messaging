@@ -1,4 +1,5 @@
 using MassTransit;
+using MessageBridge.Infrastructure.Messaging.Consumers;
 using MessageBridge.Infrastructure.Messaging.Options;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -20,6 +21,9 @@ public static class MassTransitRegistration
 
         services.AddMassTransit(bus =>
         {
+            bus.AddConsumer<SendWhatsAppMessageConsumer>();
+            bus.AddConsumer<SendEmailConfirmationConsumer>();
+
             bus.UsingRabbitMq((ctx, cfg) =>
             {
                 var rabbitOpts = ctx.GetRequiredService<IOptions<RabbitMqOptions>>().Value;
