@@ -60,18 +60,32 @@ public sealed class MessageBridgeOutboxDispatcherHostedService<TContext> : Backg
 
         await using var updateContext = await _contextFactory.CreateDbContextAsync(cancellationToken);
         var now = DateTime.UtcNow;
-        foreach (var messageId in successfulIds)
+        int updatedCount;
+        try
         {
-            var message = await updateContext.Set<MessageBridgeOutboxMessage>()
-                .FindAsync(new object[] { messageId }, cancellationToken);
+            updatedCount = await updateContext.Set<MessageBridgeOutboxMessage>()
+                .Where(message => successfulIds.Contains(message.Id))
+                .ExecuteUpdateAsync(
+                    updater => updater.SetProperty(message => message.PublishedAtUtc, now),
+                    cancellationToken);
+        }
+        catch (InvalidOperationException)
+        {
+            updatedCount = 0;
+        }
 
-            if (message is not null)
+        if (updatedCount == 0)
+        {
+            var messagesToUpdate = pending
+                .Where(message => successfulIds.Contains(message.Id))
+                .ToList();
+            foreach (var message in messagesToUpdate)
             {
                 message.PublishedAtUtc = now;
             }
+            updateContext.UpdateRange(messagesToUpdate);
+            await updateContext.SaveChangesAsync(cancellationToken);
         }
-
-        await updateContext.SaveChangesAsync(cancellationToken);
     }
 
     private async Task<string[]> PublishPendingAsync(

@@ -188,6 +188,48 @@ public class MessageBridgeOutboxDispatcherTests
         verifyContext.OutboxMessages.Any(x => x.Id == "id-6").ShouldBeTrue();
     }
 
+    [Fact]
+    public async Task Cleanup_Service_DoesNotDelete_WhenCleanupDisabled()
+    {
+        var options = new MessageBridgeOutboxOptions
+        {
+            CleanupEnabled = false,
+            CleanupIntervalMilliseconds = 5,
+            CleanupBatchSize = 25,
+        };
+        var contextOptions = new DbContextOptionsBuilder<TestDbContext>()
+            .UseInMemoryDatabase(nameof(Cleanup_Service_DoesNotDelete_WhenCleanupDisabled))
+            .Options;
+        var factory = new TestDbContextFactory(contextOptions);
+
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            context.OutboxMessages.Add(new MessageBridgeOutboxMessage
+            {
+                Id = "id-7",
+                MessageId = "msg-7",
+                CorrelationId = "corr-7",
+                ExchangeName = "exchange-g",
+                RoutingKey = "routing-g",
+                Headers = "{}",
+                Payload = new byte[] { 70 },
+                CreatedAtUtc = DateTime.UtcNow.AddDays(-2),
+                PublishedAtUtc = DateTime.UtcNow.AddDays(-2),
+            });
+            await context.SaveChangesAsync();
+        }
+
+        var cleanupService = new MessageBridgeOutboxCleanupHostedService<TestDbContext>(
+            factory,
+            Options.Create(options));
+        await cleanupService.StartAsync(default);
+        await Task.Delay(50);
+        await cleanupService.StopAsync(default);
+
+        await using var verifyContext = await factory.CreateDbContextAsync();
+        verifyContext.OutboxMessages.Any(x => x.Id == "id-7").ShouldBeTrue();
+    }
+
     private static MessageBridgeOutboxDispatcherHostedService<TestDbContext> BuildDispatcher(
         TestDbContextFactory contextFactory,
         IMessageBridgePublisherTransport transport,
@@ -311,4 +353,3 @@ public class MessageBridgeOutboxDispatcherTests
         throw new XunitException(message);
     }
 }
-

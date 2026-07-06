@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using MessageBridge.Publisher.EntityFrameworkCore.Outbox;
 
@@ -44,12 +45,10 @@ public static class DependencyInjection
         IServiceCollection services,
         Action<MessageBridgeOutboxOptions> configure)
     {
-        services.AddScoped<IMessageBridgeOutboxWriter, MessageBridgeOutboxWriter>();
+        services.TryAddScoped<IMessageBridgeOutboxWriter, MessageBridgeOutboxWriter>();
         services.AddOptions<MessageBridgeOutboxOptions>()
             .Configure(configure)
             .ValidateDataAnnotations()
             .ValidateOnStart();
-
-        services.AddSingleton<IValidateOptions<MessageBridgeOutboxOptions>, MessageBridgeOutboxOptionsValidator>();
     }
 }
