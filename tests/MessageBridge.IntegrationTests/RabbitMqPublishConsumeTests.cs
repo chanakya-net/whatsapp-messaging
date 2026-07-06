@@ -31,10 +31,24 @@ public sealed class RabbitMqPublishConsumeTests : IAsyncLifetime
         _rabbitMqFixture.RegisterServices(services, _dbContext);
         _serviceProvider = services.BuildServiceProvider();
         _scope = _serviceProvider.CreateAsyncScope();
+
+        // Start the MassTransit bus so consumers can receive messages
+        var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
+        await busControl!.StartAsync(TimeSpan.FromSeconds(10));
     }
 
     public async Task DisposeAsync()
     {
+        try
+        {
+            var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
+            await busControl?.StopAsync(TimeSpan.FromSeconds(10))!;
+        }
+        catch
+        {
+            // Ignore if bus was not started
+        }
+
         await _scope.DisposeAsync();
 
         if (_dbContext is not null)
@@ -86,10 +100,12 @@ public sealed class RabbitMqPublishConsumeTests : IAsyncLifetime
         // Publish command
         await bus.Publish(cmd);
 
-        // Give consumer time to process
-        await Task.Delay(1000);
+        // Poll until record is verified (proves consumer processed routing)
+        await IntegrationTestsHelper.PollUntilAsync(
+            async () => await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand)) != null,
+            TimeSpan.FromSeconds(10));
 
-        // Verify record still exists
+        // Verify record exists
         var stored = await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand));
         stored.Should().NotBeNull();
         stored!.MessageId.Should().Be(cmd.MessageId);
@@ -123,7 +139,11 @@ public sealed class RabbitMqPublishConsumeTests : IAsyncLifetime
         createRes.Outcome.Should().Be(CreateMessageProcessingOutcome.Created);
 
         await bus.Publish(cmd);
-        await Task.Delay(1000);
+
+        // Poll until record is verified (proves consumer processed routing)
+        await IntegrationTestsHelper.PollUntilAsync(
+            async () => await store.GetAsync(cmd.MessageId, nameof(SendEmailConfirmationCommand)) != null,
+            TimeSpan.FromSeconds(10));
 
         var stored = await store.GetAsync(cmd.MessageId, nameof(SendEmailConfirmationCommand));
         stored.Should().NotBeNull();

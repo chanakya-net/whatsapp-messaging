@@ -29,10 +29,24 @@ public sealed class OutboxDispatchIntegrationTests : IAsyncLifetime
         _rabbitMqFixture.RegisterServices(services, _dbContext);
         _serviceProvider = services.BuildServiceProvider();
         _scope = _serviceProvider.CreateAsyncScope();
+
+        // Start the MassTransit bus so consumers can receive messages
+        var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
+        await busControl!.StartAsync(TimeSpan.FromSeconds(10));
     }
 
     public async Task DisposeAsync()
     {
+        try
+        {
+            var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
+            await busControl?.StopAsync(TimeSpan.FromSeconds(10))!;
+        }
+        catch
+        {
+            // Ignore if bus was not started
+        }
+
         await _scope.DisposeAsync();
 
         if (_dbContext is not null)
@@ -83,9 +97,12 @@ public sealed class OutboxDispatchIntegrationTests : IAsyncLifetime
 
         // Publish message
         await bus.Publish(cmd);
-        await Task.Delay(500);
 
-        // Verify record persisted
+        // Verify record persisted (poll until found or timeout)
+        await IntegrationTestsHelper.PollUntilAsync(
+            async () => await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand)) != null,
+            TimeSpan.FromSeconds(10));
+
         var record = await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand));
         record.Should().NotBeNull();
         record!.Provider.Should().Be("masstransit");

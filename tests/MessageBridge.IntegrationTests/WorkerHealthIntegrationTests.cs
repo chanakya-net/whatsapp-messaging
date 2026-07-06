@@ -26,10 +26,24 @@ public sealed class WorkerHealthIntegrationTests : IAsyncLifetime
         _rabbitMqFixture.RegisterServices(services, _dbContext);
         _serviceProvider = services.BuildServiceProvider();
         _scope = _serviceProvider.CreateAsyncScope();
+
+        // Start the MassTransit bus so consumers can receive messages
+        var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
+        await busControl!.StartAsync(TimeSpan.FromSeconds(10));
     }
 
     public async Task DisposeAsync()
     {
+        try
+        {
+            var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
+            await busControl?.StopAsync(TimeSpan.FromSeconds(10))!;
+        }
+        catch
+        {
+            // Ignore if bus was not started
+        }
+
         await _scope.DisposeAsync();
 
         if (_dbContext is not null)
@@ -67,15 +81,6 @@ public sealed class WorkerHealthIntegrationTests : IAsyncLifetime
         var canConnect = await dbContext.Database.CanConnectAsync();
 
         canConnect.Should().BeTrue();
-    }
-
-    [Fact]
-    public async Task WorkerDependencies_RabbitMqConnected()
-    {
-        var bus = _scope.ServiceProvider.GetRequiredService<IBus>();
-
-        // IBus is configured
-        bus.Should().NotBeNull();
     }
 
     [Fact]
