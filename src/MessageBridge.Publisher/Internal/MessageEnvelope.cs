@@ -2,7 +2,7 @@ using System.Collections.Generic;
 
 namespace MessageBridge.Publisher.Internal;
 
-internal sealed record MessageBridgePublisherEnvelope(
+public sealed record MessageBridgePublisherEnvelope(
     string ExchangeName,
     string RoutingKey,
     string MessageId,
@@ -10,7 +10,7 @@ internal sealed record MessageBridgePublisherEnvelope(
     IDictionary<string, string> Headers,
     byte[] Payload);
 
-internal interface IMessageBridgePublisherTransport
+public interface IMessageBridgePublisherTransport
 {
     Task PublishAsync(MessageBridgePublisherEnvelope envelope, CancellationToken cancellationToken);
 }
