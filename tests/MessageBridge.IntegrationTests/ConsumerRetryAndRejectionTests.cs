@@ -1,4 +1,5 @@
 using FluentAssertions;
+using System.Collections.Concurrent;
 using MassTransit;
 using MessageBridge.Application.Persistence;
 using MessageBridge.Contracts.V1;
@@ -17,6 +18,8 @@ public sealed class ConsumerRetryAndRejectionTests : IAsyncLifetime
     private MessageBridgeDbContext? _dbContext;
     private AsyncServiceScope _scope;
     private ServiceProvider? _serviceProvider;
+    private readonly ConsumerAttemptTracker _retryTracker = new();
+    private readonly ConsumerAttemptTracker _rejectionTracker = new();
 
     public async Task InitializeAsync()
     {
@@ -26,13 +29,27 @@ public sealed class ConsumerRetryAndRejectionTests : IAsyncLifetime
         _dbContext = await _postgresFixture.CreateDbContextAsync();
 
         var services = new ServiceCollection();
-        _rabbitMqFixture.RegisterServices(services, _dbContext);
+        services.AddSingleton(_retryTracker);
+        services.AddSingleton(_rejectionTracker);
+        _rabbitMqFixture.RegisterServices(services, _dbContext, ConfigureTestConsumers);
         _serviceProvider = services.BuildServiceProvider();
         _scope = _serviceProvider.CreateAsyncScope();
+        var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
+        await busControl!.StartAsync(TimeSpan.FromSeconds(10));
     }
 
     public async Task DisposeAsync()
     {
+        try
+        {
+            var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
+            await busControl?.StopAsync(TimeSpan.FromSeconds(10))!;
+        }
+        catch
+        {
+            // Ignore if bus was not started
+        }
+
         await _scope.DisposeAsync();
 
         if (_dbContext is not null)
@@ -54,52 +71,187 @@ public sealed class ConsumerRetryAndRejectionTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task MessageRetry_RecordIsMarkedAsReceived_BeforeRetry()
+    public async Task MessageRetry_RecordTransitionsToCompleted_AfterTransientFailure()
     {
         var store = _scope.ServiceProvider.GetRequiredService<IMessageProcessingStore>();
+        var bus = _scope.ServiceProvider.GetRequiredService<IBus>();
 
-        var msgId = $"retry-{Guid.NewGuid():N}";
-        var msgType = nameof(SendWhatsAppMessageCommand);
+        var cmd = new SendWhatsAppMessageCommand
+        {
+            MessageId = $"retry-{Guid.NewGuid():N}",
+            TenantId = "test-tenant",
+            RecipientPhoneNumber = "+11234567890",
+            TemplateName = "retry",
+            TemplateParameters = { ["body"] = "retry test" }
+        };
 
-        // Create record that will be retried
-        var createReq = new CreateMessageProcessingRequest(
-            msgId,
-            msgType,
-            "hash-retry",
-            "masstransit",
-            new Dictionary<string, string?> { ["retry_count"] = "0" });
+        _retryTracker.Reset(cmd.MessageId);
+        await bus.Publish(cmd);
 
-        var created = await store.CreateAsync(createReq);
-        created.Record.Status.Should().Be(ProcessingStatus.Received);
+        await IntegrationTestsHelper.PollUntilAsync(
+            async () => await HasStatusAsync(store, cmd.MessageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Processing),
+            TimeSpan.FromSeconds(10));
 
-        // Simulate retry by updating status to Processing (mid-retry)
-        var processing = await store.UpdateStatusAsync(msgId, msgType, ProcessingStatus.Processing);
-        processing.Status.Should().Be(ProcessingStatus.Processing);
+        await IntegrationTestsHelper.PollUntilAsync(
+            async () => await HasStatusAsync(store, cmd.MessageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Completed),
+            TimeSpan.FromSeconds(10));
+
+        var stored = await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand));
+        stored.Should().NotBeNull();
+        stored!.Status.Should().Be(ProcessingStatus.Completed);
     }
 
     [Fact]
-    public async Task MessageRejection_RecordIsMarkedAsFailed_AfterRetryExhaustion()
+    public async Task MessageRejection_RecordTransitionsToFailed_AfterRetryExhaustion()
     {
         var store = _scope.ServiceProvider.GetRequiredService<IMessageProcessingStore>();
+        var bus = _scope.ServiceProvider.GetRequiredService<IBus>();
 
-        var msgId = $"reject-{Guid.NewGuid():N}";
-        var msgType = nameof(SendEmailConfirmationCommand);
+        var cmd = new SendEmailConfirmationCommand
+        {
+            MessageId = $"reject-{Guid.NewGuid():N}",
+            TenantId = "test-tenant",
+            RecipientEmail = "user@example.com",
+            ConfirmationToken = "reject-token"
+        };
 
-        // Create record for message that will be rejected
-        var createReq = new CreateMessageProcessingRequest(
-            msgId,
-            msgType,
-            "hash-reject",
+        _rejectionTracker.Reset(cmd.MessageId);
+        await bus.Publish(cmd);
+
+        await IntegrationTestsHelper.PollUntilAsync(
+            async () => await HasStatusAsync(store, cmd.MessageId, nameof(SendEmailConfirmationCommand), ProcessingStatus.Failed),
+            TimeSpan.FromSeconds(10));
+
+        var stored = await store.GetAsync(cmd.MessageId, nameof(SendEmailConfirmationCommand));
+        stored.Should().NotBeNull();
+        stored!.Status.Should().Be(ProcessingStatus.Failed);
+        stored.FailureReason.Should().NotBeNullOrWhiteSpace();
+    }
+
+    private static void ConfigureTestConsumers(IBusRegistrationConfigurator config)
+    {
+        config.AddConsumer<TransientRetryWhatsAppConsumer>(
+            cfg => cfg.UseMessageRetry(r => r.Immediate(1)));
+        config.AddConsumer<RejectingEmailConsumer>(
+            cfg => cfg.UseMessageRetry(r => r.Immediate(1)));
+    }
+
+    private static async Task<bool> HasStatusAsync(
+        IMessageProcessingStore store,
+        string messageId,
+        string messageType,
+        ProcessingStatus expectedStatus)
+    {
+        var record = await store.GetAsync(messageId, messageType);
+        return record?.Status == expectedStatus;
+    }
+
+}
+
+internal sealed class ConsumerAttemptTracker
+{
+    private readonly ConcurrentDictionary<string, int> _attempts = [];
+
+    public void Reset(string messageId)
+    {
+        _attempts.TryRemove(messageId, out _);
+    }
+
+    public int GetNextAttempt(string messageId)
+    {
+        return _attempts.AddOrUpdate(messageId, 1, (_, attempts) => attempts + 1);
+    }
+}
+
+internal sealed class TransientRetryWhatsAppConsumer(
+    IMessageProcessingStore store,
+    ConsumerAttemptTracker retryTracker) : IConsumer<SendWhatsAppMessageCommand>
+{
+    public async Task Consume(ConsumeContext<SendWhatsAppMessageCommand> context)
+    {
+        var attempt = retryTracker.GetNextAttempt(context.Message.MessageId);
+        var payloadHash = MessageProcessingTestHelpers.GetPayloadHash(context.Message);
+
+        await MessageProcessingTestHelpers.EnsureRecordAsync(
+            store,
+            context.Message.MessageId,
+            nameof(SendWhatsAppMessageCommand),
+            payloadHash,
+            "retry");
+
+        if (attempt == 1)
+        {
+            await store.UpdateStatusAsync(context.Message.MessageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Processing);
+            throw new InvalidOperationException("Transient consumer failure for retry coverage.");
+        }
+
+        await store.UpdateStatusAsync(context.Message.MessageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Completed);
+    }
+}
+
+internal sealed class RejectingEmailConsumer(
+    IMessageProcessingStore store,
+    ConsumerAttemptTracker rejectionTracker) : IConsumer<SendEmailConfirmationCommand>
+{
+    public async Task Consume(ConsumeContext<SendEmailConfirmationCommand> context)
+    {
+        var attempt = rejectionTracker.GetNextAttempt(context.Message.MessageId);
+        var payloadHash = MessageProcessingTestHelpers.GetPayloadHash(context.Message);
+
+        await MessageProcessingTestHelpers.EnsureRecordAsync(
+            store,
+            context.Message.MessageId,
+            nameof(SendEmailConfirmationCommand),
+            payloadHash,
+            "rejection");
+
+        if (attempt == 1)
+        {
+            await store.UpdateStatusAsync(context.Message.MessageId, nameof(SendEmailConfirmationCommand), ProcessingStatus.Processing);
+            throw new InvalidOperationException("Transient consumer failure for rejection coverage.");
+        }
+
+        await store.UpdateStatusAsync(
+            context.Message.MessageId,
+            nameof(SendEmailConfirmationCommand),
+            ProcessingStatus.Failed,
+            "retry attempts exhausted");
+    }
+}
+
+internal static class MessageProcessingTestHelpers
+{
+    internal static async Task EnsureRecordAsync(
+        IMessageProcessingStore store,
+        string messageId,
+        string messageType,
+        string messageHash,
+        string metadataValue)
+    {
+        var request = BuildCreateRequest(messageId, messageType, messageHash, metadataValue);
+        await store.CreateAsync(request);
+    }
+
+    internal static string GetPayloadHash<T>(T message)
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(message);
+        var bytes = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(json));
+        return Convert.ToHexString(bytes);
+    }
+
+    private static CreateMessageProcessingRequest BuildCreateRequest(
+        string messageId,
+        string messageType,
+        string payloadHash,
+        string metadataValue)
+    {
+        return new CreateMessageProcessingRequest(
+            messageId,
+            messageType,
+            payloadHash,
             "masstransit",
-            new Dictionary<string, string?> { ["retry_exhausted"] = "true" });
-
-        var created = await store.CreateAsync(createReq);
-        created.Record.Status.Should().Be(ProcessingStatus.Received);
-
-        // Simulate rejection after retry exhaustion
-        var rejected = await store.UpdateStatusAsync(msgId, msgType, ProcessingStatus.Failed);
-        rejected.Status.Should().Be(ProcessingStatus.Failed);
-        rejected.ProcessedAt.Should().NotBeNull("failed records should be marked with completion time");
+            new Dictionary<string, string?> { ["integration_test"] = metadataValue });
     }
 }
 
@@ -123,4 +275,3 @@ internal static class IntegrationTestsHelper
         throw new TimeoutException($"Condition not met within {timeout.TotalSeconds}s");
     }
 }
-

@@ -28,7 +28,7 @@ public sealed class RabbitMqPublishConsumeTests : IAsyncLifetime
         _dbContext = await _postgresFixture.CreateDbContextAsync();
 
         var services = new ServiceCollection();
-        _rabbitMqFixture.RegisterServices(services, _dbContext);
+        _rabbitMqFixture.RegisterServices(services, _dbContext, ConfigureTestConsumers);
         _serviceProvider = services.BuildServiceProvider();
         _scope = _serviceProvider.CreateAsyncScope();
 
@@ -84,25 +84,16 @@ public sealed class RabbitMqPublishConsumeTests : IAsyncLifetime
             TemplateParameters = { ["body"] = "test message" }
         };
 
-        var hash = GetPayloadHash(cmd);
-
-        // Create processing record before publish
-        var createReq = new CreateMessageProcessingRequest(
-            cmd.MessageId,
-            nameof(SendWhatsAppMessageCommand),
-            hash,
-            "masstransit",
-            new Dictionary<string, string?> { ["routed"] = "true" });
-
-        var createRes = await store.CreateAsync(createReq);
-        createRes.Outcome.Should().Be(CreateMessageProcessingOutcome.Created);
-
         // Publish command
         await bus.Publish(cmd);
 
         // Poll until record is verified (proves consumer processed routing)
         await IntegrationTestsHelper.PollUntilAsync(
-            async () => await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand)) != null,
+            async () =>
+            {
+                var record = await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand));
+                return record is not null && record.Status == ProcessingStatus.Completed;
+            },
             TimeSpan.FromSeconds(10));
 
         // Verify record exists
@@ -110,6 +101,7 @@ public sealed class RabbitMqPublishConsumeTests : IAsyncLifetime
         stored.Should().NotBeNull();
         stored!.MessageId.Should().Be(cmd.MessageId);
         stored.MessageType.Should().Be(nameof(SendWhatsAppMessageCommand));
+        stored.Status.Should().Be(ProcessingStatus.Completed);
     }
 
     [Fact]
@@ -126,35 +118,68 @@ public sealed class RabbitMqPublishConsumeTests : IAsyncLifetime
             ConfirmationToken = "token123"
         };
 
-        var hash = GetPayloadHash(cmd);
-
-        var createReq = new CreateMessageProcessingRequest(
-            cmd.MessageId,
-            nameof(SendEmailConfirmationCommand),
-            hash,
-            "masstransit",
-            new Dictionary<string, string?> { ["routed"] = "true" });
-
-        var createRes = await store.CreateAsync(createReq);
-        createRes.Outcome.Should().Be(CreateMessageProcessingOutcome.Created);
-
         await bus.Publish(cmd);
 
         // Poll until record is verified (proves consumer processed routing)
         await IntegrationTestsHelper.PollUntilAsync(
-            async () => await store.GetAsync(cmd.MessageId, nameof(SendEmailConfirmationCommand)) != null,
+            async () =>
+            {
+                var record = await store.GetAsync(cmd.MessageId, nameof(SendEmailConfirmationCommand));
+                return record is not null && record.Status == ProcessingStatus.Completed;
+            },
             TimeSpan.FromSeconds(10));
 
         var stored = await store.GetAsync(cmd.MessageId, nameof(SendEmailConfirmationCommand));
         stored.Should().NotBeNull();
         stored!.MessageType.Should().Be(nameof(SendEmailConfirmationCommand));
+        stored!.Status.Should().Be(ProcessingStatus.Completed);
     }
 
-    private static string GetPayloadHash<T>(T msg)
+    private static void ConfigureTestConsumers(IBusRegistrationConfigurator config)
     {
-        var json = System.Text.Json.JsonSerializer.Serialize(msg);
-        var bytes = System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(json));
-        return Convert.ToHexString(bytes);
+        config.AddConsumer<RabbitMqWhatsAppPublishConsumer>();
+        config.AddConsumer<RabbitMqEmailPublishConsumer>();
+    }
+}
+
+internal sealed class RabbitMqWhatsAppPublishConsumer(
+    IMessageProcessingStore store) : IConsumer<SendWhatsAppMessageCommand>
+{
+    public async Task Consume(ConsumeContext<SendWhatsAppMessageCommand> context)
+    {
+        var payloadHash = MessageProcessingTestHelpers.GetPayloadHash(context.Message);
+        await MessageProcessingTestHelpers.EnsureRecordAsync(
+            store,
+            context.Message.MessageId,
+            nameof(SendWhatsAppMessageCommand),
+            payloadHash,
+            "routed");
+
+        await store.UpdateStatusAsync(
+            context.Message.MessageId,
+            nameof(SendWhatsAppMessageCommand),
+            ProcessingStatus.Completed,
+            "consumer_completed");
+    }
+}
+
+internal sealed class RabbitMqEmailPublishConsumer(
+    IMessageProcessingStore store) : IConsumer<SendEmailConfirmationCommand>
+{
+    public async Task Consume(ConsumeContext<SendEmailConfirmationCommand> context)
+    {
+        var payloadHash = MessageProcessingTestHelpers.GetPayloadHash(context.Message);
+        await MessageProcessingTestHelpers.EnsureRecordAsync(
+            store,
+            context.Message.MessageId,
+            nameof(SendEmailConfirmationCommand),
+            payloadHash,
+            "routed");
+
+        await store.UpdateStatusAsync(
+            context.Message.MessageId,
+            nameof(SendEmailConfirmationCommand),
+            ProcessingStatus.Completed,
+            "consumer_completed");
     }
 }

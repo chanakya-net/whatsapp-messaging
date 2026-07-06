@@ -6,6 +6,7 @@ using MessageBridge.Infrastructure.Persistence;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Microsoft.EntityFrameworkCore;
 using Testcontainers.RabbitMq;
 using Xunit;
 
@@ -36,7 +37,8 @@ public sealed class RabbitMqFixture : IAsyncLifetime
 
     public IServiceCollection RegisterServices(
         IServiceCollection services,
-        MessageBridgeDbContext dbContext)
+        MessageBridgeDbContext dbContext,
+        Action<IBusRegistrationConfigurator>? configureMassTransit = null)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -48,9 +50,52 @@ public sealed class RabbitMqFixture : IAsyncLifetime
             })
             .Build();
 
-        services.AddSingleton(dbContext);
+        var connectionString = dbContext.Database.GetConnectionString()
+            ?? dbContext.Database.GetDbConnection().ConnectionString;
+        services.Configure<RabbitMqOptions>(config.GetSection(RabbitMqOptions.SectionName));
+        services.AddScoped(sp =>
+        {
+            var options = new DbContextOptionsBuilder<MessageBridgeDbContext>()
+                .UseNpgsql(connectionString)
+                .Options;
+
+            return new MessageBridgeDbContext(options);
+        });
+
         services.AddScoped<IMessageProcessingStore>(sp => new MessageProcessingStore(sp.GetRequiredService<MessageBridgeDbContext>()));
-        services.AddMessageBridgeMassTransit(config);
+
+        if (configureMassTransit is null)
+        {
+            services.AddMessageBridgeMassTransit(config);
+            return services;
+        }
+
+        services.AddMassTransit(bus =>
+        {
+            configureMassTransit(bus);
+
+            bus.UsingRabbitMq((ctx, cfg) =>
+            {
+                var rabbitOpts = ctx.GetRequiredService<IOptions<RabbitMqOptions>>().Value;
+
+                if (rabbitOpts.UsesConnectionString)
+                {
+                    cfg.Host(rabbitOpts.ConnectionString);
+                }
+                else
+                {
+                    cfg.Host(rabbitOpts.Host, rabbitOpts.Port, rabbitOpts.VirtualHost, h =>
+                    {
+                        h.Username(rabbitOpts.Username!);
+                        h.Password(rabbitOpts.Password!);
+                        if (rabbitOpts.UseSsl)
+                            h.UseSsl(s => s.Protocol = System.Security.Authentication.SslProtocols.Tls12);
+                    });
+                }
+
+                cfg.ConfigureEndpoints(ctx);
+            });
+        });
 
         return services;
     }
