@@ -2,9 +2,9 @@
 
 public class RecipientMaskerTests
 {
-[Theory]
-[InlineData("+1 (415) 555-2671", "*******2671")]
-[InlineData("1234567", "***4567")]
+    [Theory]
+    [InlineData("+1 (415) 555-2671", "*******2671")]
+    [InlineData("1234567", "***4567")]
     [InlineData("no-number", "")]
     public void MaskPhoneNumber_MasksValues(string input, string expected)
     {

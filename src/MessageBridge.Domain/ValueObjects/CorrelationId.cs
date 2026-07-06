@@ -4,7 +4,6 @@ namespace MessageBridge.Domain.ValueObjects;
 
 public sealed record CorrelationId
 {
-    private const int MaxLength = 200;
     private CorrelationId(string value)
     {
         Value = value;
@@ -20,11 +19,6 @@ public sealed record CorrelationId
                 "Correlation id is required.");
 
         var normalized = correlationId.Trim();
-        if (normalized.Length > MaxLength)
-            return Error.Validation(
-                "CorrelationId.InvalidLength",
-                $"Correlation id must be {MaxLength} characters or fewer.");
-
         if (!Guid.TryParse(normalized, out _))
             return Error.Validation(
                 "CorrelationId.InvalidFormat",
