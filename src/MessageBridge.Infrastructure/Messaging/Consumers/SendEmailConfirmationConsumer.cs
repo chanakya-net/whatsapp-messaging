@@ -4,6 +4,7 @@ using Google.Protobuf;
 using MessageBridge.Contracts.V1;
 using MessageBridge.Infrastructure.Messaging.Processing;
 using MessageBridge.Infrastructure.Messaging.Mappers;
+using Microsoft.Extensions.Logging;
 using System.Security.Cryptography;
 using Wolverine;
 
@@ -13,17 +14,22 @@ public sealed class SendEmailConfirmationConsumer : IConsumer<SendEmailConfirmat
 {
     private readonly IMessageBus _messageBus;
     private readonly MessageProcessingCoordinator _processingCoordinator;
+    private readonly ILogger<SendEmailConfirmationConsumer> _logger;
 
     public SendEmailConfirmationConsumer(
         IMessageBus messageBus,
-        MessageProcessingCoordinator processingCoordinator)
+        MessageProcessingCoordinator processingCoordinator,
+        ILogger<SendEmailConfirmationConsumer> logger)
     {
         _messageBus = messageBus;
         _processingCoordinator = processingCoordinator;
+        _logger = logger;
     }
 
     public async Task Consume(ConsumeContext<SendEmailConfirmationCommand> context)
     {
+        using var _ = _logger.BeginScope(ConsumerLifecycleMetadata.ForEmailConfirmation(context.Message));
+
         var payloadHash = GetPayloadHash(context.Message);
         await _processingCoordinator.ProcessAsync(
             context.Message.MessageId,

@@ -13,6 +13,7 @@ using MessageBridge.Domain.Processing;
 using MessageBridge.Infrastructure.Messaging.Consumers;
 using MessageBridge.Infrastructure.Messaging.Mappers;
 using MessageBridge.Infrastructure.Messaging.Options;
+using MessageBridge.Worker.Observability;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
@@ -35,7 +36,9 @@ public sealed class WorkerHostTests
         using var client = factory.CreateClient();
 
         (await client.GetAsync("/health/live")).StatusCode.ShouldBe(HttpStatusCode.OK);
-        (await client.GetAsync("/health/ready")).StatusCode.ShouldBe(HttpStatusCode.OK);
+        var readyResponse = await client.GetAsync("/health/ready");
+        var readyBody = await readyResponse.Content.ReadAsStringAsync();
+        readyResponse.StatusCode.ShouldBe(HttpStatusCode.OK, readyBody);
 
         (await client.GetAsync("/")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
         (await client.GetAsync("/health")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
@@ -311,6 +314,8 @@ public sealed class WorkerHostTests
             processingStore ?? new TrackingPersistenceMessageProcessingStore());
         services.AddSingleton<ITenantConfigurationProvider>(tenantConfigProvider ?? new TrackingTenantConfigurationProvider());
         services.AddSingleton<IProviderRateLimiter>(rateLimiter ?? new TrackingProviderRateLimiter());
+        services.AddSingleton<IRabbitMqReadinessProbe, ReadyRabbitMqProbe>();
+        services.AddSingleton<IPostgresReadinessProbe, ReadyPostgresProbe>();
     }
 
     private sealed class MessageBridgeWorkerFactory(
@@ -460,6 +465,18 @@ public sealed class WorkerHostTests
             CallCount++;
             return Task.FromResult<ErrorOr<Success>>(new Success());
         }
+    }
+
+    private sealed class ReadyRabbitMqProbe : IRabbitMqReadinessProbe
+    {
+        public Task<bool> IsReadyAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(true);
+    }
+
+    private sealed class ReadyPostgresProbe : IPostgresReadinessProbe
+    {
+        public Task<bool> IsReadyAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(true);
     }
 
     private class ConsumeContextProxy<TMessage> : DispatchProxy

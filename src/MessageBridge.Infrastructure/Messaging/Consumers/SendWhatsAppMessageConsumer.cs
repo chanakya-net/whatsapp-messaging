@@ -4,6 +4,7 @@ using Google.Protobuf;
 using MessageBridge.Contracts.V1;
 using MessageBridge.Infrastructure.Messaging.Processing;
 using MessageBridge.Infrastructure.Messaging.Mappers;
+using Microsoft.Extensions.Logging;
 using System.Security.Cryptography;
 using Wolverine;
 
@@ -13,17 +14,22 @@ public sealed class SendWhatsAppMessageConsumer : IConsumer<SendWhatsAppMessageC
 {
     private readonly IMessageBus _messageBus;
     private readonly MessageProcessingCoordinator _processingCoordinator;
+    private readonly ILogger<SendWhatsAppMessageConsumer> _logger;
 
     public SendWhatsAppMessageConsumer(
         IMessageBus messageBus,
-        MessageProcessingCoordinator processingCoordinator)
+        MessageProcessingCoordinator processingCoordinator,
+        ILogger<SendWhatsAppMessageConsumer> logger)
     {
         _messageBus = messageBus;
         _processingCoordinator = processingCoordinator;
+        _logger = logger;
     }
 
     public async Task Consume(ConsumeContext<SendWhatsAppMessageCommand> context)
     {
+        using var _ = _logger.BeginScope(ConsumerLifecycleMetadata.ForWhatsApp(context.Message));
+
         var payloadHash = GetPayloadHash(context.Message);
         await _processingCoordinator.ProcessAsync(
             context.Message.MessageId,
