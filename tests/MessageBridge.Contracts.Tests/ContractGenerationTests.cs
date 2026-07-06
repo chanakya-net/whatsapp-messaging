@@ -27,6 +27,13 @@ public class ContractGenerationTests
     }
 
     [Fact]
+    public void WhatsAppCommand_HasExpectedMetadata()
+    {
+        Assert.Equal("MessageBridge.Contracts.V1", typeof(SendWhatsAppMessageCommand).Namespace);
+        Assert.Equal("MessageBridge.Contracts.V1.SendWhatsAppMessageCommand", typeof(SendWhatsAppMessageCommand).FullName);
+    }
+
+    [Fact]
     public void WhatsAppCommand_CanSerializeDeserialize()
     {
         var original = new SendWhatsAppMessageCommand
@@ -73,6 +80,13 @@ public class ContractGenerationTests
 
         Assert.NotNull(cmd);
         Assert.Equal("email-123", cmd.MessageId);
+    }
+
+    [Fact]
+    public void EmailCommand_HasExpectedMetadata()
+    {
+        Assert.Equal("MessageBridge.Contracts.V1", typeof(SendEmailConfirmationCommand).Namespace);
+        Assert.Equal("MessageBridge.Contracts.V1.SendEmailConfirmationCommand", typeof(SendEmailConfirmationCommand).FullName);
     }
 
     [Fact]
