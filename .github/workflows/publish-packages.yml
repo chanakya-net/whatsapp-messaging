@@ -48,6 +48,8 @@ jobs:
         run: dotnet build MessageBridge.sln -c "$BUILD_CONFIGURATION" --no-restore
 
       - name: Test package projects
+        # Only package-scoped tests gate the publish workflow (Contracts, Publisher, EntityFrameworkCore projects).
+        # Full suite including Application, Domain, Infrastructure, Worker, and Integration tests runs in CI.
         run: |
           dotnet test tests/MessageBridge.Contracts.Tests/MessageBridge.Contracts.Tests.csproj -c "$BUILD_CONFIGURATION" --no-restore
           dotnet test tests/MessageBridge.Publisher.Tests/MessageBridge.Publisher.Tests.csproj -c "$BUILD_CONFIGURATION" --no-restore
@@ -55,6 +57,9 @@ jobs:
 
       - name: Resolve release settings
         shell: bash
+        env:
+          PUBLISH_INPUT: ${{ github.event.inputs.publish }}
+          VERSION_INPUT: ${{ github.event.inputs.package_version }}
         run: |
           set -euo pipefail
 
@@ -64,9 +69,9 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
             should_publish="true"
             package_version="${GITHUB_REF_NAME#v}"
-          elif [ "${{ github.event.inputs.publish }}" = "true" ]; then
+          elif [ "$PUBLISH_INPUT" = "true" ]; then
             should_publish="true"
-            package_version="${{ github.event.inputs.package_version }}"
+            package_version="$VERSION_INPUT"
             if [ -z "$package_version" ]; then
               echo "package_version is required when publish=true." >&2
               exit 1
