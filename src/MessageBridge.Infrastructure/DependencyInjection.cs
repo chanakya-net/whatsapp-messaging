@@ -30,9 +30,22 @@ public static class DependencyInjection
 
         services.AddDbContext<MessageBridgeDbContext>(options =>
             options.UseNpgsql(connectionString));
+        services.AddSingleton<IDbContextFactory<MessageBridgeDbContext>>(_ =>
+        {
+            var options = new DbContextOptionsBuilder<MessageBridgeDbContext>()
+                .UseNpgsql(connectionString)
+                .Options;
+            return new RuntimeMessageBridgeDbContextFactory(options);
+        });
         services.AddScoped<IMessageProcessingStore, MessageProcessingStore>();
         services.AddScoped<MessageProcessingCoordinator>();
         services.AddSingleton<LegacyMessageProcessingStore, TrackingMessageProcessingStoreAdapter>();
+        services.AddOptions<MessageProcessingHistoryOptions>()
+            .Bind(configuration.GetSection(MessageProcessingHistoryOptions.SectionName))
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+        services.AddHostedService<StaleProcessingRecoveryService>();
+        services.AddHostedService<ProcessingHistoryCleanupService>();
         return services;
     }
 
@@ -40,5 +53,16 @@ public static class DependencyInjection
     {
         public Task<ErrorOr<Success>> RecordMessageSentAsync(string messageId, string tenantId)
             => Task.FromResult<ErrorOr<Success>>(new Success());
+    }
+
+    private sealed class RuntimeMessageBridgeDbContextFactory(
+        DbContextOptions<MessageBridgeDbContext> options)
+        : IDbContextFactory<MessageBridgeDbContext>
+    {
+        public MessageBridgeDbContext CreateDbContext() => new(options);
+
+        public ValueTask<MessageBridgeDbContext> CreateDbContextAsync(
+            CancellationToken cancellationToken = default)
+            => ValueTask.FromResult(CreateDbContext());
     }
 }
