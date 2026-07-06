@@ -1,5 +1,6 @@
 using MessageBridge.Application.Handlers;
 using MessageBridge.Infrastructure.Messaging;
+using MessageBridge.Worker;
 using Wolverine;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -10,6 +11,7 @@ builder.Services.AddWolverine(opts =>
 {
     opts.Discovery.IncludeAssembly(typeof(SendWhatsAppMessageHandler).Assembly);
 });
+builder.Services.AddWorkerRuntimeServices();
 
 var app = builder.Build();
 
