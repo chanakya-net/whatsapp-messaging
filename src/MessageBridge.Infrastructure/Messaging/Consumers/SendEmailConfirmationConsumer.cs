@@ -1,3 +1,4 @@
+using ErrorOr;
 using MassTransit;
 using MessageBridge.Contracts.V1;
 using MessageBridge.Infrastructure.Messaging.Mappers;
@@ -16,6 +17,10 @@ public sealed class SendEmailConfirmationConsumer : IConsumer<SendEmailConfirmat
 
     public async Task Consume(ConsumeContext<SendEmailConfirmationCommand> context)
     {
-        await _messageBus.SendAsync(context.Message.ToApplicationCommand());
+        var result = await _messageBus.InvokeAsync<ErrorOr<Success>>(
+            context.Message.ToApplicationCommand(),
+            context.CancellationToken);
+
+        ConsumerDispatchFailure.ThrowIfError(nameof(SendEmailConfirmationCommand), result);
     }
 }

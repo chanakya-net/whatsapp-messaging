@@ -205,6 +205,76 @@ public sealed class WorkerHostTests
         sender.Emails[0].RecipientEmailAddress.ShouldBe("user@example.com");
     }
 
+    [Fact]
+    public async Task Consumer_Fails_WhatsApp_Delivery_When_Handler_Returns_Error()
+    {
+        var sender = new TrackingWhatsAppMessageSender
+        {
+            Result = Error.Failure(
+                "Provider.Send",
+                "token=abcdefghijklmnopqrstuvwxyz phone=+1 (415) 555-2671")
+        };
+
+        await using var factory = BuildWorkerFactory(
+            ValidRabbitMqSettings(),
+            services => AddTestRuntimeServices(services, whatsAppSender: sender));
+
+        using var scope = factory.Services.CreateScope();
+        var consumer = scope.ServiceProvider.GetRequiredService<SendWhatsAppMessageConsumer>();
+
+        var contract = new SendWhatsAppMessageCommand
+        {
+            MessageId = "message-003",
+            TenantId = "tenant-1",
+            RecipientPhoneNumber = "+15551234567",
+            TemplateName = "welcome",
+            TemplateLanguage = "en",
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+        };
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => consumer.Consume(CreateConsumeContext(contract)));
+
+        exception.Message.ShouldContain("SendWhatsAppMessageCommand");
+        exception.Message.ShouldContain("*******2671");
+        exception.Message.ShouldNotContain("abcdefghijklmnopqrstuvwxyz");
+    }
+
+    [Fact]
+    public async Task Consumer_Fails_Email_Delivery_When_Handler_Returns_Error()
+    {
+        var sender = new TrackingEmailConfirmationSender
+        {
+            Result = Error.Failure(
+                "Provider.Send",
+                "confirmation_token=super_secret_token_value user=person@example.com")
+        };
+
+        await using var factory = BuildWorkerFactory(
+            ValidRabbitMqSettings(),
+            services => AddTestRuntimeServices(services, emailSender: sender));
+
+        using var scope = factory.Services.CreateScope();
+        var consumer = scope.ServiceProvider.GetRequiredService<SendEmailConfirmationConsumer>();
+
+        var contract = new SendEmailConfirmationCommand
+        {
+            MessageId = "message-004",
+            TenantId = "tenant-1",
+            RecipientEmail = "user@example.com",
+            ConfirmationToken = "token-123",
+            ExpiresAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow.AddHours(1)),
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+        };
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => consumer.Consume(CreateConsumeContext(contract)));
+
+        exception.Message.ShouldContain("SendEmailConfirmationCommand");
+        exception.Message.ShouldContain("p***n@***.com");
+        exception.Message.ShouldNotContain("super_secret_token_value");
+    }
+
     private static MessageBridgeWorkerFactory BuildWorkerFactory(
         IReadOnlyDictionary<string, string?> values,
         Action<IServiceCollection>? configureServices = null)
@@ -258,22 +328,24 @@ public sealed class WorkerHostTests
     private sealed class TrackingWhatsAppMessageSender : IWhatsAppMessageSender
     {
         public List<WhatsAppMessage> Messages { get; } = [];
+        public ErrorOr<Success> Result { get; set; } = new Success();
 
         public Task<ErrorOr<Success>> SendAsync(WhatsAppMessage message, string tenantId)
         {
             Messages.Add(message);
-            return Task.FromResult<ErrorOr<Success>>(new Success());
+            return Task.FromResult(Result);
         }
     }
 
     private sealed class TrackingEmailConfirmationSender : IEmailConfirmationSender
     {
         public List<EmailConfirmation> Emails { get; } = [];
+        public ErrorOr<Success> Result { get; set; } = new Success();
 
         public Task<ErrorOr<Success>> SendAsync(EmailConfirmation email, string tenantId)
         {
             Emails.Add(email);
-            return Task.FromResult<ErrorOr<Success>>(new Success());
+            return Task.FromResult(Result);
         }
     }
 
