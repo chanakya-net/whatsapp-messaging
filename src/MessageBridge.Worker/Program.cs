@@ -11,9 +11,9 @@ builder.Services.AddWolverine(opts =>
 {
     opts.Discovery.IncludeAssembly(typeof(SendWhatsAppMessageHandler).Assembly);
 });
-builder.Services.AddWorkerRuntimeServices();
 
 var app = builder.Build();
+app.Services.ValidateWorkerRuntimeDependencies();
 
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" }));
 app.MapGet("/health/ready", () => Results.Ok(new { status = "ready" }));

@@ -1,6 +1,8 @@
 using ErrorOr;
 using System.Net;
+using System.Reflection;
 using Google.Protobuf.WellKnownTypes;
+using MassTransit;
 using MessageBridge.Application.Abstractions;
 using MessageBridge.Contracts.V1;
 using MessageBridge.Application.Messages;
@@ -24,7 +26,9 @@ public sealed class WorkerHostTests
     [Fact]
     public async Task Host_Maps_Only_Live_And_Ready_Health_Endpoints()
     {
-        await using var factory = BuildWorkerFactory(ValidRabbitMqSettings());
+        await using var factory = BuildWorkerFactory(
+            ValidRabbitMqSettings(),
+            services => AddTestRuntimeServices(services));
         using var client = factory.CreateClient();
 
         (await client.GetAsync("/health/live")).StatusCode.ShouldBe(HttpStatusCode.OK);
@@ -37,7 +41,9 @@ public sealed class WorkerHostTests
     [Fact]
     public void Host_Registers_MassTransit_Consumers_And_Wolverine()
     {
-        using var factory = BuildWorkerFactory(ValidRabbitMqSettings());
+        using var factory = BuildWorkerFactory(
+            ValidRabbitMqSettings(),
+            services => AddTestRuntimeServices(services));
         using var scope = factory.Services.CreateScope();
         var services = scope.ServiceProvider;
 
@@ -99,16 +105,28 @@ public sealed class WorkerHostTests
     [Fact]
     public void Host_Fails_To_Start_With_Invalid_RabbitMq_Options()
     {
-        using var factory = BuildWorkerFactory(new Dictionary<string, string?>
-        {
-            ["RabbitMq:ConnectionString"] = "rabbitmq://bad-scheme"
-        });
+        using var factory = BuildWorkerFactory(
+            new Dictionary<string, string?>
+            {
+                ["RabbitMq:ConnectionString"] = "rabbitmq://bad-scheme"
+            },
+            services => AddTestRuntimeServices(services));
 
         Assert.Throws<OptionsValidationException>(() => factory.CreateClient());
     }
 
     [Fact]
-    public async Task Host_Maps_And_Dispatches_WhatsApp_MessageContract_To_Wolverine_Handler()
+    public void Host_Fails_To_Start_When_Runtime_Dependencies_Are_Missing()
+    {
+        using var factory = BuildWorkerFactory(ValidRabbitMqSettings());
+
+        var exception = Assert.Throws<InvalidOperationException>(() => factory.CreateClient());
+
+        exception.Message.ShouldContain(nameof(IWhatsAppMessageSender));
+    }
+
+    [Fact]
+    public async Task Consumer_Maps_And_Dispatches_WhatsApp_MessageContract_To_Wolverine_Handler()
     {
         var sender = new TrackingWhatsAppMessageSender();
         var store = new TrackingMessageProcessingStore();
@@ -117,17 +135,15 @@ public sealed class WorkerHostTests
 
         await using var factory = BuildWorkerFactory(
             ValidRabbitMqSettings(),
-            services =>
-            {
-                services.AddSingleton<IWhatsAppMessageSender>(sender);
-                services.AddSingleton<IMessageProcessingStore>(store);
-                services.AddSingleton<ITenantConfigurationProvider>(tenantConfigProvider);
-                services.AddSingleton<IProviderRateLimiter>(rateLimiter);
-            });
+            services => AddTestRuntimeServices(
+                services,
+                whatsAppSender: sender,
+                store: store,
+                tenantConfigProvider: tenantConfigProvider,
+                rateLimiter: rateLimiter));
 
-        using var client = factory.CreateClient();
         using var scope = factory.Services.CreateScope();
-        var messageBus = scope.ServiceProvider.GetRequiredService<IMessageBus>();
+        var consumer = scope.ServiceProvider.GetRequiredService<SendWhatsAppMessageConsumer>();
 
         var contract = new SendWhatsAppMessageCommand
         {
@@ -141,8 +157,7 @@ public sealed class WorkerHostTests
             RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
         };
 
-        await messageBus.SendAsync(contract.ToApplicationCommand());
-        client.ShouldNotBeNull();
+        await consumer.Consume(CreateConsumeContext(contract));
         sender.Messages.Count.ShouldBe(1);
         store.RecordedMessageIds.ShouldContain("message-001");
         tenantConfigProvider.CallCount.ShouldBe(1);
@@ -151,7 +166,7 @@ public sealed class WorkerHostTests
     }
 
     [Fact]
-    public async Task Host_Maps_And_Dispatches_Email_MessageContract_To_Wolverine_Handler()
+    public async Task Consumer_Maps_And_Dispatches_Email_MessageContract_To_Wolverine_Handler()
     {
         var sender = new TrackingEmailConfirmationSender();
         var store = new TrackingMessageProcessingStore();
@@ -160,17 +175,15 @@ public sealed class WorkerHostTests
 
         await using var factory = BuildWorkerFactory(
             ValidRabbitMqSettings(),
-            services =>
-            {
-                services.AddSingleton<IEmailConfirmationSender>(sender);
-                services.AddSingleton<IMessageProcessingStore>(store);
-                services.AddSingleton<ITenantConfigurationProvider>(tenantConfigProvider);
-                services.AddSingleton<IProviderRateLimiter>(rateLimiter);
-            });
+            services => AddTestRuntimeServices(
+                services,
+                emailSender: sender,
+                store: store,
+                tenantConfigProvider: tenantConfigProvider,
+                rateLimiter: rateLimiter));
 
-        using var client = factory.CreateClient();
         using var scope = factory.Services.CreateScope();
-        var messageBus = scope.ServiceProvider.GetRequiredService<IMessageBus>();
+        var consumer = scope.ServiceProvider.GetRequiredService<SendEmailConfirmationConsumer>();
 
         var contract = new SendEmailConfirmationCommand
         {
@@ -184,8 +197,7 @@ public sealed class WorkerHostTests
             RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
         };
 
-        await messageBus.SendAsync(contract.ToApplicationCommand());
-        client.ShouldNotBeNull();
+        await consumer.Consume(CreateConsumeContext(contract));
         sender.Emails.Count.ShouldBe(1);
         store.RecordedMessageIds.ShouldContain("message-002");
         tenantConfigProvider.CallCount.ShouldBe(1);
@@ -205,6 +217,25 @@ public sealed class WorkerHostTests
             ["RabbitMq:Username"] = "guest",
             ["RabbitMq:Password"] = "guest"
         };
+
+    private static ConsumeContext<TMessage> CreateConsumeContext<TMessage>(TMessage message)
+        where TMessage : class
+        => ConsumeContextProxy<TMessage>.Create(message);
+
+    private static void AddTestRuntimeServices(
+        IServiceCollection services,
+        IWhatsAppMessageSender? whatsAppSender = null,
+        IEmailConfirmationSender? emailSender = null,
+        IMessageProcessingStore? store = null,
+        ITenantConfigurationProvider? tenantConfigProvider = null,
+        IProviderRateLimiter? rateLimiter = null)
+    {
+        services.AddSingleton<IWhatsAppMessageSender>(whatsAppSender ?? new TrackingWhatsAppMessageSender());
+        services.AddSingleton<IEmailConfirmationSender>(emailSender ?? new TrackingEmailConfirmationSender());
+        services.AddSingleton<IMessageProcessingStore>(store ?? new TrackingMessageProcessingStore());
+        services.AddSingleton<ITenantConfigurationProvider>(tenantConfigProvider ?? new TrackingTenantConfigurationProvider());
+        services.AddSingleton<IProviderRateLimiter>(rateLimiter ?? new TrackingProviderRateLimiter());
+    }
 
     private sealed class MessageBridgeWorkerFactory(
         IReadOnlyDictionary<string, string?> values,
@@ -277,5 +308,27 @@ public sealed class WorkerHostTests
             CallCount++;
             return Task.FromResult<ErrorOr<Success>>(new Success());
         }
+    }
+
+    private class ConsumeContextProxy<TMessage> : DispatchProxy
+        where TMessage : class
+    {
+        private TMessage? _message;
+
+        public static ConsumeContext<TMessage> Create(TMessage message)
+        {
+            var proxy = Create<ConsumeContext<TMessage>, ConsumeContextProxy<TMessage>>();
+            ((ConsumeContextProxy<TMessage>)(object)proxy)._message = message;
+            return proxy;
+        }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) =>
+            targetMethod?.Name switch
+            {
+                "get_Message" => _message!,
+                "get_CancellationToken" => CancellationToken.None,
+                _ => throw new NotSupportedException(
+                    $"Unexpected ConsumeContext member: {targetMethod?.Name}")
+            };
     }
 }
