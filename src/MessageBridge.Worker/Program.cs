@@ -1,4 +1,5 @@
 using MessageBridge.Application.Handlers;
+using MessageBridge.Infrastructure;
 using MessageBridge.Infrastructure.Messaging;
 using MessageBridge.Worker;
 using Wolverine;
