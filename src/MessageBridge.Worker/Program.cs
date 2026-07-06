@@ -1,12 +1,12 @@
 using MessageBridge.Application.Handlers;
-using MessageBridge.Infrastructure.Messaging;
+using MessageBridge.Infrastructure;
 using MessageBridge.Worker;
 using Wolverine;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddHealthChecks();
-builder.Services.AddMessageBridgeMassTransit(builder.Configuration);
+builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddWolverine(opts =>
 {
     opts.Discovery.IncludeAssembly(typeof(SendWhatsAppMessageHandler).Assembly);
