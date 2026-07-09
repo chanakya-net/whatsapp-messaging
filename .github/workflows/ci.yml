@@ -146,12 +146,23 @@ jobs:
       - name: Lint protobuf contracts
         run: buf lint
 
-      - name: Create local main branch for comparison
-        if: github.ref != 'refs/heads/main'
-        run: git fetch origin main:main
+      - name: Create local base branch for comparison
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch origin "$BASE_REF:$BASE_REF"
 
-      - name: Check breaking changes against main
-        run: buf breaking --against ".git#branch=main"
+      - name: Check breaking changes against base branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          module_path="src/MessageBridge.Contracts/protos"
+          if git ls-tree -r --name-only "$BASE_REF" -- "$module_path" | grep -Eq '\.proto$'; then
+            buf breaking --against ".git#branch=$BASE_REF"
+          else
+            echo "No protobuf contracts found on $BASE_REF; skipping breaking-change comparison."
+          fi
 
   samples:
     name: Sample build

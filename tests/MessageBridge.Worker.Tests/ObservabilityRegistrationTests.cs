@@ -7,8 +7,9 @@ using MessageBridge.Application.Providers;
 using MessageBridge.Contracts.V1;
 using MessageBridge.Infrastructure.Messaging.Consumers;
 using MessageBridge.Worker.Observability;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -17,6 +18,7 @@ using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
 using Shouldly;
+using Wolverine;
 using Xunit;
 
 namespace MessageBridge.Worker.Tests;
@@ -62,9 +64,9 @@ public sealed class ObservabilityRegistrationTests
     }
 
     [Fact]
-    public async Task Metrics_Endpoint_Gated_By_Config()
+    public async Task Endpoint_Test_Host_Does_Not_Start_Worker_Messaging_Runtime()
     {
-        await using var disabled = new ObservabilityWorkerFactory(
+        await using var host = await ObservabilityTestHost.StartAsync(
             new Dictionary<string, string?>
             {
                 ["RabbitMq:Host"] = "localhost",
@@ -73,10 +75,27 @@ public sealed class ObservabilityRegistrationTests
             },
             AddDependencyHealthProbes);
 
-        using var disabledClient = disabled.CreateClient();
-        (await disabledClient.GetAsync("/metrics")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        host.Services
+            .GetRequiredService<IServiceProviderIsService>()
+            .IsService(typeof(IMessageBus))
+            .ShouldBeFalse();
+    }
 
-        await using var enabled = new ObservabilityWorkerFactory(
+    [Fact]
+    public async Task Metrics_Endpoint_Gated_By_Config()
+    {
+        await using var disabled = await ObservabilityTestHost.StartAsync(
+            new Dictionary<string, string?>
+            {
+                ["RabbitMq:Host"] = "localhost",
+                ["RabbitMq:Username"] = "guest",
+                ["RabbitMq:Password"] = "guest"
+            },
+            AddDependencyHealthProbes);
+
+        (await disabled.Client.GetAsync("/metrics")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+
+        await using var enabled = await ObservabilityTestHost.StartAsync(
             new Dictionary<string, string?>
             {
                 ["Observability:MetricsEndpointEnabled"] = "true",
@@ -86,14 +105,13 @@ public sealed class ObservabilityRegistrationTests
             },
             AddDependencyHealthProbes);
 
-        using var enabledClient = enabled.CreateClient();
-        (await enabledClient.GetAsync("/metrics")).StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await enabled.Client.GetAsync("/metrics")).StatusCode.ShouldBe(HttpStatusCode.OK);
     }
 
     [Fact]
     public async Task Ready_Includes_Rabbit_And_Postgres_Without_Secrets()
     {
-        await using var factory = new ObservabilityWorkerFactory(
+        await using var host = await ObservabilityTestHost.StartAsync(
             new Dictionary<string, string?>
             {
                 ["RabbitMq:Host"] = "localhost",
@@ -103,11 +121,10 @@ public sealed class ObservabilityRegistrationTests
             },
             AddDependencyHealthProbes);
 
-        using var client = factory.CreateClient();
-        var response = await client.GetAsync("/health/ready");
-
-        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var response = await host.Client.GetAsync("/health/ready");
         var body = await response.Content.ReadAsStringAsync();
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, body);
         body.ShouldNotContain("super_secret_pwd");
 
         using var document = JsonDocument.Parse(body);
@@ -211,19 +228,42 @@ public sealed class ObservabilityRegistrationTests
             Task.FromResult<ErrorOr<Success>>(new Success());
     }
 
-    private sealed class ObservabilityWorkerFactory(
-        IReadOnlyDictionary<string, string?> values,
-        Action<IServiceCollection> configureServices)
-        : WebApplicationFactory<Program>
+    private sealed class ObservabilityTestHost : IAsyncDisposable
     {
-        protected override void ConfigureWebHost(IWebHostBuilder builder)
-        {
-            builder.ConfigureAppConfiguration((_, cfg) =>
-            {
-                cfg.AddInMemoryCollection(values);
-            });
+        private readonly WebApplication _app;
 
-            builder.ConfigureServices(configureServices);
+        private ObservabilityTestHost(WebApplication app)
+        {
+            _app = app;
+            Client = app.GetTestClient();
+        }
+
+        public HttpClient Client { get; }
+
+        public IServiceProvider Services => _app.Services;
+
+        public static async Task<ObservabilityTestHost> StartAsync(
+            IReadOnlyDictionary<string, string?> values,
+            Action<IServiceCollection> configureServices)
+        {
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.UseTestServer();
+            builder.Configuration.AddInMemoryCollection(values);
+
+            builder.Services.AddMessageBridgeObservability(builder.Configuration);
+            configureServices(builder.Services);
+
+            var app = builder.Build();
+            app.MapMessageBridgeHealthAndMetrics();
+            await app.StartAsync();
+
+            return new ObservabilityTestHost(app);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            Client.Dispose();
+            await _app.DisposeAsync();
         }
     }
 }
