@@ -1,0 +1,137 @@
+name: Publish NuGet Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Set to true to publish after validation"
+        required: true
+        type: boolean
+        default: false
+      package_version:
+        description: "SemVer package version for manual publish runs"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  BUILD_CONFIGURATION: Release
+  PACKAGE_OUTPUT_DIR: artifacts/packages
+
+jobs:
+  publish-packages:
+    name: Validate and publish packages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+          include-prerelease: true
+
+      - name: Restore solution
+        run: dotnet restore MessageBridge.sln
+
+      - name: Build solution
+        run: dotnet build MessageBridge.sln -c "$BUILD_CONFIGURATION" --no-restore
+
+      - name: Test package projects
+        # Only package-scoped tests gate the publish workflow (Contracts, Publisher, EntityFrameworkCore projects).
+        # Full suite including Application, Domain, Infrastructure, Worker, and Integration tests runs in CI.
+        run: |
+          dotnet test tests/MessageBridge.Contracts.Tests/MessageBridge.Contracts.Tests.csproj -c "$BUILD_CONFIGURATION" --no-restore
+          dotnet test tests/MessageBridge.Publisher.Tests/MessageBridge.Publisher.Tests.csproj -c "$BUILD_CONFIGURATION" --no-restore
+          dotnet test tests/MessageBridge.Publisher.EntityFrameworkCore.Tests/MessageBridge.Publisher.EntityFrameworkCore.Tests.csproj -c "$BUILD_CONFIGURATION" --no-restore
+
+      - name: Resolve release settings
+        shell: bash
+        env:
+          PUBLISH_INPUT: ${{ github.event.inputs.publish }}
+          VERSION_INPUT: ${{ github.event.inputs.package_version }}
+        run: |
+          set -euo pipefail
+
+          should_publish="false"
+          package_version=""
+
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            should_publish="true"
+            package_version="${GITHUB_REF_NAME#v}"
+          elif [ "$PUBLISH_INPUT" = "true" ]; then
+            should_publish="true"
+            package_version="$VERSION_INPUT"
+            if [ -z "$package_version" ]; then
+              echo "package_version is required when publish=true." >&2
+              exit 1
+            fi
+          fi
+
+          if [ "$should_publish" = "true" ]; then
+            if ! printf '%s' "$package_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([\-+][0-9A-Za-z.-]+)?$'; then
+              echo "Package version must be SemVer-compatible: $package_version" >&2
+              exit 1
+            fi
+
+            echo "PACKAGE_VERSION=$package_version" >> "$GITHUB_ENV"
+          fi
+
+          echo "SHOULD_PUBLISH=$should_publish" >> "$GITHUB_ENV"
+
+      - name: Pack NuGet packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pack_args=()
+          if [ "${SHOULD_PUBLISH:-false}" = "true" ]; then
+            pack_args+=("-p:PackageVersion=$PACKAGE_VERSION")
+          fi
+
+          dotnet pack src/MessageBridge.Contracts/MessageBridge.Contracts.csproj -c "$BUILD_CONFIGURATION" --no-restore -o "$PACKAGE_OUTPUT_DIR" "${pack_args[@]}"
+          dotnet pack src/MessageBridge.Publisher/MessageBridge.Publisher.csproj -c "$BUILD_CONFIGURATION" --no-restore -o "$PACKAGE_OUTPUT_DIR" "${pack_args[@]}"
+          dotnet pack src/MessageBridge.Publisher.EntityFrameworkCore/MessageBridge.Publisher.EntityFrameworkCore.csproj -c "$BUILD_CONFIGURATION" --no-restore -o "$PACKAGE_OUTPUT_DIR" "${pack_args[@]}"
+
+      - name: Verify feed configuration
+        if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
+        shell: bash
+        env:
+          NUGET_SOURCE_URL: ${{ secrets.NUGET_SOURCE_URL }}
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${NUGET_SOURCE_URL:-}" ]; then
+            echo "Missing required secret: NUGET_SOURCE_URL" >&2
+            exit 1
+          fi
+
+          if [ -z "${NUGET_API_KEY:-}" ]; then
+            echo "Missing required secret: NUGET_API_KEY" >&2
+            exit 1
+          fi
+
+      - name: Publish packages
+        if: ${{ github.event_name == 'push' || github.event.inputs.publish == 'true' }}
+        shell: bash
+        env:
+          NUGET_SOURCE_URL: ${{ secrets.NUGET_SOURCE_URL }}
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          dotnet nuget push "$PACKAGE_OUTPUT_DIR"/*.nupkg \
+            --source "$NUGET_SOURCE_URL" \
+            --api-key "$NUGET_API_KEY" \
+            --skip-duplicate

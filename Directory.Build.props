@@ -1,0 +1,33 @@
+<Project>
+  <PropertyGroup Label="C# Defaults">
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);CA1711;CA1716;CA1724</WarningsNotAsErrors>
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Deterministic Builds &amp; SourceLink">
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <DebugType Condition="'$(Configuration)' == 'Release'">embedded</DebugType>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package Metadata Defaults">
+    <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
+    <PackageReadmeFile Condition="'$(PackageReadmeFile)' == '' and Exists('$(MSBuildProjectDirectory)/README.md')">README.md</PackageReadmeFile>
+    <PackageProjectUrl Condition="'$(PackageProjectUrl)' == ''">https://github.com/chanakya-net/whatsapp-messaging</PackageProjectUrl>
+    <RepositoryType Condition="'$(RepositoryType)' == ''">git</RepositoryType>
+    <RepositoryUrl Condition="'$(RepositoryUrl)' == ''">https://github.com/chanakya-net/whatsapp-messaging</RepositoryUrl>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup Label="SourceLink Package (conditionally added)">
+    <!-- Defined in Directory.Packages.props when CPM is enabled -->
+  </ItemGroup>
+</Project>

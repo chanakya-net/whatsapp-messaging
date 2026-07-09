@@ -1,0 +1,38 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="FluentAssertions" />
+    <PackageReference Include="MassTransit" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Npgsql" />
+    <PackageReference Include="RabbitMQ.Client" />
+    <PackageReference Include="Shouldly" />
+    <PackageReference Include="Testcontainers" />
+    <PackageReference Include="Testcontainers.PostgreSql" />
+    <PackageReference Include="Testcontainers.RabbitMq" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MessageBridge.Application\MessageBridge.Application.csproj" />
+    <ProjectReference Include="..\..\src\MessageBridge.Contracts\MessageBridge.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\MessageBridge.Domain\MessageBridge.Domain.csproj" />
+    <ProjectReference Include="..\..\src\MessageBridge.Infrastructure\MessageBridge.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\MessageBridge.Publisher\MessageBridge.Publisher.csproj" />
+    <ProjectReference Include="..\..\src\MessageBridge.Worker\MessageBridge.Worker.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

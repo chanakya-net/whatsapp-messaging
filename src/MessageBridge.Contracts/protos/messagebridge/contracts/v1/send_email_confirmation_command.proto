@@ -1,0 +1,18 @@
+edition = "2023";
+
+package messagebridge.contracts.v1;
+
+option csharp_namespace = "MessageBridge.Contracts.V1";
+
+import "google/protobuf/timestamp.proto";
+
+message SendEmailConfirmationCommand {
+  string message_id = 1;
+  string tenant_id = 2;
+  string recipient_email = 3;
+  string recipient_name = 4;
+  string confirmation_token = 5;
+  google.protobuf.Timestamp expires_at_utc = 6;
+  string correlation_id = 7;
+  google.protobuf.Timestamp requested_at_utc = 8;
+}
