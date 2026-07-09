@@ -7,3 +7,7 @@ lint:
 breaking:
   use:
     - FILE
+  except:
+    # C++ codegen API compatibility; this repo only generates C#.
+    # Tripped by the edition 2024 -> 2023 downgrade (string_type default VIEW -> STRING).
+    - FIELD_SAME_CPP_STRING_TYPE

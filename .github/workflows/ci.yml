@@ -146,6 +146,10 @@ jobs:
       - name: Lint protobuf contracts
         run: buf lint
 
+      - name: Create local main branch for comparison
+        if: github.ref != 'refs/heads/main'
+        run: git fetch origin main:main
+
       - name: Check breaking changes against main
         run: buf breaking --against ".git#branch=main"
 

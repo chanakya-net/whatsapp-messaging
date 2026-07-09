@@ -110,7 +110,8 @@ public sealed class MessageProcessingStoreTests : IAsyncLifetime
         Assert.True(updated.UpdatedAt >= created.Record.UpdatedAt);
         Assert.NotNull(stored);
         Assert.Equal(ProcessingStatus.Failed, stored!.Status);
-        Assert.Equal(updated.ProcessedAt, stored.ProcessedAt);
+        // PostgreSQL stores timestamps at microsecond precision; DateTimeOffset has 100ns ticks.
+        Assert.Equal(updated.ProcessedAt!.Value, stored.ProcessedAt!.Value, TimeSpan.FromMicroseconds(1));
         Assert.Equal(updated.FailureReason, stored.FailureReason);
     }
 
