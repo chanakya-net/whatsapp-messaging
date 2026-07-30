@@ -9,6 +9,7 @@ using Xunit;
 
 namespace MessageBridge.Publisher.Tests;
 
+[Trait("Category", "Unit")]
 public sealed class MessageBridgePublisherTests
 {
     [Fact]

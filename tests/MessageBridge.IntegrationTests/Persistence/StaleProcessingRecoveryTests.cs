@@ -7,8 +7,9 @@ using System.Text.Json;
 using Testcontainers.PostgreSql;
 using Xunit.Sdk;
 
-namespace MessageBridge.Infrastructure.Tests.Persistence;
+namespace MessageBridge.IntegrationTests.Persistence;
 
+[Trait("Category", "Integration")]
 public sealed class StaleProcessingRecoveryTests : IAsyncLifetime
 {
     private PostgreSqlContainer? _container;

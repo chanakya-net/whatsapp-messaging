@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace MessageBridge.Publisher.EntityFrameworkCore.Tests;
 
+[Trait("Category", "Unit")]
 public class MessageBridgeOutboxStorageTests
 {
     [Fact]

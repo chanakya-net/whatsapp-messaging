@@ -8,6 +8,7 @@ using Xunit;
 
 namespace MessageBridge.Infrastructure.Tests.Providers;
 
+[Trait("Category", "Unit")]
 public sealed class PlaceholderEmailConfirmationSenderTests
 {
     [Fact]

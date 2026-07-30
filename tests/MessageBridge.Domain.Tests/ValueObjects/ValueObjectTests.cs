@@ -1,5 +1,6 @@
 ﻿namespace MessageBridge.Domain.Tests.ValueObjects;
 
+[Trait("Category", "Unit")]
 public class TenantIdTests
 {
     public static IEnumerable<object[]> TenantIdInvalidValues => new[]
@@ -29,6 +30,7 @@ public class TenantIdTests
     }
 }
 
+[Trait("Category", "Unit")]
 public class MessageIdTests
 {
     [Fact]
@@ -52,6 +54,7 @@ public class MessageIdTests
     }
 }
 
+[Trait("Category", "Unit")]
 public class CorrelationIdTests
 {
     [Fact]
@@ -75,6 +78,7 @@ public class CorrelationIdTests
     }
 }
 
+[Trait("Category", "Unit")]
 public class PhoneNumberTests
 {
     [Fact]
@@ -98,6 +102,7 @@ public class PhoneNumberTests
     }
 }
 
+[Trait("Category", "Unit")]
 public class EmailAddressTests
 {
     [Fact]
@@ -121,6 +126,7 @@ public class EmailAddressTests
     }
 }
 
+[Trait("Category", "Unit")]
 public class TemplateNameTests
 {
     [Fact]
@@ -144,6 +150,7 @@ public class TemplateNameTests
     }
 }
 
+[Trait("Category", "Unit")]
 public class ConfirmationTokenTests
 {
     [Fact]

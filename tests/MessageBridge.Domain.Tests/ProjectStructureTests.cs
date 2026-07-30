@@ -1,5 +1,6 @@
 ﻿namespace MessageBridge.Domain.Tests;
 
+[Trait("Category", "Unit")]
 public class ProjectStructureTests
 {
     [Fact]

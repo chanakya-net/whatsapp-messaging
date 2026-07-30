@@ -1,0 +1,21 @@
+{
+  "solution": {
+    "path": "MessageBridge.sln",
+    "projects": [
+      "src\\MessageBridge.Application\\MessageBridge.Application.csproj",
+      "src\\MessageBridge.Contracts\\MessageBridge.Contracts.csproj",
+      "src\\MessageBridge.Domain\\MessageBridge.Domain.csproj",
+      "src\\MessageBridge.Infrastructure\\MessageBridge.Infrastructure.csproj",
+      "src\\MessageBridge.Publisher\\MessageBridge.Publisher.csproj",
+      "src\\MessageBridge.Publisher.EntityFrameworkCore\\MessageBridge.Publisher.EntityFrameworkCore.csproj",
+      "src\\MessageBridge.Worker\\MessageBridge.Worker.csproj",
+      "tests\\MessageBridge.Application.Tests\\MessageBridge.Application.Tests.csproj",
+      "tests\\MessageBridge.Contracts.Tests\\MessageBridge.Contracts.Tests.csproj",
+      "tests\\MessageBridge.Domain.Tests\\MessageBridge.Domain.Tests.csproj",
+      "tests\\MessageBridge.Infrastructure.Tests\\MessageBridge.Infrastructure.Tests.csproj",
+      "tests\\MessageBridge.Publisher.Tests\\MessageBridge.Publisher.Tests.csproj",
+      "tests\\MessageBridge.Publisher.EntityFrameworkCore.Tests\\MessageBridge.Publisher.EntityFrameworkCore.Tests.csproj",
+      "tests\\MessageBridge.Worker.Tests\\MessageBridge.Worker.Tests.csproj"
+    ]
+  }
+}

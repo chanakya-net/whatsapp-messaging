@@ -4,6 +4,7 @@ using Shouldly;
 
 namespace MessageBridge.Infrastructure.Tests.Messaging;
 
+[Trait("Category", "Unit")]
 public sealed class RabbitMqTopologyOptionsTests
 {
     // --- MessageBridgeTopologyOptions ---

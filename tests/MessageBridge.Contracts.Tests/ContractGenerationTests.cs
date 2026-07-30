@@ -4,6 +4,7 @@ using MessageBridge.Contracts.V1;
 
 namespace MessageBridge.Contracts.Tests;
 
+[Trait("Category", "Unit")]
 public class ContractGenerationTests
 {
     [Fact]
