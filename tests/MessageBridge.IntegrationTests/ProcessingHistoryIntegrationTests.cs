@@ -3,49 +3,22 @@ using MessageBridge.Application.Persistence;
 using MessageBridge.Domain.Processing;
 using MessageBridge.Infrastructure.Persistence;
 using MessageBridge.IntegrationTests.Fixtures;
-using Microsoft.Extensions.DependencyInjection;
+using MessageBridge.IntegrationTests.Persistence;
 using Xunit;
 
 namespace MessageBridge.IntegrationTests;
 
-public sealed class ProcessingHistoryIntegrationTests : IAsyncLifetime
+[Trait("Category", "Integration")]
+[Collection(IntegrationTestCollection.Name)]
+public sealed class ProcessingHistoryIntegrationTests(IntegrationEnvironmentFixture fixture)
 {
-    private PostgresFixture? _postgresFixture;
-    private MessageBridgeDbContext? _dbContext;
-    private IMessageProcessingStore? _store;
-
-    public async Task InitializeAsync()
-    {
-        _postgresFixture = new PostgresFixture();
-        await _postgresFixture.InitializeAsync();
-        _dbContext = await _postgresFixture.CreateDbContextAsync();
-        _store = new MessageProcessingStore(_dbContext);
-    }
-
-    public async Task DisposeAsync()
-    {
-        if (_dbContext is not null)
-        {
-            await _dbContext.DisposeAsync();
-        }
-
-        if (_postgresFixture is not null)
-        {
-            await _postgresFixture.DisposeAsync();
-        }
-    }
+    private readonly IntegrationEnvironmentFixture _fixture = fixture;
 
     [Fact]
     public async Task CreateAsync_FirstCreate_ReturnsCreatedOutcome()
     {
-        var req = new CreateMessageProcessingRequest(
-            "msg-001",
-            "whatsapp.send",
-            "hash-001",
-            "provider-x",
-            new Dictionary<string, string?> { ["ref"] = "123" });
-
-        var result = await _store!.CreateAsync(req);
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var result = await CreateStore(scenario).CreateAsync(CreateRequest("msg-001", "whatsapp.send"));
 
         result.Outcome.Should().Be(CreateMessageProcessingOutcome.Created);
         result.Record.MessageId.Should().Be("msg-001");
@@ -53,17 +26,14 @@ public sealed class ProcessingHistoryIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task CreateAsync_DuplicateMessageId_ReturnsDuplicateOutcome()
+    public async Task CreateAsync_DuplicateMessageAndType_ReturnsDuplicateOutcome()
     {
-        var req = new CreateMessageProcessingRequest(
-            "msg-dup-001",
-            "email.confirm",
-            "hash-x",
-            "provider-y",
-            new Dictionary<string, string?> { ["ref"] = "456" });
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var store = CreateStore(scenario);
+        var request = CreateRequest("msg-dup-001", "email.confirm");
 
-        var first = await _store!.CreateAsync(req);
-        var second = await _store.CreateAsync(req);
+        var first = await store.CreateAsync(request);
+        var second = await store.CreateAsync(request);
 
         first.Outcome.Should().Be(CreateMessageProcessingOutcome.Created);
         second.Outcome.Should().Be(CreateMessageProcessingOutcome.Duplicate);
@@ -73,21 +43,17 @@ public sealed class ProcessingHistoryIntegrationTests : IAsyncLifetime
     [Fact]
     public async Task UpdateStatusAsync_TransitionsFromReceivedToCompleted()
     {
-        var msgId = "msg-status-001";
-        var msgType = "whatsapp.send";
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var store = CreateStore(scenario);
+        var request = CreateRequest("msg-status-001", "whatsapp.send");
 
-        var req = new CreateMessageProcessingRequest(
-            msgId,
-            msgType,
-            "hash-y",
-            "provider-z",
-            new Dictionary<string, string?> { ["ref"] = "789" });
+        var created = await store.CreateAsync(request);
+        var updated = await store.UpdateStatusAsync(
+            request.MessageId,
+            request.MessageType,
+            ProcessingStatus.Completed);
 
-        var created = await _store!.CreateAsync(req);
         created.Record.Status.Should().Be(ProcessingStatus.Received);
-
-        var updated = await _store.UpdateStatusAsync(msgId, msgType, ProcessingStatus.Completed);
-
         updated.Status.Should().Be(ProcessingStatus.Completed);
         updated.ProcessedAt.Should().NotBeNull();
         updated.FailureReason.Should().BeNull();
@@ -96,21 +62,14 @@ public sealed class ProcessingHistoryIntegrationTests : IAsyncLifetime
     [Fact]
     public async Task UpdateStatusAsync_TransitionsToFailedWithReason()
     {
-        var msgId = "msg-fail-001";
-        var msgType = "email.confirm";
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var store = CreateStore(scenario);
+        var request = CreateRequest("msg-fail-001", "email.confirm");
 
-        var req = new CreateMessageProcessingRequest(
-            msgId,
-            msgType,
-            "hash-z",
-            "provider-a",
-            new Dictionary<string, string?> { ["ref"] = "abc" });
-
-        var created = await _store!.CreateAsync(req);
-
-        var updated = await _store.UpdateStatusAsync(
-            msgId,
-            msgType,
+        await store.CreateAsync(request);
+        var updated = await store.UpdateStatusAsync(
+            request.MessageId,
+            request.MessageType,
             ProcessingStatus.Failed,
             "Provider rate limit exceeded");
 
@@ -120,27 +79,25 @@ public sealed class ProcessingHistoryIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task GetAsync_ReturnsStoredRecord()
+    public async Task GetAsync_ReturnsStoredRecordWithMetadata()
     {
-        var msgId = "msg-get-001";
-        var msgType = "whatsapp.send";
-
-        var req = new CreateMessageProcessingRequest(
-            msgId,
-            msgType,
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var store = CreateStore(scenario);
+        var request = new CreateMessageProcessingRequest(
+            "msg-get-001",
+            "whatsapp.send",
             "hash-a",
             "provider-b",
             new Dictionary<string, string?> { ["ref"] = "def", ["extra"] = "data" });
 
-        await _store!.CreateAsync(req);
-
-        var retrieved = await _store.GetAsync(msgId, msgType);
+        await store.CreateAsync(request);
+        var retrieved = await store.GetAsync(request.MessageId, request.MessageType);
 
         retrieved.Should().NotBeNull();
-        retrieved!.MessageId.Should().Be(msgId);
-        retrieved.MessageType.Should().Be(msgType);
-        retrieved.PayloadHash.Should().Be("hash-a");
-        retrieved.Provider.Should().Be("provider-b");
+        retrieved!.MessageId.Should().Be(request.MessageId);
+        retrieved.MessageType.Should().Be(request.MessageType);
+        retrieved.PayloadHash.Should().Be(request.PayloadHash);
+        retrieved.Provider.Should().Be(request.Provider);
         retrieved.ProviderMetadata["ref"].Should().Be("def");
         retrieved.ProviderMetadata["extra"].Should().Be("data");
     }
@@ -148,27 +105,35 @@ public sealed class ProcessingHistoryIntegrationTests : IAsyncLifetime
     [Fact]
     public async Task GetAsync_NonExistentMessage_ReturnsNull()
     {
-        var retrieved = await _store!.GetAsync("nonexistent", "fake.type");
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+
+        var retrieved = await CreateStore(scenario).GetAsync("nonexistent", "fake.type");
+
         retrieved.Should().BeNull();
     }
 
     [Fact]
     public async Task ProcessingRecords_PersistAttemptCount()
     {
-        var msgId = "msg-attempt-001";
-        var msgType = "whatsapp.send";
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var store = CreateStore(scenario);
+        var request = CreateRequest("msg-attempt-001", "whatsapp.send");
 
-        var req = new CreateMessageProcessingRequest(
-            msgId,
-            msgType,
-            "hash-attempt",
-            "provider",
-            new Dictionary<string, string?> { ["ref"] = "ghi" });
+        var created = await store.CreateAsync(request);
+        var retrieved = await store.GetAsync(request.MessageId, request.MessageType);
 
-        var created = await _store!.CreateAsync(req);
         created.Record.AttemptCount.Should().Be(1);
-
-        var retrieved = await _store.GetAsync(msgId, msgType);
         retrieved!.AttemptCount.Should().Be(1);
     }
+
+    private static MessageProcessingStore CreateStore(MigratedDatabaseScenario scenario) =>
+        new(scenario.DbContext);
+
+    private static CreateMessageProcessingRequest CreateRequest(string messageId, string messageType) =>
+        new(
+            messageId,
+            messageType,
+            $"hash-{messageId}",
+            "provider",
+            new Dictionary<string, string?> { ["ref"] = "123" });
 }
