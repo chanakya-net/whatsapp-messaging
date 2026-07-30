@@ -35,12 +35,20 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
 
         try
         {
-            await WaitForReadyAsync(_postgres.StartAsync());
-            await WaitForReadyAsync(_rabbitMq.StartAsync());
+            await WaitForReadyAsync(_postgres.StartAsync);
+            await WaitForReadyAsync(_rabbitMq.StartAsync);
         }
         catch
         {
-            await DisposeAsync();
+            try
+            {
+                await DisposeAsync();
+            }
+            catch
+            {
+                // Preserve the container startup failure.
+            }
+
             throw;
         }
     }
@@ -83,14 +91,36 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
             .UseNpgsql(connectionStringBuilder.ConnectionString)
             .Options;
 
-        var dbContext = new MessageBridgeDbContext(options);
-        await dbContext.Database.MigrateAsync();
+        MessageBridgeDbContext? dbContext = null;
+
+        try
+        {
+            dbContext = new MessageBridgeDbContext(options);
+            await dbContext.Database.MigrateAsync();
+        }
+        catch
+        {
+            if (dbContext is not null)
+            {
+                await TryDisposeAsync(dbContext);
+            }
+
+            await TryDropDatabaseAsync(databaseName);
+            throw;
+        }
 
         return (dbContext, databaseName);
     }
 
     public async Task DropDatabaseAsync(string databaseName)
     {
+        var databaseConnectionString = new NpgsqlConnectionStringBuilder(_postgres!.GetConnectionString())
+        {
+            Database = databaseName
+        }.ConnectionString;
+        using var databaseConnection = new NpgsqlConnection(databaseConnectionString);
+        NpgsqlConnection.ClearPool(databaseConnection);
+
         await using var adminConnection = new NpgsqlConnection(_postgres!.GetConnectionString());
         await adminConnection.OpenAsync();
 
@@ -158,14 +188,41 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
         throw new TimeoutException(timeoutMessage);
     }
 
-    private static async Task WaitForReadyAsync(Task startTask)
+    private static async Task WaitForReadyAsync(Func<CancellationToken, Task> startAsync)
     {
-        var completed = await Task.WhenAny(startTask, Task.Delay(ReadinessTimeout));
-        if (completed != startTask)
+        using var cancellation = new CancellationTokenSource(ReadinessTimeout);
+
+        try
+        {
+            await startAsync(cancellation.Token);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
             throw new TimeoutException($"Container did not become ready within {ReadinessTimeout}.");
         }
+    }
 
-        await startTask;
+    private static async Task TryDisposeAsync(MessageBridgeDbContext dbContext)
+    {
+        try
+        {
+            await dbContext.DisposeAsync();
+        }
+        catch
+        {
+            // Preserve the migration failure.
+        }
+    }
+
+    private async Task TryDropDatabaseAsync(string databaseName)
+    {
+        try
+        {
+            await DropDatabaseAsync(databaseName);
+        }
+        catch
+        {
+            // Preserve the migration failure.
+        }
     }
 }

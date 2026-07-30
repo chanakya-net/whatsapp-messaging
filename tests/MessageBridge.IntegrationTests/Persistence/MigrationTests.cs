@@ -11,6 +11,9 @@ namespace MessageBridge.IntegrationTests.Persistence;
 public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
 {
     private const string TableName = "message_processing_history";
+    private const string CreatedAtIndexName = "IX_message_processing_history_created_at";
+    private const string MessageIdTypeIndexName = "IX_message_processing_history_message_id_message_type";
+    private const string StatusIndexName = "IX_message_processing_history_status";
 
     private readonly IntegrationEnvironmentFixture _fixture = fixture;
 
@@ -39,10 +42,10 @@ public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
             columns.ShouldContainKeyAndValue("processed_at", "timestamp with time zone");
 
             var indexNames = await GetIndexNamesAsync(connection);
-            indexNames.ShouldContain(name => name.Contains("status", StringComparison.OrdinalIgnoreCase));
-            indexNames.ShouldContain(name => name.Contains("created_at", StringComparison.OrdinalIgnoreCase));
+            indexNames.ShouldContain(StatusIndexName);
+            indexNames.ShouldContain(CreatedAtIndexName);
 
-            var hasUniqueMessageIdTypeConstraint = await HasUniqueIndexAsync(connection);
+            var hasUniqueMessageIdTypeConstraint = await HasUniqueIndexAsync(connection, MessageIdTypeIndexName);
             hasUniqueMessageIdTypeConstraint.ShouldBeTrue();
         }
         finally
@@ -86,19 +89,20 @@ public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
         return names;
     }
 
-    private static async Task<bool> HasUniqueIndexAsync(NpgsqlConnection connection)
+    private static async Task<bool> HasUniqueIndexAsync(NpgsqlConnection connection, string indexName)
     {
         await using var command = new NpgsqlCommand(
             """
-            SELECT COUNT(*)
+            SELECT i.indisunique
             FROM pg_index i
-            JOIN pg_class c ON c.oid = i.indrelid
-            WHERE c.relname = @table AND i.indisunique;
+            JOIN pg_class table_class ON table_class.oid = i.indrelid
+            JOIN pg_class index_class ON index_class.oid = i.indexrelid
+            WHERE table_class.relname = @table AND index_class.relname = @indexName;
             """,
             connection);
         command.Parameters.AddWithValue("table", TableName);
+        command.Parameters.AddWithValue("indexName", indexName);
 
-        var count = (long)(await command.ExecuteScalarAsync())!;
-        return count > 0;
+        return await command.ExecuteScalarAsync() is true;
     }
 }
