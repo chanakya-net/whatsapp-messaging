@@ -4,14 +4,31 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-UNIT_OUTPUT_DIR="${REPO_ROOT}/coverage-unit"
-INTEGRATION_OUTPUT_DIR="${REPO_ROOT}/coverage-integration"
+VALIDATOR="${REPO_ROOT}/eng/coverage/validator.py"
+TOOL_MANIFEST="${REPO_ROOT}/.config/dotnet-tools.json"
+ARTIFACT_ROOT="${REPO_ROOT}/artifacts"
+UNIT_OUTPUT_DIR="${ARTIFACT_ROOT}/coverage-unit"
+INTEGRATION_OUTPUT_DIR="${ARTIFACT_ROOT}/coverage-integration"
 
-# Clean previous runs
+run_reportgenerator() {
+  dotnet tool run reportgenerator "$@"
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  exec python3 "${REPO_ROOT}/eng/coverage/test_validator.py"
+fi
+
+if [[ "${1:-}" == "--validate-unit" ]]; then
+  [[ $# == 2 ]] || { echo "Usage: $0 --validate-unit <coverage-directory-or-summary>" >&2; exit 2; }
+  exec python3 "$VALIDATOR" "$2"
+fi
+
+dotnet tool restore --tool-manifest "$TOOL_MANIFEST" >/dev/null
+python3 "${REPO_ROOT}/eng/coverage/test_validator.py"
+
 rm -rf "$UNIT_OUTPUT_DIR" "$INTEGRATION_OUTPUT_DIR"
 mkdir -p "$UNIT_OUTPUT_DIR" "$INTEGRATION_OUTPUT_DIR"
 
-# Run unit tests with coverage (exclude integration tests)
 echo "Running unit tests with coverage..."
 dotnet test \
   MessageBridge.sln \
@@ -23,22 +40,22 @@ dotnet test \
   --filter "FullyQualifiedName!~IntegrationTests"
 
 echo "Generating unit coverage report..."
-reportgenerator \
+run_reportgenerator \
   -reports:"$UNIT_OUTPUT_DIR/**/coverage.cobertura.xml" \
   -targetdir:"$UNIT_OUTPUT_DIR/report" \
   -reporttypes:"HtmlSummary;HtmlChart;XmlSummary" \
   -historydir:"$UNIT_OUTPUT_DIR/history" \
   -verbosity:off
 
-# Extract coverage metrics from XML summary
-if [ -f "$UNIT_OUTPUT_DIR/report/Summary.xml" ]; then
-  grep -E 'LineCoverage|BranchCoverage' "$UNIT_OUTPUT_DIR/report/Summary.xml" || echo "No summary XML found"
+echo "Validating unit coverage thresholds..."
+if python3 "$VALIDATOR" "$UNIT_OUTPUT_DIR/report"; then
+  UNIT_VALIDATION_RC=0
 else
-  echo "Unit coverage report generated at $UNIT_OUTPUT_DIR/report/index.html"
+  UNIT_VALIDATION_RC=$?
+  echo "Unit coverage threshold validation failed (status $UNIT_VALIDATION_RC); integration reporting continues."
 fi
 
-# Run integration tests separately (no thresholds applied)
-echo "Running integration tests with coverage..."
+echo "Running integration tests with coverage (unthresholded)..."
 dotnet test \
   MessageBridge.sln \
   --configuration Release \
@@ -48,21 +65,24 @@ dotnet test \
   --logger "console;verbosity=minimal" \
   --filter "FullyQualifiedName~IntegrationTests"
 
-echo "Generating integration coverage report..."
-if ls "$INTEGRATION_OUTPUT_DIR"/**/coverage.cobertura.xml 1>/dev/null 2>&1; then
-  reportgenerator \
+echo "Generating integration coverage report (unthresholded)..."
+if find "$INTEGRATION_OUTPUT_DIR" -name coverage.cobertura.xml -print -quit | grep -q .; then
+  run_reportgenerator \
     -reports:"$INTEGRATION_OUTPUT_DIR/**/coverage.cobertura.xml" \
     -targetdir:"$INTEGRATION_OUTPUT_DIR/report" \
     -reporttypes:"HtmlSummary;HtmlChart" \
     -historydir:"$INTEGRATION_OUTPUT_DIR/history" \
     -verbosity:off
-  echo "Integration coverage report generated at $INTEGRATION_OUTPUT_DIR/report/index.html"
+  echo "Integration coverage report generated at $INTEGRATION_OUTPUT_DIR/report/summary.html"
 else
   echo "No integration coverage data found"
 fi
 
-echo ""
 echo "Coverage verification complete."
 echo "Reports available at:"
-echo "  Unit:        $UNIT_OUTPUT_DIR/report/index.html"
-echo "  Integration: $INTEGRATION_OUTPUT_DIR/report/index.html"
+echo "  Unit:        $UNIT_OUTPUT_DIR/report/summary.html"
+echo "  Integration: $INTEGRATION_OUTPUT_DIR/report/summary.html"
+
+if (( UNIT_VALIDATION_RC != 0 )); then
+  exit "$UNIT_VALIDATION_RC"
+fi
