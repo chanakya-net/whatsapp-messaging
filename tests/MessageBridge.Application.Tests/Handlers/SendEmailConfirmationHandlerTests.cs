@@ -140,13 +140,33 @@ public sealed class SendEmailConfirmationHandlerTests
         result.FirstError.Code.ShouldBe("Store.WriteError");
     }
 
+    [Fact]
+    public async Task Handle_ShouldPropagateCancellation_WhenProviderCancels()
+    {
+        var command = new SendEmailConfirmation(
+            "msg-001", "tenant-1", "user@example.com", null, "token-abc123", DateTimeOffset.UtcNow.AddHours(1), null,
+            DateTimeOffset.UtcNow);
+        var providerMock = new StubEmailConfirmationSender { Cancel = true };
+        var handler = new SendEmailConfirmationHandler(
+            providerMock,
+            new StubMessageProcessingStore(),
+            new StubTenantConfigurationProvider(),
+            new StubProviderRateLimiter());
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => handler.Handle(command));
+    }
+
     private sealed class StubEmailConfirmationSender : IEmailConfirmationSender
     {
         public List<EmailConfirmation> SentEmails { get; } = [];
         public Error? FailWith { get; set; }
+        public bool Cancel { get; set; }
 
         public async Task<ErrorOr<Success>> SendAsync(EmailConfirmation email, string tenantId)
         {
+            if (Cancel)
+                throw new OperationCanceledException();
+
             if (FailWith is not null)
                 return FailWith.Value;
 

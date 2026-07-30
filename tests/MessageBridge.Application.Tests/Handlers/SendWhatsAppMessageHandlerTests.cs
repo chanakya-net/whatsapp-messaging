@@ -140,13 +140,32 @@ public sealed class SendWhatsAppMessageHandlerTests
         result.FirstError.Code.ShouldBe("Store.WriteError");
     }
 
+    [Fact]
+    public async Task Handle_ShouldPropagateCancellation_WhenProviderCancels()
+    {
+        var command = new SendWhatsAppMessage(
+            "msg-001", "tenant-1", "+15551234567", "welcome", "en-US", null, null, DateTimeOffset.UtcNow);
+        var providerMock = new StubWhatsAppMessageSender { Cancel = true };
+        var handler = new SendWhatsAppMessageHandler(
+            providerMock,
+            new StubMessageProcessingStore(),
+            new StubTenantConfigurationProvider(),
+            new StubProviderRateLimiter());
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => handler.Handle(command));
+    }
+
     private sealed class StubWhatsAppMessageSender : IWhatsAppMessageSender
     {
         public List<WhatsAppMessage> SentMessages { get; } = [];
         public Error? FailWith { get; set; }
+        public bool Cancel { get; set; }
 
         public async Task<ErrorOr<Success>> SendAsync(WhatsAppMessage message, string tenantId)
         {
+            if (Cancel)
+                throw new OperationCanceledException();
+
             if (FailWith is not null)
                 return FailWith.Value;
 

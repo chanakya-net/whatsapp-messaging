@@ -4,6 +4,16 @@
 public class RecipientMaskerTests
 {
     [Theory]
+    [InlineData(null, "")]
+    [InlineData("   ", "")]
+    [InlineData("1234", "****")]
+    [InlineData("12-34", "****")]
+    public void MaskPhoneNumber_HandlesShortOrBlankValues(string? input, string expected)
+    {
+        MessageBridge.Domain.Privacy.RecipientMasker.MaskPhoneNumber(input).ShouldBe(expected);
+    }
+
+    [Theory]
     [InlineData("+1 (415) 555-2671", "*******2671")]
     [InlineData("1234567", "***4567")]
     [InlineData("no-number", "")]
@@ -23,5 +33,16 @@ public class RecipientMaskerTests
         var masked = MessageBridge.Domain.Privacy.RecipientMasker.MaskEmailAddress(input);
 
         masked.ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData(null, "")]
+    [InlineData(" ", "")]
+    [InlineData("missing-at", "***")]
+    [InlineData("@example.com", "***")]
+    [InlineData("user@example", "***")]
+    public void MaskEmailAddress_ReturnsFallbackForInvalidValues(string? input, string expected)
+    {
+        MessageBridge.Domain.Privacy.RecipientMasker.MaskEmailAddress(input).ShouldBe(expected);
     }
 }

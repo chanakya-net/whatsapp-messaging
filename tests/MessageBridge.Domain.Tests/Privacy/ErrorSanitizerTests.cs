@@ -14,6 +14,15 @@ public class ErrorSanitizerTests
     }
 
     [Fact]
+    public void Sanitize_RedactsSecretsWithSeparators()
+    {
+        var sanitized = MessageBridge.Domain.Privacy.ErrorSanitizer.Sanitize(
+            "{api-key:secret-value; authorization = BearerToken}");
+
+        sanitized.ShouldBe("{[REDACTED_API-KEY]; [REDACTED_AUTHORIZATION]}");
+    }
+
+    [Fact]
     public void Sanitize_RedactsConnectionStrings()
     {
         var sanitized = MessageBridge.Domain.Privacy.ErrorSanitizer.Sanitize(
@@ -46,6 +55,15 @@ public class ErrorSanitizerTests
             "raw token zyxwvutsrqponmlkjihgfedcba");
 
         sanitized.ShouldBe("raw token <zyx...redacted>");
+    }
+
+    [Fact]
+    public void Sanitize_RedactsMultipleRecipientTypes()
+    {
+        var sanitized = MessageBridge.Domain.Privacy.ErrorSanitizer.Sanitize(
+            "email=person@example.com phone=+1 (415) 555-2671");
+
+        sanitized.ShouldBe("email=p***n@***.com phone=*******2671");
     }
 
     [Theory]
