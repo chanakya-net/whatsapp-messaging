@@ -73,22 +73,10 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
     /// </summary>
     public async Task<(MessageBridgeDbContext DbContext, string DatabaseName)> CreateMigratedDatabaseAsync()
     {
-        var databaseName = $"messagebridge_it_{Guid.NewGuid():N}";
-
-        await using (var adminConnection = new NpgsqlConnection(_postgres!.GetConnectionString()))
-        {
-            await adminConnection.OpenAsync();
-            await using var createCommand = new NpgsqlCommand($"CREATE DATABASE \"{databaseName}\"", adminConnection);
-            await createCommand.ExecuteNonQueryAsync();
-        }
-
-        var connectionStringBuilder = new NpgsqlConnectionStringBuilder(_postgres.GetConnectionString())
-        {
-            Database = databaseName
-        };
+        var (connectionString, databaseName) = await CreateDatabaseAsync();
 
         var options = new DbContextOptionsBuilder<MessageBridgeDbContext>()
-            .UseNpgsql(connectionStringBuilder.ConnectionString)
+            .UseNpgsql(connectionString)
             .Options;
 
         MessageBridgeDbContext? dbContext = null;
@@ -110,6 +98,27 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
         }
 
         return (dbContext, databaseName);
+    }
+
+    /// <summary>
+    /// Creates a uniquely named empty database for tests that own their EF Core model.
+    /// The caller must remove it with <see cref="DropDatabaseAsync"/>.
+    /// </summary>
+    public async Task<(string ConnectionString, string DatabaseName)> CreateDatabaseAsync()
+    {
+        var databaseName = $"messagebridge_it_{Guid.NewGuid():N}";
+        await using var adminConnection = new NpgsqlConnection(_postgres!.GetConnectionString());
+        await adminConnection.OpenAsync();
+        await using var createCommand = new NpgsqlCommand(
+            $"CREATE DATABASE \"{databaseName}\"",
+            adminConnection);
+        await createCommand.ExecuteNonQueryAsync();
+
+        var builder = new NpgsqlConnectionStringBuilder(_postgres.GetConnectionString())
+        {
+            Database = databaseName
+        };
+        return (builder.ConnectionString, databaseName);
     }
 
     public async Task DropDatabaseAsync(string databaseName)
@@ -168,6 +177,24 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
     public static Task<T> PollUntilAssertedAsync<T>(Func<Task<T?>> probe, string? timeoutMessage = null)
         where T : class
         => PollUntilAsync(probe, AssertionTimeout, timeoutMessage ?? $"Condition was not met within {AssertionTimeout}.");
+
+    /// <summary>Polls for an observation window and fails as soon as the condition changes.</summary>
+    public static async Task AssertRemainsAsync(
+        Func<Task<bool>> probe,
+        TimeSpan observationWindow,
+        string failureMessage)
+    {
+        var deadline = DateTimeOffset.UtcNow.Add(observationWindow);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (!await probe())
+            {
+                throw new InvalidOperationException(failureMessage);
+            }
+
+            await Task.Delay(PollInterval);
+        }
+    }
 
     private static async Task<T> PollUntilAsync<T>(Func<Task<T?>> probe, TimeSpan timeout, string timeoutMessage)
         where T : class

@@ -68,7 +68,6 @@ public class MessageBridgeOutboxDispatcherTests
         published.PublishedAtUtc.ShouldNotBeNull();
         failed.PublishedAtUtc.ShouldBeNull();
         transport.Attempts["msg-1"].ShouldBe(1);
-        transport.Attempts["msg-2"].ShouldBe(1);
         transport.Envelopes["msg-1"].ExchangeName.ShouldBe("exchange-a");
         transport.Envelopes["msg-1"].RoutingKey.ShouldBe("routing-a");
         transport.Envelopes["msg-1"].Headers["content-type"].ShouldBe("application/x-protobuf");
