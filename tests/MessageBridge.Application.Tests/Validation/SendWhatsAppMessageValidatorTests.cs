@@ -8,6 +8,7 @@ using Xunit;
 
 namespace MessageBridge.Application.Tests.Validation;
 
+[Trait("Category", "Unit")]
 public sealed class SendWhatsAppMessageValidatorTests
 {
     private readonly SendWhatsAppMessageValidator _validator = new();

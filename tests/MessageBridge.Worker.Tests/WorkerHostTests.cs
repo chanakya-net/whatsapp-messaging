@@ -26,6 +26,7 @@ using LifecycleProcessingStore = MessageBridge.Application.Persistence.IMessageP
 
 namespace MessageBridge.Worker.Tests;
 
+[Trait("Category", "Unit")]
 public sealed class WorkerHostTests
 {
     [Fact]

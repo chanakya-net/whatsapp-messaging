@@ -5,8 +5,9 @@ using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Testcontainers.PostgreSql;
 
-namespace MessageBridge.Infrastructure.Tests.Persistence;
+namespace MessageBridge.IntegrationTests.Persistence;
 
+[Trait("Category", "Integration")]
 public sealed class MessageProcessingStoreTests : IAsyncLifetime
 {
     private PostgreSqlContainer? _container;

@@ -8,6 +8,7 @@ using Xunit.Sdk;
 
 namespace MessageBridge.Publisher.EntityFrameworkCore.Tests;
 
+[Trait("Category", "Unit")]
 public class MessageBridgeOutboxDispatcherTests
 {
     [Fact]

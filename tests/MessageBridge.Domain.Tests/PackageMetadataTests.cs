@@ -2,6 +2,7 @@ using System.Xml.Linq;
 
 namespace MessageBridge.Domain.Tests;
 
+[Trait("Category", "Unit")]
 public class PackageMetadataTests
 {
     [Fact]

@@ -1,5 +1,6 @@
 ﻿namespace MessageBridge.Domain.Tests.Privacy;
 
+[Trait("Category", "Unit")]
 public class RecipientMaskerTests
 {
     [Theory]

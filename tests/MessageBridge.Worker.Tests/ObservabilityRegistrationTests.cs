@@ -23,6 +23,7 @@ using Xunit;
 
 namespace MessageBridge.Worker.Tests;
 
+[Trait("Category", "Unit")]
 public sealed class ObservabilityRegistrationTests
 {
     [Fact]

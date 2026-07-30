@@ -8,6 +8,7 @@ using Xunit;
 
 namespace MessageBridge.Application.Tests.Handlers;
 
+[Trait("Category", "Unit")]
 public sealed class SendEmailConfirmationHandlerTests
 {
     [Fact]
