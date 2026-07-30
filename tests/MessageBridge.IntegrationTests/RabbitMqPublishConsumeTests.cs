@@ -1,185 +1,261 @@
+using System.Collections.Concurrent;
+using ErrorOr;
 using FluentAssertions;
+using Google.Protobuf.WellKnownTypes;
 using MassTransit;
-using MessageBridge.Application.Persistence;
+using MessageBridge.Application.Abstractions;
+using MessageBridge.Application.Handlers;
+using MessageBridge.Application.Providers;
 using MessageBridge.Contracts.V1;
 using MessageBridge.Domain.Processing;
+using MessageBridge.Infrastructure;
+using MessageBridge.Infrastructure.Messaging;
 using MessageBridge.Infrastructure.Persistence;
 using MessageBridge.IntegrationTests.Fixtures;
-using MessageBridge.Publisher;
-using MessageBridge.Publisher.Requests;
+using MessageBridge.IntegrationTests.Persistence;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Xunit;
+using Microsoft.Extensions.Hosting;
+using Wolverine;
 
 namespace MessageBridge.IntegrationTests;
 
-public sealed class RabbitMqPublishConsumeTests : IAsyncLifetime
+[Collection(IntegrationTestCollection.Name)]
+public sealed class RabbitMqPublishConsumeTests(IntegrationEnvironmentFixture fixture)
 {
-    private readonly RabbitMqFixture _rabbitMqFixture = new();
-    private PostgresFixture? _postgresFixture;
-    private MessageBridgeDbContext? _dbContext;
-    private AsyncServiceScope _scope;
-    private ServiceProvider? _serviceProvider;
-
-    public async Task InitializeAsync()
+    [Fact]
+    public async Task PublishWhatsAppMessage_RoutesThroughProductionConsumerAndPersistsCompletedHistory()
     {
-        await _rabbitMqFixture.InitializeAsync();
-        _postgresFixture = new PostgresFixture();
-        await _postgresFixture.InitializeAsync();
-        _dbContext = await _postgresFixture.CreateDbContextAsync();
-
-        var services = new ServiceCollection();
-        _rabbitMqFixture.RegisterServices(services, _dbContext, ConfigureTestConsumers);
-        _serviceProvider = services.BuildServiceProvider();
-        _scope = _serviceProvider.CreateAsyncScope();
-
-        // Start the MassTransit bus so consumers can receive messages
-        var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
-        await busControl!.StartAsync(TimeSpan.FromSeconds(10));
-    }
-
-    public async Task DisposeAsync()
-    {
-        try
+        await using var harness = await MessagingHarness.StartAsync(fixture);
+        var requestedAt = DateTimeOffset.UtcNow;
+        var command = new SendWhatsAppMessageCommand
         {
-            var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
-            await busControl?.StopAsync(TimeSpan.FromSeconds(10))!;
-        }
-        catch
-        {
-            // Ignore if bus was not started
-        }
+            MessageId = $"whatsapp-{Guid.NewGuid():N}",
+            TenantId = "tenant-integration",
+            RecipientPhoneNumber = "+14155552671",
+            TemplateName = "welcome",
+            TemplateLanguage = "en",
+            TemplateParameters = { ["name"] = "Ada" },
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(requestedAt)
+        };
 
-        await _scope.DisposeAsync();
+        await harness.PublishAsync(command);
+        var record = await harness.WaitForCompletedAsync(
+            command.MessageId,
+            nameof(SendWhatsAppMessageCommand));
 
-        if (_dbContext is not null)
-        {
-            await _dbContext.DisposeAsync();
-        }
-
-        if (_postgresFixture is not null)
-        {
-            await _postgresFixture.DisposeAsync();
-        }
-
-        if (_serviceProvider is not null)
-        {
-            await _serviceProvider.DisposeAsync();
-        }
-
-        await _rabbitMqFixture.DisposeAsync();
+        record.MessageId.Should().Be(command.MessageId);
+        record.MessageType.Should().Be(nameof(SendWhatsAppMessageCommand));
+        record.Status.Should().Be(ProcessingStatus.Completed);
+        record.ProcessedAt.Should().NotBeNull();
+        record.FailureReason.Should().BeNull();
+        record.Provider.Should().Be("rabbitmq");
+        record.ProviderMetadata.RootElement.GetProperty("transport").GetString()
+            .Should().Be("masstransit");
+        harness.WhatsAppMessages.Should().ContainSingle()
+            .Which.MessageId.Should().Be(command.MessageId);
     }
 
     [Fact]
-    public async Task PublishWhatsAppMessage_RoutsToConsumerAndStoresHistory()
+    public async Task PublishEmailConfirmation_RoutesThroughProductionConsumerAndPersistsCompletedHistory()
     {
-        var bus = _scope.ServiceProvider.GetRequiredService<IBus>();
-        var store = _scope.ServiceProvider.GetRequiredService<IMessageProcessingStore>();
-
-        var cmd = new SendWhatsAppMessageCommand
+        await using var harness = await MessagingHarness.StartAsync(fixture);
+        var requestedAt = DateTimeOffset.UtcNow;
+        var command = new SendEmailConfirmationCommand
         {
-            MessageId = $"msg-{Guid.NewGuid():N}",
-            TenantId = "test-tenant",
-            RecipientPhoneNumber = "+11234567890",
-            TemplateName = "hello",
-            TemplateParameters = { ["body"] = "test message" }
+            MessageId = $"email-{Guid.NewGuid():N}",
+            TenantId = "tenant-integration",
+            RecipientEmail = "ada@example.com",
+            RecipientName = "Ada",
+            ConfirmationToken = "token-123",
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(requestedAt),
+            ExpiresAtUtc = Timestamp.FromDateTimeOffset(requestedAt.AddHours(1))
         };
 
-        // Publish command
-        await bus.Publish(cmd);
+        await harness.PublishAsync(command);
+        var record = await harness.WaitForCompletedAsync(
+            command.MessageId,
+            nameof(SendEmailConfirmationCommand));
 
-        // Poll until record is verified (proves consumer processed routing)
-        await IntegrationTestsHelper.PollUntilAsync(
-            async () =>
-            {
-                var record = await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand));
-                return record is not null && record.Status == ProcessingStatus.Completed;
-            },
-            TimeSpan.FromSeconds(10));
-
-        // Verify record exists
-        var stored = await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand));
-        stored.Should().NotBeNull();
-        stored!.MessageId.Should().Be(cmd.MessageId);
-        stored.MessageType.Should().Be(nameof(SendWhatsAppMessageCommand));
-        stored.Status.Should().Be(ProcessingStatus.Completed);
+        record.MessageId.Should().Be(command.MessageId);
+        record.MessageType.Should().Be(nameof(SendEmailConfirmationCommand));
+        record.Status.Should().Be(ProcessingStatus.Completed);
+        record.ProcessedAt.Should().NotBeNull();
+        record.FailureReason.Should().BeNull();
+        record.Provider.Should().Be("rabbitmq");
+        record.ProviderMetadata.RootElement.GetProperty("transport").GetString()
+            .Should().Be("masstransit");
+        harness.EmailConfirmations.Should().ContainSingle()
+            .Which.MessageId.Should().Be(command.MessageId);
     }
 
-    [Fact]
-    public async Task PublishEmailConfirmationCommand_RoutsToConsumer()
+    private sealed class MessagingHarness : IAsyncDisposable
     {
-        var bus = _scope.ServiceProvider.GetRequiredService<IBus>();
-        var store = _scope.ServiceProvider.GetRequiredService<IMessageProcessingStore>();
+        private readonly IHost _host;
+        private readonly MigratedDatabaseScenario _database;
+        private readonly TrackingWhatsAppSender _whatsAppSender;
+        private readonly TrackingEmailSender _emailSender;
 
-        var cmd = new SendEmailConfirmationCommand
+        private MessagingHarness(
+            IHost host,
+            MigratedDatabaseScenario database,
+            TrackingWhatsAppSender whatsAppSender,
+            TrackingEmailSender emailSender)
         {
-            MessageId = $"msg-{Guid.NewGuid():N}",
-            TenantId = "test-tenant",
-            RecipientEmail = "user@example.com",
-            ConfirmationToken = "token123"
-        };
+            _host = host;
+            _database = database;
+            _whatsAppSender = whatsAppSender;
+            _emailSender = emailSender;
+        }
 
-        await bus.Publish(cmd);
+        public IReadOnlyCollection<WhatsAppMessage> WhatsAppMessages =>
+            _whatsAppSender.Messages;
 
-        // Poll until record is verified (proves consumer processed routing)
-        await IntegrationTestsHelper.PollUntilAsync(
-            async () =>
+        public IReadOnlyCollection<EmailConfirmation> EmailConfirmations =>
+            _emailSender.Emails;
+
+        public static async Task<MessagingHarness> StartAsync(
+            IntegrationEnvironmentFixture fixture)
+        {
+            var database = await MigratedDatabaseScenario.CreateAsync(fixture);
+            var connectionString = database.DbContext.Database.GetConnectionString()!;
+            var settings = new Dictionary<string, string?>
             {
-                var record = await store.GetAsync(cmd.MessageId, nameof(SendEmailConfirmationCommand));
-                return record is not null && record.Status == ProcessingStatus.Completed;
-            },
-            TimeSpan.FromSeconds(10));
+                ["ConnectionStrings:DefaultConnection"] = connectionString,
+                ["MESSAGEBRIDGE_CONNECTION_STRING"] = connectionString,
+                ["RabbitMq:ConnectionString"] = fixture.GetRabbitMqConnectionString(),
+                ["MessageBridge:Topology:EnvironmentPrefix"] =
+                    IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix(),
+                ["MessageBridge:ProcessingHistory:RecoveryEnabled"] = "false"
+            };
+            var whatsAppSender = new TrackingWhatsAppSender();
+            var emailSender = new TrackingEmailSender();
+            var builder = Host.CreateApplicationBuilder();
+            builder.Configuration.AddInMemoryCollection(settings);
+            ConfigureServices(
+                builder.Services,
+                builder.Configuration,
+                whatsAppSender,
+                emailSender);
+            var host = builder.Build();
 
-        var stored = await store.GetAsync(cmd.MessageId, nameof(SendEmailConfirmationCommand));
-        stored.Should().NotBeNull();
-        stored!.MessageType.Should().Be(nameof(SendEmailConfirmationCommand));
-        stored!.Status.Should().Be(ProcessingStatus.Completed);
+            try
+            {
+                await host.StartAsync();
+                return new MessagingHarness(host, database, whatsAppSender, emailSender);
+            }
+            catch
+            {
+                host.Dispose();
+                await database.DisposeAsync();
+                throw;
+            }
+        }
+
+        public Task PublishAsync<T>(T message)
+            where T : class =>
+            _host.Services.GetRequiredService<IPublishEndpoint>().Publish(message);
+
+        public async Task<MessageProcessingRecord> WaitForCompletedAsync(
+            string messageId,
+            string messageType)
+        {
+            ProcessingStatus? lastStatus = null;
+
+            try
+            {
+                return await IntegrationEnvironmentFixture.PollUntilAssertedAsync(
+                    async () =>
+                    {
+                        await using var scope = _host.Services.CreateAsyncScope();
+                        var dbContext = scope.ServiceProvider
+                            .GetRequiredService<MessageBridgeDbContext>();
+                        var record = await dbContext.MessageProcessingRecords
+                            .AsNoTracking()
+                            .SingleOrDefaultAsync(item =>
+                                item.MessageId == messageId &&
+                                item.MessageType == messageType);
+                        lastStatus = record?.Status;
+                        return record?.Status == ProcessingStatus.Completed ? record : null;
+                    },
+                    $"Expected {messageType}/{messageId} to complete; " +
+                    $"last status={lastStatus?.ToString() ?? "not-persisted"}.");
+            }
+            catch (TimeoutException exception)
+            {
+                throw new TimeoutException(
+                    $"Expected {messageType}/{messageId} to complete; " +
+                    $"last status={lastStatus?.ToString() ?? "not-persisted"}.",
+                    exception);
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await _host.StopAsync();
+            _host.Dispose();
+            await _database.DisposeAsync();
+        }
+
+        private static void ConfigureServices(
+            IServiceCollection services,
+            IConfiguration configuration,
+            TrackingWhatsAppSender whatsAppSender,
+            TrackingEmailSender emailSender)
+        {
+            services.AddOptions<MassTransitHostOptions>().Configure(options =>
+            {
+                options.WaitUntilStarted = true;
+                options.StartTimeout = IntegrationEnvironmentFixture.AssertionTimeout;
+                options.StopTimeout = IntegrationEnvironmentFixture.AssertionTimeout;
+            });
+            services.AddMessageBridgeMassTransit(configuration);
+            services.AddMessageBridgeProcessingStore(configuration);
+            services.AddSingleton<IWhatsAppMessageSender>(whatsAppSender);
+            services.AddSingleton<IEmailConfirmationSender>(emailSender);
+            services.AddSingleton<ITenantConfigurationProvider, ReadyTenantProvider>();
+            services.AddSingleton<IProviderRateLimiter, ReadyRateLimiter>();
+            services.AddWolverine(options =>
+                options.Discovery.IncludeAssembly(typeof(SendWhatsAppMessageHandler).Assembly));
+        }
     }
 
-    private static void ConfigureTestConsumers(IBusRegistrationConfigurator config)
+    private sealed class TrackingWhatsAppSender : IWhatsAppMessageSender
     {
-        config.AddConsumer<RabbitMqWhatsAppPublishConsumer>();
-        config.AddConsumer<RabbitMqEmailPublishConsumer>();
+        private readonly ConcurrentQueue<WhatsAppMessage> _messages = new();
+
+        public IReadOnlyCollection<WhatsAppMessage> Messages => _messages.ToArray();
+
+        public Task<ErrorOr<Success>> SendAsync(WhatsAppMessage message, string tenantId)
+        {
+            _messages.Enqueue(message);
+            return Task.FromResult<ErrorOr<Success>>(new Success());
+        }
     }
-}
 
-internal sealed class RabbitMqWhatsAppPublishConsumer(
-    IMessageProcessingStore store) : IConsumer<SendWhatsAppMessageCommand>
-{
-    public async Task Consume(ConsumeContext<SendWhatsAppMessageCommand> context)
+    private sealed class TrackingEmailSender : IEmailConfirmationSender
     {
-        var payloadHash = MessageProcessingTestHelpers.GetPayloadHash(context.Message);
-        await MessageProcessingTestHelpers.EnsureRecordAsync(
-            store,
-            context.Message.MessageId,
-            nameof(SendWhatsAppMessageCommand),
-            payloadHash,
-            "routed");
+        private readonly ConcurrentQueue<EmailConfirmation> _emails = new();
 
-        await store.UpdateStatusAsync(
-            context.Message.MessageId,
-            nameof(SendWhatsAppMessageCommand),
-            ProcessingStatus.Completed,
-            "consumer_completed");
+        public IReadOnlyCollection<EmailConfirmation> Emails => _emails.ToArray();
+
+        public Task<ErrorOr<Success>> SendAsync(EmailConfirmation email, string tenantId)
+        {
+            _emails.Enqueue(email);
+            return Task.FromResult<ErrorOr<Success>>(new Success());
+        }
     }
-}
 
-internal sealed class RabbitMqEmailPublishConsumer(
-    IMessageProcessingStore store) : IConsumer<SendEmailConfirmationCommand>
-{
-    public async Task Consume(ConsumeContext<SendEmailConfirmationCommand> context)
+    private sealed class ReadyTenantProvider : ITenantConfigurationProvider
     {
-        var payloadHash = MessageProcessingTestHelpers.GetPayloadHash(context.Message);
-        await MessageProcessingTestHelpers.EnsureRecordAsync(
-            store,
-            context.Message.MessageId,
-            nameof(SendEmailConfirmationCommand),
-            payloadHash,
-            "routed");
+        public Task<ErrorOr<TenantConfiguration>> GetTenantConfigAsync(string tenantId) =>
+            Task.FromResult<ErrorOr<TenantConfiguration>>(new TenantConfiguration(tenantId, true));
+    }
 
-        await store.UpdateStatusAsync(
-            context.Message.MessageId,
-            nameof(SendEmailConfirmationCommand),
-            ProcessingStatus.Completed,
-            "consumer_completed");
+    private sealed class ReadyRateLimiter : IProviderRateLimiter
+    {
+        public Task<ErrorOr<Success>> CheckRateLimitAsync(string tenantId, string providerType) =>
+            Task.FromResult<ErrorOr<Success>>(new Success());
     }
 }
