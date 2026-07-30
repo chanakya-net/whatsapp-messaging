@@ -8,6 +8,40 @@ namespace MessageBridge.Contracts.Tests;
 public class ContractGenerationTests
 {
     [Fact]
+    public void V1Commands_ShouldKeepStableFieldNumbersAndNames()
+    {
+        AssertFieldMapping(
+            SendWhatsAppMessageCommand.Descriptor,
+            ("message_id", 1),
+            ("tenant_id", 2),
+            ("recipient_phone_number", 3),
+            ("template_name", 4),
+            ("template_language", 5),
+            ("template_parameters", 6),
+            ("correlation_id", 7),
+            ("requested_at_utc", 8));
+        AssertFieldMapping(
+            SendEmailConfirmationCommand.Descriptor,
+            ("message_id", 1),
+            ("tenant_id", 2),
+            ("recipient_email", 3),
+            ("recipient_name", 4),
+            ("confirmation_token", 5),
+            ("expires_at_utc", 6),
+            ("correlation_id", 7),
+            ("requested_at_utc", 8));
+    }
+
+    [Fact]
+    public void V1Commands_ShouldUseStablePackageAndClrNamespace()
+    {
+        Assert.Equal("messagebridge.contracts.v1", SendWhatsAppMessageCommand.Descriptor.File.Package);
+        Assert.Equal("messagebridge.contracts.v1", SendEmailConfirmationCommand.Descriptor.File.Package);
+        Assert.Equal("MessageBridge.Contracts.V1", typeof(SendWhatsAppMessageCommand).Namespace);
+        Assert.Equal("MessageBridge.Contracts.V1", typeof(SendEmailConfirmationCommand).Namespace);
+    }
+
+    [Fact]
     public void WhatsAppCommand_CanInstantiate()
     {
         var cmd = new SendWhatsAppMessageCommand
@@ -62,6 +96,7 @@ public class ContractGenerationTests
         Assert.Equal(original.CorrelationId, deserialized.CorrelationId);
         Assert.NotNull(deserialized.RequestedAtUtc);
         Assert.Equal(original.RequestedAtUtc.Seconds, deserialized.RequestedAtUtc.Seconds);
+        Assert.Equal(original.RequestedAtUtc.Nanos, deserialized.RequestedAtUtc.Nanos);
     }
 
     [Fact]
@@ -120,6 +155,20 @@ public class ContractGenerationTests
         Assert.NotNull(deserialized.ExpiresAtUtc);
         Assert.NotNull(deserialized.RequestedAtUtc);
         Assert.Equal(original.ExpiresAtUtc.Seconds, deserialized.ExpiresAtUtc.Seconds);
+        Assert.Equal(original.ExpiresAtUtc.Nanos, deserialized.ExpiresAtUtc.Nanos);
         Assert.Equal(original.RequestedAtUtc.Seconds, deserialized.RequestedAtUtc.Seconds);
+        Assert.Equal(original.RequestedAtUtc.Nanos, deserialized.RequestedAtUtc.Nanos);
+    }
+
+    private static void AssertFieldMapping(
+        Google.Protobuf.Reflection.MessageDescriptor descriptor,
+        params (string Name, int Number)[] expected)
+    {
+        Assert.Equal(expected.Length, descriptor.Fields.InDeclarationOrder().Count);
+        foreach (var (name, number) in expected)
+        {
+            var field = descriptor.Fields.InDeclarationOrder().Single(item => item.Name == name);
+            Assert.Equal(number, field.FieldNumber);
+        }
     }
 }
