@@ -105,4 +105,16 @@ public sealed class SendWhatsAppMessageValidatorTests
         result.Errors.ShouldContain(error => error.PropertyName == "TemplateParameters");
         result.Errors.ShouldContain(error => error.PropertyName == "RequestedAtUtc");
     }
+
+    [Fact]
+    public async Task ValidateAsync_ShouldThrowOperationCanceledException_WhenCancellationTokenIsCancelled()
+    {
+        var command = new SendWhatsAppMessage(
+            "msg-001", "tenant-1", "+15551234567", "welcome", "en-US", null, null, DateTimeOffset.UtcNow);
+        var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Should.ThrowAsync<OperationCanceledException>(
+            () => _validator.ValidateAsync(command, cts.Token));
+    }
 }

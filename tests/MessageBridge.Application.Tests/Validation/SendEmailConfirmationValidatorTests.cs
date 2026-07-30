@@ -63,7 +63,7 @@ public sealed class SendEmailConfirmationValidatorTests
         var command = new SendEmailConfirmation(
             new string('m', 128),
             new string('t', 128),
-            $"{new string('a', 312)}@x.com",
+            $"{new string('a', 314)}@x.com",
             new string('n', 200),
             new string('k', 512),
             requestedAt.AddMinutes(1),
@@ -103,5 +103,18 @@ public sealed class SendEmailConfirmationValidatorTests
 
         result.IsValid.ShouldBeFalse();
         result.Errors.ShouldContain(error => error.PropertyName == propertyName);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_ShouldThrowOperationCanceledException_WhenCancellationTokenIsCancelled()
+    {
+        var requestedAt = DateTimeOffset.UtcNow;
+        var command = new SendEmailConfirmation(
+            "msg-001", "tenant-1", "user@example.com", null, "token-abc123", requestedAt.AddMinutes(1), null, requestedAt);
+        var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Should.ThrowAsync<OperationCanceledException>(
+            () => _validator.ValidateAsync(command, cts.Token));
     }
 }

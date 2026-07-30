@@ -1,4 +1,42 @@
-﻿namespace MessageBridge.Domain.Tests.ValueObjects;
+﻿using MessageBridge.Domain.Processing;
+using Shouldly;
+using Xunit;
+
+namespace MessageBridge.Domain.Tests.ValueObjects;
+
+[Trait("Category", "Unit")]
+public class ProcessingStatusTests
+{
+    [Fact]
+    public void ProcessingStatus_ShouldHaveCorrectNamedValues()
+    {
+        ProcessingStatus.Received.ShouldBe((ProcessingStatus)0);
+        ProcessingStatus.Processing.ShouldBe((ProcessingStatus)1);
+        ProcessingStatus.Completed.ShouldBe((ProcessingStatus)2);
+        ProcessingStatus.Failed.ShouldBe((ProcessingStatus)3);
+        ProcessingStatus.Abandoned.ShouldBe((ProcessingStatus)4);
+        ProcessingStatus.Rejected.ShouldBe((ProcessingStatus)5);
+    }
+
+    [Fact]
+    public void ProcessingStatus_ShouldMaintainNumericOrder()
+    {
+        var values = new[]
+        {
+            ProcessingStatus.Received,
+            ProcessingStatus.Processing,
+            ProcessingStatus.Completed,
+            ProcessingStatus.Failed,
+            ProcessingStatus.Abandoned,
+            ProcessingStatus.Rejected
+        };
+
+        for (int i = 0; i < values.Length; i++)
+        {
+            ((int)values[i]).ShouldBe(i);
+        }
+    }
+}
 
 [Trait("Category", "Unit")]
 public class TenantIdTests
