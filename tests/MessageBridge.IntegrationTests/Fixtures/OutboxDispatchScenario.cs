@@ -73,6 +73,12 @@ internal sealed class OutboxDispatchScenario : IAsyncDisposable
         _dispatcherStarted = true;
     }
 
+    public Task AssertNoDispatchAttemptsAsync() =>
+        IntegrationEnvironmentFixture.AssertRemainsAsync(
+            () => Task.FromResult(Transport.Attempts == 0),
+            ObservationWindow,
+            "Dispatcher attempted the uncommitted outbox row.");
+
     public Task AssertRowsInvisibleAsync(Guid markerId, string outboxId) =>
         IntegrationEnvironmentFixture.AssertRemainsAsync(
             async () =>
@@ -150,7 +156,14 @@ internal sealed class OutboxDispatchScenario : IAsyncDisposable
         }
         finally
         {
-            await DisposeInfrastructureAsync();
+            try
+            {
+                _dispatcher.Dispose();
+            }
+            finally
+            {
+                await DisposeInfrastructureAsync();
+            }
         }
     }
 
