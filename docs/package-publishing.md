@@ -8,6 +8,11 @@ MessageBridge NuGet packages are published through a dedicated workflow, not thr
 - `MessageBridge.Publisher`
 - `MessageBridge.Publisher.EntityFrameworkCore`
 
+`MessageBridge.Publisher.EntityFrameworkCore` requires
+`Microsoft.EntityFrameworkCore` 10.0.5 or later and no longer supports EF Core 9.
+The package must compile against the same `ExecuteUpdateAsync`/`SetPropertyCalls`
+surface used by its host.
+
 ## Current package metadata
 
 The repo already carries the shared package metadata in `Directory.Build.props`:
