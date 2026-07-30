@@ -1,46 +1,23 @@
 using MessageBridge.Application.Persistence;
 using MessageBridge.Domain.Processing;
 using MessageBridge.Infrastructure.Persistence;
+using MessageBridge.IntegrationTests.Fixtures;
 using Microsoft.EntityFrameworkCore;
-using Npgsql;
-using Testcontainers.PostgreSql;
+using Xunit;
 
 namespace MessageBridge.IntegrationTests.Persistence;
 
 [Trait("Category", "Integration")]
-public sealed class MessageProcessingStoreTests : IAsyncLifetime
+[Collection(IntegrationTestCollection.Name)]
+public sealed class MessageProcessingStoreTests(IntegrationEnvironmentFixture fixture)
 {
-    private PostgreSqlContainer? _container;
-    private string? _sharedConnectionString;
-
-    public async Task InitializeAsync()
-    {
-        _sharedConnectionString = Environment.GetEnvironmentVariable("MESSAGEBRIDGE_TEST_DATABASE_CONNECTION_STRING");
-        if (!string.IsNullOrWhiteSpace(_sharedConnectionString))
-        {
-            return;
-        }
-
-        _container = new PostgreSqlBuilder()
-            .WithImage("postgres:17-alpine")
-            .Build();
-
-        await _container.StartAsync();
-    }
-
-    public async Task DisposeAsync()
-    {
-        if (_container is not null)
-        {
-            await _container.DisposeAsync();
-        }
-    }
+    private readonly IntegrationEnvironmentFixture _fixture = fixture;
 
     [Fact]
     public async Task CreateAsync_persists_and_is_retrievable()
     {
-        await using var dbContext = await CreateDbContextAsync();
-        var store = new MessageProcessingStore(dbContext);
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var store = new MessageProcessingStore(scenario.DbContext);
         var request = new CreateMessageProcessingRequest(
             "wamid.create-1",
             "inbound.whatsapp",
@@ -59,14 +36,15 @@ public sealed class MessageProcessingStoreTests : IAsyncLifetime
         Assert.Equal(request.PayloadHash, stored.PayloadHash);
         Assert.Equal(request.Provider, stored.Provider);
         Assert.Equal("provider-1", stored.ProviderMetadata["providerMessageId"]);
+        Assert.Equal(1, stored.AttemptCount);
         Assert.Equal(stored.Id, result.Record.Id);
     }
 
     [Fact]
-    public async Task CreateAsync_duplicate_message_returns_existing()
+    public async Task CreateAsync_duplicate_message_and_type_returns_existing()
     {
-        await using var dbContext = await CreateDbContextAsync();
-        var store = new MessageProcessingStore(dbContext);
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var store = new MessageProcessingStore(scenario.DbContext);
         var request = new CreateMessageProcessingRequest(
             "wamid.duplicate-1",
             "inbound.whatsapp",
@@ -76,7 +54,7 @@ public sealed class MessageProcessingStoreTests : IAsyncLifetime
 
         var first = await store.CreateAsync(request);
         var second = await store.CreateAsync(request);
-        var storedCount = await dbContext.MessageProcessingRecords.CountAsync();
+        var storedCount = await scenario.DbContext.MessageProcessingRecords.CountAsync();
 
         Assert.Equal(CreateMessageProcessingOutcome.Created, first.Outcome);
         Assert.Equal(CreateMessageProcessingOutcome.Duplicate, second.Outcome);
@@ -85,16 +63,26 @@ public sealed class MessageProcessingStoreTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task UpdateStatus_transitions_and_persists()
+    public async Task CreateAsync_same_message_with_different_type_creates_distinct_records()
     {
-        await using var dbContext = await CreateDbContextAsync();
-        var store = new MessageProcessingStore(dbContext);
-        var request = new CreateMessageProcessingRequest(
-            "wamid.status-1",
-            "inbound.whatsapp",
-            "payload-hash-3",
-            "meta",
-            new Dictionary<string, string?> { ["providerMessageId"] = "provider-3" });
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var store = new MessageProcessingStore(scenario.DbContext);
+
+        var first = await store.CreateAsync(CreateRequest("wamid.pair-1", "inbound.whatsapp"));
+        var second = await store.CreateAsync(CreateRequest("wamid.pair-1", "email.confirm"));
+
+        Assert.Equal(CreateMessageProcessingOutcome.Created, first.Outcome);
+        Assert.Equal(CreateMessageProcessingOutcome.Created, second.Outcome);
+        Assert.NotEqual(first.Record.Id, second.Record.Id);
+        Assert.Equal(2, await scenario.DbContext.MessageProcessingRecords.CountAsync());
+    }
+
+    [Fact]
+    public async Task UpdateStatus_transitions_and_persists_failure_reason_and_timestamp()
+    {
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var store = new MessageProcessingStore(scenario.DbContext);
+        var request = CreateRequest("wamid.status-1", "inbound.whatsapp");
 
         var created = await store.CreateAsync(request);
         var updated = await store.UpdateStatusAsync(
@@ -111,25 +99,15 @@ public sealed class MessageProcessingStoreTests : IAsyncLifetime
         Assert.True(updated.UpdatedAt >= created.Record.UpdatedAt);
         Assert.NotNull(stored);
         Assert.Equal(ProcessingStatus.Failed, stored!.Status);
-        // PostgreSQL stores timestamps at microsecond precision; DateTimeOffset has 100ns ticks.
-        Assert.Equal(updated.ProcessedAt!.Value, stored.ProcessedAt!.Value, TimeSpan.FromMicroseconds(1));
         Assert.Equal(updated.FailureReason, stored.FailureReason);
+        Assert.Equal(updated.ProcessedAt!.Value, stored.ProcessedAt!.Value, TimeSpan.FromMicroseconds(1));
     }
 
-    private async Task<MessageBridgeDbContext> CreateDbContextAsync()
-    {
-        var baseConnectionString = _sharedConnectionString ?? _container!.GetConnectionString();
-        var connectionStringBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString)
-        {
-            Database = $"messagebridge_tests_{Guid.NewGuid():N}"
-        };
-
-        var options = new DbContextOptionsBuilder<MessageBridgeDbContext>()
-            .UseNpgsql(connectionStringBuilder.ConnectionString)
-            .Options;
-
-        var dbContext = new MessageBridgeDbContext(options);
-        await dbContext.Database.EnsureCreatedAsync();
-        return dbContext;
-    }
+    private static CreateMessageProcessingRequest CreateRequest(string messageId, string messageType) =>
+        new(
+            messageId,
+            messageType,
+            $"hash-{messageId}",
+            "provider",
+            new Dictionary<string, string?> { ["providerMessageId"] = $"provider-{messageId}" });
 }

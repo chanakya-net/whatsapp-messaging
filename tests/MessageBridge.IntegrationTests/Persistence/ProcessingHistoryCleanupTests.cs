@@ -1,166 +1,101 @@
 using MessageBridge.Domain.Processing;
 using MessageBridge.Infrastructure.Persistence;
+using MessageBridge.IntegrationTests.Fixtures;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using Npgsql;
 using System.Text.Json;
-using Testcontainers.PostgreSql;
 using Xunit.Sdk;
 
 namespace MessageBridge.IntegrationTests.Persistence;
 
 [Trait("Category", "Integration")]
-public sealed class ProcessingHistoryCleanupTests : IAsyncLifetime
+[Collection(IntegrationTestCollection.Name)]
+public sealed class ProcessingHistoryCleanupTests(IntegrationEnvironmentFixture fixture)
 {
-    private PostgreSqlContainer? _container;
-    private string? _sharedConnectionString;
-
-    public async Task InitializeAsync()
-    {
-        _sharedConnectionString = Environment.GetEnvironmentVariable("MESSAGEBRIDGE_TEST_DATABASE_CONNECTION_STRING");
-        if (!string.IsNullOrWhiteSpace(_sharedConnectionString))
-        {
-            return;
-        }
-
-        _container = new PostgreSqlBuilder()
-            .WithImage("postgres:17-alpine")
-            .Build();
-
-        await _container.StartAsync();
-    }
-
-    public async Task DisposeAsync()
-    {
-        if (_container is not null)
-        {
-            await _container.DisposeAsync();
-        }
-    }
+    private readonly IntegrationEnvironmentFixture _fixture = fixture;
 
     [Fact]
     public async Task Cleanup_ServiceDeletesTerminalNonFailedRecords()
     {
-        var options = BuildOptions(nameof(Cleanup_ServiceDeletesTerminalNonFailedRecords) + Guid.NewGuid());
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var options = BuildOptions(scenario.DbContext);
         var now = DateTimeOffset.UtcNow;
-        await using (var seedContext = await CreateDbContextAsync(options))
+        scenario.DbContext.MessageProcessingRecords.AddRange(
+            BuildRecord("wamid.completed-old", ProcessingStatus.Completed, now.AddHours(-2), now.AddHours(-2), now.AddHours(-2)),
+            BuildRecord("wamid.failed-old", ProcessingStatus.Failed, now.AddHours(-2), now.AddHours(-2), now.AddHours(-2)),
+            BuildRecord("wamid.abandoned-old", ProcessingStatus.Abandoned, now.AddHours(-2), now.AddHours(-2), now.AddHours(-2)),
+            BuildRecord("wamid.processing-old", ProcessingStatus.Processing, now.AddHours(-2), now.AddHours(-2)),
+            BuildRecord("wamid.completed-recent", ProcessingStatus.Completed, now, now, now));
+        await scenario.DbContext.SaveChangesAsync();
+
+        var factory = new TestHistoryCleanupDbContextFactory(options);
+        var cleanup = CreateCleanup(factory, enabled: true);
+        try
         {
-            seedContext.MessageProcessingRecords.AddRange(
-                BuildRecord(
-                    "wamid.completed-old",
-                    ProcessingStatus.Completed,
-                    now.AddHours(-2),
-                    now.AddHours(-2),
-                    now.AddHours(-2)),
-                BuildRecord(
-                    "wamid.failed-old",
-                    ProcessingStatus.Failed,
-                    now.AddHours(-2),
-                    now.AddHours(-2),
-                    now.AddHours(-2)),
-                BuildRecord(
-                    "wamid.abandoned-old",
-                    ProcessingStatus.Abandoned,
-                    now.AddHours(-2),
-                    now.AddHours(-2),
-                    now.AddHours(-2)),
-                BuildRecord(
-                    "wamid.processing-old",
-                    ProcessingStatus.Processing,
-                    now.AddHours(-2),
-                    now.AddHours(-2),
-                    null),
-                BuildRecord(
-                    "wamid.completed-recent",
-                    ProcessingStatus.Completed,
-                    now,
-                    now,
-                    now));
-            await seedContext.SaveChangesAsync();
+            await cleanup.StartAsync(default);
+            await WaitUntilRecordRemovedAsync(factory, "wamid.completed-old");
+        }
+        finally
+        {
+            await cleanup.StopAsync(default);
         }
 
-        var cleanup = new ProcessingHistoryCleanupService(
-            new TestHistoryCleanupDbContextFactory(options),
-            Options.Create(new MessageProcessingHistoryOptions
-            {
-                CleanupEnabled = true,
-                CleanupIntervalMilliseconds = 10,
-                CleanupRetentionHours = 1,
-                CleanupBatchSize = 10
-            }));
-
-        await cleanup.StartAsync(default);
-        await WaitUntilRecordRemovedAsync(new TestHistoryCleanupDbContextFactory(options), "wamid.completed-old");
-        await cleanup.StopAsync(default);
-
-        await using var verifyContext = await CreateDbContextAsync(options);
-        var completedOld = await verifyContext.MessageProcessingRecords
-            .AsNoTracking()
-            .AnyAsync(item => item.MessageId == "wamid.completed-old");
-        var abandonedOld = await verifyContext.MessageProcessingRecords
-            .AsNoTracking()
-            .AnyAsync(item => item.MessageId == "wamid.abandoned-old");
-        var failedOld = await verifyContext.MessageProcessingRecords
-            .AsNoTracking()
-            .AnyAsync(item => item.MessageId == "wamid.failed-old");
-        var processingOld = await verifyContext.MessageProcessingRecords
-            .AsNoTracking()
-            .AnyAsync(item => item.MessageId == "wamid.processing-old");
-        var completedRecent = await verifyContext.MessageProcessingRecords
-            .AsNoTracking()
-            .AnyAsync(item => item.MessageId == "wamid.completed-recent");
-
-        Assert.False(completedOld);
-        Assert.False(abandonedOld);
-        Assert.True(failedOld);
-        Assert.True(processingOld);
-        Assert.True(completedRecent);
+        await using var verifyContext = new MessageBridgeDbContext(options);
+        Assert.False(await ExistsAsync(verifyContext, "wamid.completed-old"));
+        Assert.False(await ExistsAsync(verifyContext, "wamid.abandoned-old"));
+        Assert.True(await ExistsAsync(verifyContext, "wamid.failed-old"));
+        Assert.True(await ExistsAsync(verifyContext, "wamid.processing-old"));
+        Assert.True(await ExistsAsync(verifyContext, "wamid.completed-recent"));
     }
 
     [Fact]
     public async Task Cleanup_ServiceDoesNotDeleteWhenDisabled()
     {
-        var options = BuildOptions(nameof(Cleanup_ServiceDoesNotDeleteWhenDisabled) + Guid.NewGuid());
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var options = BuildOptions(scenario.DbContext);
         var now = DateTimeOffset.UtcNow;
-        await using (var seedContext = await CreateDbContextAsync(options))
+        scenario.DbContext.MessageProcessingRecords.Add(
+            BuildRecord("wamid.should-keep", ProcessingStatus.Completed, now.AddHours(-2), now.AddHours(-2), now.AddHours(-2)));
+        await scenario.DbContext.SaveChangesAsync();
+
+        var cleanup = CreateCleanup(new TestHistoryCleanupDbContextFactory(options), enabled: false);
+        try
         {
-            seedContext.MessageProcessingRecords.Add(
-                BuildRecord(
-                    "wamid.should-keep",
-                    ProcessingStatus.Completed,
-                    now.AddHours(-2),
-                    now.AddHours(-2),
-                    now.AddHours(-2)));
-            await seedContext.SaveChangesAsync();
+            await cleanup.StartAsync(default);
+            await Task.Delay(20);
+        }
+        finally
+        {
+            await cleanup.StopAsync(default);
         }
 
-        var cleanup = new ProcessingHistoryCleanupService(
-            new TestHistoryCleanupDbContextFactory(options),
+        await using var verifyContext = new MessageBridgeDbContext(options);
+        Assert.True(await ExistsAsync(verifyContext, "wamid.should-keep"));
+    }
+
+    private static ProcessingHistoryCleanupService CreateCleanup(
+        IDbContextFactory<MessageBridgeDbContext> factory,
+        bool enabled) =>
+        new(
+            factory,
             Options.Create(new MessageProcessingHistoryOptions
             {
-                CleanupEnabled = false,
-                CleanupIntervalMilliseconds = 5,
+                CleanupEnabled = enabled,
+                CleanupIntervalMilliseconds = 10,
                 CleanupRetentionHours = 1,
+                CleanupBatchSize = 10
             }));
-        await cleanup.StartAsync(default);
-        await Task.Delay(20);
-        await cleanup.StopAsync(default);
 
-        await using var verifyContext = await CreateDbContextAsync(options);
-        var kept = await verifyContext.MessageProcessingRecords
-            .AsNoTracking()
-            .AnyAsync(item => item.MessageId == "wamid.should-keep");
-        Assert.True(kept);
-    }
+    private static async Task<bool> ExistsAsync(MessageBridgeDbContext context, string messageId) =>
+        await context.MessageProcessingRecords.AsNoTracking().AnyAsync(item => item.MessageId == messageId);
 
     private static MessageProcessingRecord BuildRecord(
         string messageId,
         ProcessingStatus status,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt,
-        DateTimeOffset? processedAt = null)
-    {
-        return new MessageProcessingRecord
+        DateTimeOffset? processedAt = null) =>
+        new()
         {
             Id = Guid.NewGuid(),
             MessageId = messageId,
@@ -174,37 +109,21 @@ public sealed class ProcessingHistoryCleanupTests : IAsyncLifetime
             UpdatedAt = updatedAt,
             ProcessedAt = processedAt
         };
-    }
 
-    private async Task<MessageBridgeDbContext> CreateDbContextAsync(DbContextOptions<MessageBridgeDbContext> options)
-    {
-        var context = new MessageBridgeDbContext(options);
-        await context.Database.EnsureCreatedAsync();
-        return context;
-    }
-
-    private DbContextOptions<MessageBridgeDbContext> BuildOptions(string databaseName)
-    {
-        var baseConnectionString = _sharedConnectionString ?? _container!.GetConnectionString();
-        var connectionStringBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString)
-        {
-            Database = databaseName
-        };
-
-        return new DbContextOptionsBuilder<MessageBridgeDbContext>()
-            .UseNpgsql(connectionStringBuilder.ConnectionString)
+    private static DbContextOptions<MessageBridgeDbContext> BuildOptions(MessageBridgeDbContext context) =>
+        new DbContextOptionsBuilder<MessageBridgeDbContext>()
+            .UseNpgsql(context.Database.GetConnectionString()!)
             .Options;
-    }
 
     private static async Task WaitUntilRecordRemovedAsync(
-        TestHistoryCleanupDbContextFactory factory,
+        IDbContextFactory<MessageBridgeDbContext> factory,
         string messageId)
     {
         await WaitUntilAsync(
             async () =>
             {
                 await using var context = await factory.CreateDbContextAsync();
-                return !await context.MessageProcessingRecords.AnyAsync(item => item.MessageId == messageId);
+                return !await ExistsAsync(context, messageId);
             },
             TimeSpan.FromSeconds(1),
             $"Record '{messageId}' was not removed in time.");
