@@ -37,7 +37,12 @@ public sealed class MessageProcessingStore(MessageBridgeDbContext dbContext) : I
         catch (DbUpdateException exception) when (IsUniqueViolation(exception))
         {
             DetachEntries(exception);
-            var existing = await GetRequiredAsync(request.MessageId, request.MessageType, cancellationToken);
+            var existing = await GetAsync(request.MessageId, request.MessageType, cancellationToken);
+            if (existing is null)
+            {
+                await Task.Delay(100, cancellationToken);
+                existing = await GetRequiredAsync(request.MessageId, request.MessageType, cancellationToken);
+            }
             return new CreateMessageProcessingResult(CreateMessageProcessingOutcome.Duplicate, existing);
         }
     }

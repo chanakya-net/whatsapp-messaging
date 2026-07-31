@@ -8,8 +8,22 @@ using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Shouldly;
 using Testcontainers.PostgreSql;
+using System.Collections.Concurrent;
 
 namespace MessageBridge.IntegrationTests;
+
+internal sealed class ProviderInvokeCounter
+{
+    private readonly ConcurrentDictionary<string, int> _counts = [];
+
+    public async Task InvokeAsync(string messageId)
+    {
+        _counts.AddOrUpdate(messageId, 1, (_, count) => count + 1);
+        await Task.CompletedTask;
+    }
+
+    public int GetCount(string messageId) => _counts.TryGetValue(messageId, out var count) ? count : 0;
+}
 
 public sealed class WorkerIdempotencyTests : IAsyncLifetime
 {
@@ -121,6 +135,61 @@ public sealed class WorkerIdempotencyTests : IAsyncLifetime
         record.Status.ShouldBe(ProcessingStatus.Completed);
         record.PayloadHash.ShouldBe(payloadHash);
         record.ProviderMetadata.ShouldContainKey("tenantId");
+    }
+
+    [Fact]
+    public async Task Concurrent_duplicate_deliveries_invoke_provider_once()
+    {
+        await using var dbContext = await CreateDbContextAsync();
+        var store = new MessageProcessingStore(dbContext);
+        var coordinator = new MessageProcessingCoordinator(store);
+
+        var command = CreateWhatsAppCommand("wamid.int.concurrent1");
+        var messageType = "SendWhatsAppMessage";
+        var metadata = new Dictionary<string, string?> { ["tenantId"] = "tenant-int" };
+        var payloadHash = ComputePayloadHash(command);
+
+        var invokeCounter = new ProviderInvokeCounter();
+
+        var result1 = await coordinator.ProcessAsync(
+            command.MessageId,
+            messageType,
+            payloadHash,
+            "MessageBridge.Worker",
+            metadata,
+            async _ =>
+            {
+                await Task.Delay(50);
+                await invokeCounter.InvokeAsync(command.MessageId);
+            },
+            CancellationToken.None);
+
+        var result2 = await coordinator.ProcessAsync(
+            command.MessageId,
+            messageType,
+            payloadHash,
+            "MessageBridge.Worker",
+            metadata,
+            async _ => await invokeCounter.InvokeAsync(command.MessageId),
+            CancellationToken.None);
+
+        var result3 = await coordinator.ProcessAsync(
+            command.MessageId,
+            messageType,
+            payloadHash,
+            "MessageBridge.Worker",
+            metadata,
+            async _ => await invokeCounter.InvokeAsync(command.MessageId),
+            CancellationToken.None);
+
+        invokeCounter.GetCount(command.MessageId).ShouldBe(1);
+        result1.ShouldBe(true);
+        result2.ShouldBe(false);
+        result3.ShouldBe(false);
+
+        var record = await store.GetAsync(command.MessageId, messageType);
+        record.ShouldNotBeNull();
+        record.Status.ShouldBe(ProcessingStatus.Completed);
     }
 
     private static SendWhatsAppMessageCommand CreateWhatsAppCommand(string messageId) =>
