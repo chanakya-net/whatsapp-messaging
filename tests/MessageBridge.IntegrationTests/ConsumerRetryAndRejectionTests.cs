@@ -6,30 +6,29 @@ using MessageBridge.Contracts.V1;
 using MessageBridge.Domain.Processing;
 using MessageBridge.Infrastructure.Persistence;
 using MessageBridge.IntegrationTests.Fixtures;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace MessageBridge.IntegrationTests;
 
-public sealed class ConsumerRetryAndRejectionTests : IAsyncLifetime
+[Collection(IntegrationTestCollection.Name)]
+public sealed class ConsumerRetryAndRejectionTests(IntegrationEnvironmentFixture fixture) : IAsyncLifetime
 {
-    private readonly RabbitMqFixture _rabbitMqFixture = new();
-    private PostgresFixture? _postgresFixture;
+    private readonly IntegrationEnvironmentFixture _fixture = fixture;
     private MessageBridgeDbContext? _dbContext;
+    private string? _databaseName;
     private AsyncServiceScope _scope;
     private ServiceProvider? _serviceProvider;
     private readonly ConsumerAttemptTracker _attemptTracker = new();
 
     public async Task InitializeAsync()
     {
-        await _rabbitMqFixture.InitializeAsync();
-        _postgresFixture = new PostgresFixture();
-        await _postgresFixture.InitializeAsync();
-        _dbContext = await _postgresFixture.CreateDbContextAsync();
+        (_dbContext, _databaseName) = await _fixture.CreateMigratedDatabaseAsync();
 
         var services = new ServiceCollection();
         services.AddSingleton(_attemptTracker);
-        _rabbitMqFixture.RegisterServices(services, _dbContext, ConfigureTestConsumers);
+        RegisterTestConsumers(services, _dbContext);
         _serviceProvider = services.BuildServiceProvider();
         _scope = _serviceProvider.CreateAsyncScope();
         var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
@@ -55,17 +54,15 @@ public sealed class ConsumerRetryAndRejectionTests : IAsyncLifetime
             await _dbContext.DisposeAsync();
         }
 
-        if (_postgresFixture is not null)
+        if (_databaseName is not null)
         {
-            await _postgresFixture.DisposeAsync();
+            await _fixture.DropDatabaseAsync(_databaseName);
         }
 
         if (_serviceProvider is not null)
         {
             await _serviceProvider.DisposeAsync();
         }
-
-        await _rabbitMqFixture.DisposeAsync();
     }
 
     [Fact]
@@ -124,12 +121,31 @@ public sealed class ConsumerRetryAndRejectionTests : IAsyncLifetime
         _attemptTracker.GetAttemptCount(cmd.MessageId).Should().Be(2);
     }
 
-    private static void ConfigureTestConsumers(IBusRegistrationConfigurator config)
+    private void RegisterTestConsumers(IServiceCollection services, MessageBridgeDbContext dbContext)
     {
-        config.AddConsumer<TransientRetryWhatsAppConsumer>(
-            cfg => cfg.UseMessageRetry(r => r.Immediate(1)));
-        config.AddConsumer<RejectingEmailConsumer>(
-            cfg => cfg.UseMessageRetry(r => r.Immediate(1)));
+        var connectionString = dbContext.Database.GetConnectionString()
+            ?? dbContext.Database.GetDbConnection().ConnectionString;
+
+        services.AddScoped<MessageBridgeDbContext>(_ => new MessageBridgeDbContext(
+            new DbContextOptionsBuilder<MessageBridgeDbContext>()
+                .UseNpgsql(connectionString)
+                .Options));
+        services.AddScoped<IMessageProcessingStore, MessageProcessingStore>();
+        services.AddMassTransit(bus =>
+        {
+            bus.SetEndpointNameFormatter(new KebabCaseEndpointNameFormatter(
+                IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix(),
+                includeNamespace: false));
+            bus.AddConsumer<TransientRetryWhatsAppConsumer>(
+                cfg => cfg.UseMessageRetry(r => r.Immediate(1)));
+            bus.AddConsumer<RejectingEmailConsumer>(
+                cfg => cfg.UseMessageRetry(r => r.Immediate(1)));
+            bus.UsingRabbitMq((context, cfg) =>
+            {
+                cfg.Host(_fixture.GetRabbitMqConnectionString());
+                cfg.ConfigureEndpoints(context);
+            });
+        });
     }
 
     private static async Task<bool> HasStatusAsync(

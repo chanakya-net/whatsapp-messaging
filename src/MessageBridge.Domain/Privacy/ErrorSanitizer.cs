@@ -20,6 +20,10 @@ public static class ErrorSanitizer
         @"(?i)\b[a-z0-9_-]{24,}\b",
         RegexOptions.Compiled);
 
+    private static readonly Regex PayloadRegex = new(
+        @"(?i)(?<prefix>\bpayload\s*[:=]\s*)(?<value>\{.*?\}|\[.*?\]|[^\s;]+)",
+        RegexOptions.Compiled);
+
     public static string Sanitize(string? message)
     {
         if (string.IsNullOrWhiteSpace(message))
@@ -29,6 +33,7 @@ public static class ErrorSanitizer
             message,
             match => $"{match.Groups["prefix"].Value}[REDACTED_{match.Groups["key"].Value.ToUpperInvariant()}]");
 
+        sanitized = PayloadRegex.Replace(sanitized, "${prefix}[REDACTED_PAYLOAD]");
         sanitized = EmailRegex.Replace(sanitized, match => RecipientMasker.MaskEmailAddress(match.Value));
         sanitized = PhoneRegex.Replace(sanitized, match => RecipientMasker.MaskPhoneNumber(match.Value));
         sanitized = PlainTokenRegex.Replace(
