@@ -5,73 +5,23 @@ using MessageBridge.Contracts.V1;
 using MessageBridge.Domain.Processing;
 using MessageBridge.Infrastructure.Persistence;
 using MessageBridge.IntegrationTests.Fixtures;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace MessageBridge.IntegrationTests;
 
-public sealed class ProcessingTrackingIntegrationTests : IAsyncLifetime
+[Collection(IntegrationTestCollection.Name)]
+public sealed class ProcessingTrackingIntegrationTests(IntegrationEnvironmentFixture fixture)
 {
-    private readonly RabbitMqFixture _rabbitMqFixture = new();
-    private PostgresFixture? _postgresFixture;
-    private MessageBridgeDbContext? _dbContext;
-    private AsyncServiceScope _scope;
-    private ServiceProvider? _serviceProvider;
-
-    public async Task InitializeAsync()
-    {
-        await _rabbitMqFixture.InitializeAsync();
-        _postgresFixture = new PostgresFixture();
-        await _postgresFixture.InitializeAsync();
-        _dbContext = await _postgresFixture.CreateDbContextAsync();
-
-        var services = new ServiceCollection();
-        _rabbitMqFixture.RegisterServices(services, _dbContext);
-        _serviceProvider = services.BuildServiceProvider();
-        _scope = _serviceProvider.CreateAsyncScope();
-
-        // Start the MassTransit bus so consumers can receive messages
-        var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
-        await busControl!.StartAsync(TimeSpan.FromSeconds(10));
-    }
-
-    public async Task DisposeAsync()
-    {
-        try
-        {
-            var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
-            await busControl?.StopAsync(TimeSpan.FromSeconds(10))!;
-        }
-        catch
-        {
-            // Ignore if bus was not started
-        }
-
-        await _scope.DisposeAsync();
-
-        if (_dbContext is not null)
-        {
-            await _dbContext.DisposeAsync();
-        }
-
-        if (_postgresFixture is not null)
-        {
-            await _postgresFixture.DisposeAsync();
-        }
-
-        if (_serviceProvider is not null)
-        {
-            await _serviceProvider.DisposeAsync();
-        }
-
-        await _rabbitMqFixture.DisposeAsync();
-    }
+    private readonly IntegrationEnvironmentFixture _fixture = fixture;
 
     [Fact]
     public async Task PublishMessage_CreatesProcessingRecord_ForOutboxTracking()
     {
-        var bus = _scope.ServiceProvider.GetRequiredService<IBus>();
-        var store = _scope.ServiceProvider.GetRequiredService<IMessageProcessingStore>();
+        await using var scenario = await ProcessingTrackingScenario.CreateAsync(_fixture);
+        var bus = scenario.Services.GetRequiredService<IBus>();
+        var store = scenario.Services.GetRequiredService<IMessageProcessingStore>();
 
         var cmd = new SendWhatsAppMessageCommand
         {
@@ -99,9 +49,9 @@ public sealed class ProcessingTrackingIntegrationTests : IAsyncLifetime
         await bus.Publish(cmd);
 
         // Verify record persisted (poll until found or timeout)
-        await IntegrationTestsHelper.PollUntilAsync(
+        await IntegrationEnvironmentFixture.PollUntilAssertedAsync(
             async () => await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand)) != null,
-            TimeSpan.FromSeconds(10));
+            "Published outbox record was not persisted.");
 
         var record = await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand));
         record.Should().NotBeNull();
@@ -112,7 +62,8 @@ public sealed class ProcessingTrackingIntegrationTests : IAsyncLifetime
     [Fact]
     public async Task DuplicateOutboxEntry_ReturnsExistingRecord_PreventingDoublePublish()
     {
-        var store = _scope.ServiceProvider.GetRequiredService<IMessageProcessingStore>();
+        await using var scenario = await ProcessingTrackingScenario.CreateAsync(_fixture);
+        var store = scenario.Services.GetRequiredService<IMessageProcessingStore>();
 
         var msgId = $"dup-outbox-{Guid.NewGuid():N}";
         var hash = "hash-duplicate-outbox";
@@ -135,7 +86,8 @@ public sealed class ProcessingTrackingIntegrationTests : IAsyncLifetime
     [Fact]
     public async Task OutboxRecord_UpdatesStatusAfterDispatch()
     {
-        var store = _scope.ServiceProvider.GetRequiredService<IMessageProcessingStore>();
+        await using var scenario = await ProcessingTrackingScenario.CreateAsync(_fixture);
+        var store = scenario.Services.GetRequiredService<IMessageProcessingStore>();
 
         var msgId = $"status-outbox-{Guid.NewGuid():N}";
         var msgType = "email.confirm";
@@ -170,5 +122,130 @@ public sealed class ProcessingTrackingIntegrationTests : IAsyncLifetime
         var bytes = System.Security.Cryptography.SHA256.HashData(
             System.Text.Encoding.UTF8.GetBytes(json));
         return Convert.ToHexString(bytes);
+    }
+}
+
+internal sealed class ProcessingTrackingScenario : IAsyncDisposable
+{
+    private readonly IntegrationEnvironmentFixture _fixture;
+    private readonly MessageBridgeDbContext _dbContext;
+    private readonly string _databaseName;
+    private readonly ServiceProvider _serviceProvider;
+    private readonly AsyncServiceScope _scope;
+    private IBusControl? _bus;
+
+    private ProcessingTrackingScenario(
+        IntegrationEnvironmentFixture fixture,
+        MessageBridgeDbContext dbContext,
+        string databaseName,
+        ServiceProvider serviceProvider,
+        AsyncServiceScope scope)
+    {
+        _fixture = fixture;
+        _dbContext = dbContext;
+        _databaseName = databaseName;
+        _serviceProvider = serviceProvider;
+        _scope = scope;
+    }
+
+    public IServiceProvider Services => _scope.ServiceProvider;
+
+    public static async Task<ProcessingTrackingScenario> CreateAsync(
+        IntegrationEnvironmentFixture fixture)
+    {
+        var (dbContext, databaseName) = await fixture.CreateMigratedDatabaseAsync();
+        var serviceProvider = BuildServices(fixture, dbContext);
+        var scope = serviceProvider.CreateAsyncScope();
+        var scenario = new ProcessingTrackingScenario(
+            fixture,
+            dbContext,
+            databaseName,
+            serviceProvider,
+            scope);
+
+        try
+        {
+            scenario._bus = scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
+            await scenario._bus!.StartAsync(IntegrationEnvironmentFixture.AssertionTimeout);
+            return scenario;
+        }
+        catch
+        {
+            try
+            {
+                await scenario.DisposeAsync();
+            }
+            catch
+            {
+                // Preserve the bus startup failure.
+            }
+
+            throw;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (_bus is not null)
+            {
+                await _bus.StopAsync(IntegrationEnvironmentFixture.AssertionTimeout);
+            }
+        }
+        finally
+        {
+            await DisposeResourcesAsync();
+        }
+    }
+
+    private async Task DisposeResourcesAsync()
+    {
+        try
+        {
+            await _scope.DisposeAsync();
+        }
+        finally
+        {
+            try
+            {
+                await _serviceProvider.DisposeAsync();
+            }
+            finally
+            {
+                try
+                {
+                    await _dbContext.DisposeAsync();
+                }
+                finally
+                {
+                    await _fixture.DropDatabaseAsync(_databaseName);
+                }
+            }
+        }
+    }
+
+    private static ServiceProvider BuildServices(
+        IntegrationEnvironmentFixture fixture,
+        MessageBridgeDbContext dbContext)
+    {
+        var connectionString = dbContext.Database.GetConnectionString()
+            ?? dbContext.Database.GetDbConnection().ConnectionString;
+        var options = new DbContextOptionsBuilder<MessageBridgeDbContext>()
+            .UseNpgsql(connectionString)
+            .Options;
+        var services = new ServiceCollection();
+
+        services.AddScoped(_ => new MessageBridgeDbContext(options));
+        services.AddScoped<IMessageProcessingStore, MessageProcessingStore>();
+        services.AddMassTransit(bus =>
+        {
+            bus.SetEndpointNameFormatter(new KebabCaseEndpointNameFormatter(
+                IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix(),
+                includeNamespace: false));
+            bus.UsingRabbitMq((_, cfg) => cfg.Host(fixture.GetRabbitMqConnectionString()));
+        });
+
+        return services.BuildServiceProvider();
     }
 }

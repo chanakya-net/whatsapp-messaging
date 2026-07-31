@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using DotNet.Testcontainers.Containers;
 using MessageBridge.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -16,6 +18,18 @@ namespace MessageBridge.IntegrationTests.Fixtures;
 /// </summary>
 public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
 {
+    private const string DelayedExchangePluginUrl =
+        "https://github.com/rabbitmq/rabbitmq-delayed-message-exchange/releases/download/"
+        + "v4.0.7/rabbitmq_delayed_message_exchange-v4.0.7.ez";
+    private const string DelayedExchangePluginPath =
+        "/opt/rabbitmq/plugins/rabbitmq_delayed_message_exchange-v4.0.7.ez";
+    private const string DelayedExchangePluginSha256 =
+        "9f746962d8f4e9ec2ce52fc86856859c30ed11abc67dd93cd80ebb3ef925d3fd";
+    private const string PostgreSqlUsername = "messagebridge_postgres_user";
+    private const string PostgreSqlPassword = "messagebridge-postgres-pass-36";
+    private const string RabbitMqUsername = "messagebridge_rabbit_user";
+    private const string RabbitMqPassword = "messagebridge-rabbit-pass-36";
+
     public static readonly TimeSpan ReadinessTimeout = TimeSpan.FromSeconds(120);
     public static readonly TimeSpan AssertionTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(200);
@@ -25,18 +39,25 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _postgres = new PostgreSqlBuilder()
-            .WithImage("postgres:17-alpine")
-            .Build();
-
-        _rabbitMq = new RabbitMqBuilder()
-            .WithImage("masstransit/rabbitmq:3.13")
-            .Build();
-
         try
         {
+            var delayedExchangePlugin = await DownloadDelayedExchangePluginAsync();
+            _postgres = new PostgreSqlBuilder()
+                .WithImage("postgres:17-alpine")
+                .WithUsername(PostgreSqlUsername)
+                .WithPassword(PostgreSqlPassword)
+                .Build();
+
+            _rabbitMq = new RabbitMqBuilder()
+                .WithImage("rabbitmq:4.0-management-alpine")
+                .WithUsername(RabbitMqUsername)
+                .WithPassword(RabbitMqPassword)
+                .WithResourceMapping(delayedExchangePlugin, DelayedExchangePluginPath)
+                .Build();
+
             await WaitForReadyAsync(_postgres.StartAsync);
             await WaitForReadyAsync(_rabbitMq.StartAsync);
+            await EnableDelayedExchangePluginAsync(_rabbitMq);
         }
         catch
         {
@@ -55,14 +76,34 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        if (_rabbitMq is not null)
+        var failures = new List<string>();
+        var rabbitMq = _rabbitMq;
+        var postgres = _postgres;
+        _rabbitMq = null;
+        _postgres = null;
+
+        if (rabbitMq is not null)
         {
-            await _rabbitMq.DisposeAsync();
+            await CaptureAndDisposeAsync(
+                rabbitMq,
+                "rabbitmq",
+                rabbitMq.GetConnectionString,
+                failures);
         }
 
-        if (_postgres is not null)
+        if (postgres is not null)
         {
-            await _postgres.DisposeAsync();
+            await CaptureAndDisposeAsync(
+                postgres,
+                "postgres",
+                postgres.GetConnectionString,
+                failures);
+        }
+
+        if (failures.Count > 0)
+        {
+            throw new InvalidOperationException(
+                ContainerLogSanitizer.Sanitize(string.Join(Environment.NewLine, failures)));
         }
     }
 
@@ -200,6 +241,17 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
         where T : class
         => PollUntilAsync(probe, AssertionTimeout, timeoutMessage ?? $"Condition was not met within {AssertionTimeout}.");
 
+    /// <summary>Polls until a boolean assertion condition holds.</summary>
+    public static async Task PollUntilAssertedAsync(
+        Func<Task<bool>> probe,
+        string? timeoutMessage = null)
+    {
+        await PollUntilAsync(
+            async () => await probe() ? BooleanProbeResult.Instance : null,
+            AssertionTimeout,
+            timeoutMessage ?? $"Condition was not met within {AssertionTimeout}.");
+    }
+
     /// <summary>Polls for an observation window and fails as soon as the condition changes.</summary>
     public static async Task AssertRemainsAsync(
         Func<Task<bool>> probe,
@@ -251,6 +303,61 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
         }
     }
 
+    private static async Task<byte[]> DownloadDelayedExchangePluginAsync()
+    {
+        using var cancellation = new CancellationTokenSource(ReadinessTimeout);
+        using var httpClient = new HttpClient();
+        var plugin = await httpClient.GetByteArrayAsync(
+            DelayedExchangePluginUrl,
+            cancellation.Token);
+        var expectedHash = Convert.FromHexString(DelayedExchangePluginSha256);
+        var actualHash = SHA256.HashData(plugin);
+
+        if (!CryptographicOperations.FixedTimeEquals(expectedHash, actualHash))
+        {
+            throw new InvalidDataException("RabbitMQ delayed exchange plugin checksum mismatch.");
+        }
+
+        return plugin;
+    }
+
+    private static async Task EnableDelayedExchangePluginAsync(RabbitMqContainer rabbitMq)
+    {
+        var result = await rabbitMq.ExecAsync(
+                ["rabbitmq-plugins", "enable", "rabbitmq_delayed_message_exchange"])
+            .WaitAsync(AssertionTimeout);
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                "RabbitMQ delayed exchange plugin could not be enabled.");
+        }
+    }
+
+    private static async Task CaptureAndDisposeAsync(
+        IContainer container,
+        string containerName,
+        Func<string> getConnectionString,
+        ICollection<string> failures)
+    {
+        var captureFailure = await ContainerLogCapture.CaptureAsync(
+            container,
+            containerName,
+            getConnectionString);
+        if (captureFailure is not null)
+        {
+            failures.Add(captureFailure);
+        }
+
+        try
+        {
+            await container.DisposeAsync();
+        }
+        catch (Exception exception)
+        {
+            failures.Add($"{containerName} cleanup failed ({exception.GetType().Name}).");
+        }
+    }
+
     private static async Task TryDisposeAsync(MessageBridgeDbContext dbContext)
     {
         try
@@ -273,5 +380,10 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
         {
             // Preserve the migration failure.
         }
+    }
+
+    private sealed class BooleanProbeResult
+    {
+        internal static readonly BooleanProbeResult Instance = new();
     }
 }

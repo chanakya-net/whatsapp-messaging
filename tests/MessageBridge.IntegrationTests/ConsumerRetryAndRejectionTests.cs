@@ -84,9 +84,9 @@ public sealed class ConsumerRetryAndRejectionTests(IntegrationEnvironmentFixture
         _attemptTracker.Reset(cmd.MessageId);
         await bus.Publish(cmd);
 
-        await IntegrationTestsHelper.PollUntilAsync(
+        await IntegrationEnvironmentFixture.PollUntilAssertedAsync(
             async () => await HasStatusAsync(store, cmd.MessageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Completed),
-            TimeSpan.FromSeconds(10));
+            "Retry record did not transition to completed.");
 
         var stored = await store.GetAsync(cmd.MessageId, nameof(SendWhatsAppMessageCommand));
         stored.Should().NotBeNull();
@@ -111,18 +111,18 @@ public sealed class ConsumerRetryAndRejectionTests(IntegrationEnvironmentFixture
         _attemptTracker.Reset(cmd.MessageId);
         await bus.Publish(cmd);
 
-        await IntegrationTestsHelper.PollUntilAsync(
+        await IntegrationEnvironmentFixture.PollUntilAssertedAsync(
             async () => await HasStatusAsync(store, cmd.MessageId, nameof(SendEmailConfirmationCommand), ProcessingStatus.Failed),
-            TimeSpan.FromSeconds(10));
+            "Rejected record did not transition to failed.");
 
         var stored = await store.GetAsync(cmd.MessageId, nameof(SendEmailConfirmationCommand));
         stored.Should().NotBeNull();
         stored!.Status.Should().Be(ProcessingStatus.Failed);
         stored.FailureReason.Should().NotBeNullOrWhiteSpace();
         _attemptTracker.GetAttemptCount(cmd.MessageId).Should().Be(2);
-        await IntegrationTestsHelper.PollUntilAsync(
+        await IntegrationEnvironmentFixture.PollUntilAssertedAsync(
             async () => await _fixture.GetQueueDepthAsync($"{_topologyPrefix}-rejecting-email_error") == 1,
-            TimeSpan.FromSeconds(10));
+            "Rejected message did not reach the error queue.");
     }
 
     private string RegisterTestConsumers(IServiceCollection services, MessageBridgeDbContext dbContext)
@@ -281,26 +281,5 @@ internal static class MessageProcessingTestHelpers
             payloadHash,
             "masstransit",
             new Dictionary<string, string?> { ["integration_test"] = metadataValue });
-    }
-}
-
-internal static class IntegrationTestsHelper
-{
-    internal static async Task PollUntilAsync(
-        Func<Task<bool>> condition,
-        TimeSpan timeout,
-        TimeSpan? pollInterval = null)
-    {
-        var interval = pollInterval ?? TimeSpan.FromMilliseconds(100);
-        var deadline = DateTime.UtcNow.Add(timeout);
-
-        while (DateTime.UtcNow < deadline)
-        {
-            if (await condition())
-                return;
-            await Task.Delay(interval);
-        }
-
-        throw new TimeoutException($"Condition not met within {timeout.TotalSeconds}s");
     }
 }
