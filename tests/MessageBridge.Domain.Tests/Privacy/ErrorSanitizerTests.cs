@@ -32,6 +32,30 @@ public class ErrorSanitizerTests
         sanitized.ShouldContain("RED");
     }
 
+    [Theory]
+    [InlineData("Username=admin")]
+    [InlineData("User ID=admin")]
+    [InlineData("UID=admin")]
+    public void Sanitize_RedactsConnectionCredentialUserNames(string input)
+    {
+        var sanitized = MessageBridge.Domain.Privacy.ErrorSanitizer.Sanitize(input);
+
+        sanitized.ShouldNotContain("admin");
+        sanitized.ShouldContain("REDACTED");
+    }
+
+    [Theory]
+    [InlineData("payload={\"meta\":{\"region\":\"in\"},\"body\":\"private text\"}")]
+    [InlineData("payload=[\"private text\",{\"body\":\"private text\"}]")]
+    [InlineData("payload={\n  \"body\": \"private text\"\n}")]
+    [InlineData("payload=private customer data")]
+    public void Sanitize_RedactsCompletePayloadValues(string input)
+    {
+        var sanitized = MessageBridge.Domain.Privacy.ErrorSanitizer.Sanitize(input);
+
+        sanitized.ShouldBe("payload=[REDACTED_PAYLOAD]");
+    }
+
     [Fact]
     public void Sanitize_RedactsEmails()
     {

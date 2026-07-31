@@ -49,19 +49,33 @@ public sealed class WorkerRetryAndErrorTests(IntegrationEnvironmentFixture fixtu
     }
 
     [Fact]
+    public async Task Scripted_message_bus_counts_unscripted_provider_invocations()
+    {
+        var messageId = $"whatsapp-{Guid.NewGuid():N}";
+        var bus = new ScriptedMessageBus();
+
+        await bus.CreateProxy().InvokeAsync<ErrorOr<Success>>(CreateWhatsAppCommand(messageId));
+
+        bus.GetAttemptCount(messageId).ShouldBe(1);
+    }
+
+    [Fact]
     public async Task Transient_failures_use_three_immediate_retries_before_success()
     {
         var messageId = $"whatsapp-{Guid.NewGuid():N}";
         var bus = new ScriptedMessageBus();
-        bus.AddScript(
-            messageId,
-            MessageScript.FailTimesThenSucceed(
-                3,
-                Error.Failure("Provider.Send", "temporary outage token=secret-value")));
+        var script = MessageScript.FailTimesThenSucceed(
+            3,
+            Error.Failure("Provider.Send", "temporary outage token=secret-value"),
+            blockFirstAttempt: true);
+        bus.AddScript(messageId, script);
 
         await using var harness = await StartHarnessAsync(bus, [1.Seconds(), 2.Seconds(), 3.Seconds()]);
         await harness.PublishAsync(CreateWhatsAppCommand(messageId));
 
+        await script.WaitForFirstAttemptAsync();
+        await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Processing);
+        script.ReleaseFirstAttempt();
         var record = await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Completed);
         var attempts = bus.GetAttempts(messageId);
 
@@ -76,20 +90,18 @@ public sealed class WorkerRetryAndErrorTests(IntegrationEnvironmentFixture fixtu
     {
         var messageId = $"whatsapp-{Guid.NewGuid():N}";
         var bus = new ScriptedMessageBus();
-        bus.AddScript(
-            messageId,
-            MessageScript.FailTimesThenSucceed(
-                4,
-                Error.Failure("Provider.Send", "temporary outage token=secret-value")));
+        var script = MessageScript.FailTimesThenSucceed(
+            4,
+            Error.Failure("Provider.Send", "temporary outage token=secret-value"),
+            blockFirstAttempt: true);
+        bus.AddScript(messageId, script);
 
         await using var harness = await StartHarnessAsync(bus, [1.Seconds(), 2.Seconds(), 3.Seconds()]);
         await harness.PublishAsync(CreateWhatsAppCommand(messageId));
 
-        await harness.AssertStatusRemainsAsync(
-            messageId,
-            nameof(SendWhatsAppMessageCommand),
-            ProcessingStatus.Failed,
-            900.Milliseconds());
+        await script.WaitForFirstAttemptAsync();
+        await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Processing);
+        script.ReleaseFirstAttempt();
         var record = await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Completed);
         var attempts = bus.GetAttempts(messageId);
 
@@ -105,23 +117,27 @@ public sealed class WorkerRetryAndErrorTests(IntegrationEnvironmentFixture fixtu
     {
         var messageId = $"whatsapp-{Guid.NewGuid():N}";
         var bus = new ScriptedMessageBus();
-        bus.AddScript(
-            messageId,
-            MessageScript.FailForever(
-                Error.Failure(
-                    "Provider.Send",
-                    "temporary outage token=super-secret-token phone=+1 (415) 555-2671 " +
-                    "connection_string=Host=database;Username=admin;Password=unsafe-password " +
-                    "payload={\"recipient\":\"+14155552671\",\"body\":\"private payload\"}")));
+        var script = MessageScript.FailForever(
+            Error.Failure(
+                "Provider.Send",
+                "temporary outage token=super-secret-token phone=+1 (415) 555-2671 " +
+                "connection_string=Host=database;Username=admin;Password=unsafe-password " +
+                "payload={\"recipient\":\"+14155552671\",\"body\":\"private payload\"}"),
+            blockFirstAttempt: true);
+        bus.AddScript(messageId, script);
 
         await using var harness = await StartHarnessAsync(bus, [150.Milliseconds(), 300.Milliseconds(), 450.Milliseconds()]);
         await harness.PublishAsync(CreateWhatsAppCommand(messageId));
 
+        await script.WaitForFirstAttemptAsync();
+        await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Processing);
+        script.ReleaseFirstAttempt();
         var record = await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Failed);
         record.FailureReason.ShouldNotBeNull();
         record.FailureReason.ShouldContain("*******2671");
         record.FailureReason.ShouldNotContain("super-secret-token");
         record.FailureReason.ShouldNotContain("Host=database");
+        record.FailureReason.ShouldNotContain("admin");
         record.FailureReason.ShouldNotContain("unsafe-password");
         record.FailureReason.ShouldNotContain("private payload");
         record.FailureReason.ShouldNotContain("+14155552671");
@@ -244,26 +260,6 @@ public sealed class WorkerRetryAndErrorTests(IntegrationEnvironmentFixture fixtu
         public async Task<int> GetQueueDepthAsync(string queueSuffix)
         {
             return await _fixture.GetQueueDepthAsync(GetQueueName(queueSuffix));
-        }
-
-        public Task AssertStatusRemainsAsync(
-            string messageId,
-            string messageType,
-            ProcessingStatus excludedStatus,
-            TimeSpan duration)
-        {
-            return IntegrationEnvironmentFixture.AssertRemainsAsync(
-                async () =>
-                {
-                    await using var dbContext = CreateDbContext();
-                    var status = await dbContext.MessageProcessingRecords
-                    .Where(item => item.MessageId == messageId && item.MessageType == messageType)
-                    .Select(item => (ProcessingStatus?)item.Status)
-                    .SingleOrDefaultAsync();
-                    return status != excludedStatus;
-                },
-                duration,
-                $"{messageType}/{messageId} unexpectedly reached {excludedStatus}.");
         }
 
         public Task AssertQueueDepthRemainsAsync(

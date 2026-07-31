@@ -18,6 +18,7 @@ public sealed class ConsumerRetryAndRejectionTests(IntegrationEnvironmentFixture
     private readonly IntegrationEnvironmentFixture _fixture = fixture;
     private MessageBridgeDbContext? _dbContext;
     private string? _databaseName;
+    private string? _topologyPrefix;
     private AsyncServiceScope _scope;
     private ServiceProvider? _serviceProvider;
     private readonly ConsumerAttemptTracker _attemptTracker = new();
@@ -28,7 +29,7 @@ public sealed class ConsumerRetryAndRejectionTests(IntegrationEnvironmentFixture
 
         var services = new ServiceCollection();
         services.AddSingleton(_attemptTracker);
-        RegisterTestConsumers(services, _dbContext);
+        _topologyPrefix = RegisterTestConsumers(services, _dbContext);
         _serviceProvider = services.BuildServiceProvider();
         _scope = _serviceProvider.CreateAsyncScope();
         var busControl = _scope.ServiceProvider.GetRequiredService<IBus>() as IBusControl;
@@ -119,9 +120,12 @@ public sealed class ConsumerRetryAndRejectionTests(IntegrationEnvironmentFixture
         stored!.Status.Should().Be(ProcessingStatus.Failed);
         stored.FailureReason.Should().NotBeNullOrWhiteSpace();
         _attemptTracker.GetAttemptCount(cmd.MessageId).Should().Be(2);
+        await IntegrationTestsHelper.PollUntilAsync(
+            async () => await _fixture.GetQueueDepthAsync($"{_topologyPrefix}-rejecting-email_error") == 1,
+            TimeSpan.FromSeconds(10));
     }
 
-    private void RegisterTestConsumers(IServiceCollection services, MessageBridgeDbContext dbContext)
+    private string RegisterTestConsumers(IServiceCollection services, MessageBridgeDbContext dbContext)
     {
         var connectionString = dbContext.Database.GetConnectionString()
             ?? dbContext.Database.GetDbConnection().ConnectionString;
@@ -131,21 +135,24 @@ public sealed class ConsumerRetryAndRejectionTests(IntegrationEnvironmentFixture
                 .UseNpgsql(connectionString)
                 .Options));
         services.AddScoped<IMessageProcessingStore, MessageProcessingStore>();
+        var topologyPrefix = IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix();
         services.AddMassTransit(bus =>
         {
             bus.SetEndpointNameFormatter(new KebabCaseEndpointNameFormatter(
-                IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix(),
+                topologyPrefix,
                 includeNamespace: false));
             bus.AddConsumer<TransientRetryWhatsAppConsumer>(
                 cfg => cfg.UseMessageRetry(r => r.Immediate(1)));
             bus.AddConsumer<RejectingEmailConsumer>(
                 cfg => cfg.UseMessageRetry(r => r.Immediate(1)));
+            bus.AddConsumer<RejectingEmailFaultConsumer>();
             bus.UsingRabbitMq((context, cfg) =>
             {
                 cfg.Host(_fixture.GetRabbitMqConnectionString());
                 cfg.ConfigureEndpoints(context);
             });
         });
+        return topologyPrefix;
     }
 
     private static async Task<bool> HasStatusAsync(
@@ -222,17 +229,22 @@ internal sealed class RejectingEmailConsumer(
             payloadHash,
             "rejection");
 
-        if (attempt == 1)
-        {
-            await store.UpdateStatusAsync(context.Message.MessageId, nameof(SendEmailConfirmationCommand), ProcessingStatus.Processing);
-            throw new InvalidOperationException("Transient consumer failure for rejection coverage.");
-        }
+        await store.UpdateStatusAsync(context.Message.MessageId, nameof(SendEmailConfirmationCommand), ProcessingStatus.Processing);
+        throw new InvalidOperationException($"Transient consumer failure on attempt {attempt} for rejection coverage.");
+    }
+}
 
-        await store.UpdateStatusAsync(
-            context.Message.MessageId,
+internal sealed class RejectingEmailFaultConsumer(IMessageProcessingStore store)
+    : IConsumer<Fault<SendEmailConfirmationCommand>>
+{
+    public Task Consume(ConsumeContext<Fault<SendEmailConfirmationCommand>> context)
+    {
+        var failure = context.Message.Exceptions.FirstOrDefault()?.Message ?? "retry attempts exhausted";
+        return store.UpdateStatusAsync(
+            context.Message.Message.MessageId,
             nameof(SendEmailConfirmationCommand),
             ProcessingStatus.Failed,
-            "retry attempts exhausted");
+            failure);
     }
 }
 
