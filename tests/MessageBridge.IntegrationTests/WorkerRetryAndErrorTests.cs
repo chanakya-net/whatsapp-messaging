@@ -122,7 +122,8 @@ public sealed class WorkerRetryAndErrorTests(IntegrationEnvironmentFixture fixtu
                 "Provider.Send",
                 "provider response: {\"token\":\"super-secret-token\",\"password\":\"unsafe-password\"," +
                 "\"authorization\":\"Bearer private-auth\",\"payload\":{\"recipient\":\"+14155552671\"," +
-                "\"body\":\"private payload\"}} phone=+1 (415) 555-2671"),
+                "\"body\":\"private payload\"}} phone=+1 (415) 555-2671 " +
+                "Authorization: Bearer private-header-auth"),
             blockFirstAttempt: true);
         bus.AddScript(messageId, script);
 
@@ -138,6 +139,8 @@ public sealed class WorkerRetryAndErrorTests(IntegrationEnvironmentFixture fixtu
         record.FailureReason.ShouldNotContain("super-secret-token");
         record.FailureReason.ShouldNotContain("unsafe-password");
         record.FailureReason.ShouldNotContain("private-auth");
+        record.FailureReason.ShouldNotContain("private-header-auth");
+        record.FailureReason.ShouldNotContain("Bearer");
         record.FailureReason.ShouldNotContain("private payload");
         record.FailureReason.ShouldNotContain("+14155552671");
         record.FailureReason.ShouldContain("REDACTED_TOKEN");

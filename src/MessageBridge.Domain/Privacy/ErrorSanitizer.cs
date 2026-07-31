@@ -5,6 +5,8 @@ namespace MessageBridge.Domain.Privacy;
 
 public static class ErrorSanitizer
 {
+    private const string AuthorizationMarker = "[REDACTED_AUTHORIZATION]";
+
     private static readonly Regex EmailRegex = new(
         @"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -15,6 +17,14 @@ public static class ErrorSanitizer
 
     private static readonly Regex SecretRegex = new(
         """(?i)(?<prefix>[\s"'`{=;:,]|^)(?<key>password|passwd|pwd|token|secret|api[_-]?key|access[_-]?token|connection[_-]?string|authorization|username|user\s*id|uid)(?:["'`])?(?<sep>\s*[:=]\s*)(?<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`[^`]*`|[^\s;"'`{,}]+)""",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex AuthorizationHeaderRegex = new(
+        """(?i)\b(?<key>proxy-authorization|authorization)(?:["'`])?\s*[:=]\s*(?![\s"'`])(?<value>[^\r\n;,}"'`]*[^\s\r\n;,}"'`])""",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex AuthorizationSchemeRegex = new(
+        """(?i)\b(?:bearer|basic|digest)\s+[^\s;,}"'`]+""",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex PlainTokenRegex = new(
@@ -30,9 +40,11 @@ public static class ErrorSanitizer
         if (string.IsNullOrWhiteSpace(message))
             return string.Empty;
 
-        var sanitized = SecretRegex.Replace(message, RedactSecret);
+        var sanitized = AuthorizationHeaderRegex.Replace(message, AuthorizationMarker);
 
+        sanitized = SecretRegex.Replace(sanitized, RedactSecret);
         sanitized = RedactPayloadValues(sanitized);
+        sanitized = AuthorizationSchemeRegex.Replace(sanitized, AuthorizationMarker);
         sanitized = EmailRegex.Replace(sanitized, match => RecipientMasker.MaskEmailAddress(match.Value));
         sanitized = PhoneRegex.Replace(sanitized, match => RecipientMasker.MaskPhoneNumber(match.Value));
         sanitized = PlainTokenRegex.Replace(

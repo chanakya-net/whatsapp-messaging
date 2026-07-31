@@ -80,14 +80,33 @@ internal sealed class MessageScript(
         if (Interlocked.Increment(ref _attemptCount) == 1 && _firstAttemptGate is not null)
         {
             _firstAttemptGate.Started.TrySetResult();
-            await _firstAttemptGate.Release.Task;
+            await _firstAttemptGate.Release.Task.WaitAsync(IntegrationEnvironmentFixture.AssertionTimeout);
         }
 
         return _next();
     }
 
-    public Task WaitForFirstAttemptAsync() => _firstAttemptGate?.Started.Task
-        ?? throw new InvalidOperationException("The script does not block its first attempt.");
+    public Task WaitForFirstAttemptAsync(TimeSpan? timeout = null)
+    {
+        var gate = _firstAttemptGate
+            ?? throw new InvalidOperationException("The script does not block its first attempt.");
+
+        return WaitForStartedAsync(gate, timeout ?? IntegrationEnvironmentFixture.AssertionTimeout);
+    }
+
+    private static async Task WaitForStartedAsync(FirstAttemptGate gate, TimeSpan timeout)
+    {
+        try
+        {
+            await gate.Started.Task.WaitAsync(timeout);
+        }
+        catch (TimeoutException exception)
+        {
+            throw new TimeoutException(
+                $"The provider was never invoked within {timeout}; the first attempt never started.",
+                exception);
+        }
+    }
 
     public void ReleaseFirstAttempt() => _firstAttemptGate?.Release.TrySetResult();
 

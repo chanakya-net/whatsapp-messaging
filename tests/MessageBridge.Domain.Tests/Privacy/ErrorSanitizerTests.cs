@@ -58,6 +58,19 @@ public class ErrorSanitizerTests
     }
 
     [Theory]
+    [InlineData("Authorization: Bearer private-auth")]
+    [InlineData("request rejected Authorization=Bearer private-auth")]
+    [InlineData("header Bearer private-auth was refused")]
+    public void Sanitize_RedactsUnquotedAuthorizationCredentials(string input)
+    {
+        var sanitized = MessageBridge.Domain.Privacy.ErrorSanitizer.Sanitize(input);
+
+        sanitized.ShouldNotContain("private-auth");
+        sanitized.ShouldNotContain("Bearer");
+        sanitized.ShouldContain("REDACTED_AUTHORIZATION");
+    }
+
+    [Theory]
     [InlineData("payload={\"meta\":{\"region\":\"in\"},\"body\":\"private text\"}")]
     [InlineData("payload=[\"private text\",{\"body\":\"private text\"}]")]
     [InlineData("payload={\n  \"body\": \"private text\"\n}")]
