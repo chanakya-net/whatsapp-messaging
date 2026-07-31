@@ -1,195 +1,131 @@
-using MessageBridge.Application.Persistence;
+using ErrorOr;
+using Google.Protobuf.WellKnownTypes;
+using MassTransit;
 using MessageBridge.Contracts.V1;
-using Google.Protobuf;
 using MessageBridge.Domain.Processing;
+using MessageBridge.Infrastructure.Messaging;
 using MessageBridge.Infrastructure.Persistence;
-using MessageBridge.Infrastructure.Messaging.Processing;
+using MessageBridge.IntegrationTests.Fixtures;
+using MessageBridge.IntegrationTests.Persistence;
 using Microsoft.EntityFrameworkCore;
-using Npgsql;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Shouldly;
-using Testcontainers.PostgreSql;
-using System.Collections.Concurrent;
+using Wolverine;
 
 namespace MessageBridge.IntegrationTests;
 
-internal sealed class ProviderInvokeCounter
+[Collection(IntegrationTestCollection.Name)]
+public sealed class WorkerIdempotencyTests(IntegrationEnvironmentFixture fixture)
 {
-    private readonly ConcurrentDictionary<string, int> _counts = [];
-
-    public async Task InvokeAsync(string messageId)
+    [Fact]
+    public async Task Duplicate_whatsapp_delivery_invokes_provider_once()
     {
-        _counts.AddOrUpdate(messageId, 1, (_, count) => count + 1);
-        await Task.CompletedTask;
-    }
+        var bus = new ScriptedMessageBus();
+        await using var harness = await StartHarnessAsync(bus);
 
-    public int GetCount(string messageId) => _counts.TryGetValue(messageId, out var count) ? count : 0;
-}
+        var messageId = $"whatsapp-{Guid.NewGuid():N}";
+        var command = CreateWhatsAppCommand(messageId);
 
-public sealed class WorkerIdempotencyTests : IAsyncLifetime
-{
-    private readonly PostgreSqlContainer _container = new PostgreSqlBuilder()
-        .WithImage("postgres:17-alpine")
-        .Build();
+        await harness.PublishAsync(command);
+        await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Completed);
+        await harness.PublishAsync(command);
 
-    private string? _connectionString;
+        await harness.AssertQueueDepthRemainsAsync("send-whats-app-message_error", 0, TimeSpan.FromSeconds(1));
+        bus.GetAttemptCount(messageId).ShouldBe(1);
 
-    public async Task InitializeAsync()
-    {
-        _connectionString = Environment.GetEnvironmentVariable("MESSAGEBRIDGE_TEST_DATABASE_CONNECTION_STRING");
-        if (!string.IsNullOrWhiteSpace(_connectionString))
-            return;
-
-        await _container.StartAsync();
-        _connectionString = _container.GetConnectionString();
-    }
-
-    public async Task DisposeAsync()
-    {
-        if (!_container.State.Equals(default))
-        {
-            await _container.DisposeAsync();
-        }
+        var record = await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Completed);
+        record.Status.ShouldBe(ProcessingStatus.Completed);
+        await harness.AssertSingleRecordAsync(messageId, nameof(SendWhatsAppMessageCommand));
     }
 
     [Fact]
-    public async Task First_valid_message_records_lifecycle_and_payload_hash()
+    public async Task Duplicate_email_delivery_invokes_provider_once()
     {
-        await using var dbContext = await CreateDbContextAsync();
-        var store = new MessageProcessingStore(dbContext);
-        var coordinator = new MessageProcessingCoordinator(store);
+        var bus = new ScriptedMessageBus();
+        await using var harness = await StartHarnessAsync(bus);
 
-        var command = CreateWhatsAppCommand("wamid.int.1");
-        var metadata = new Dictionary<string, string?> { ["tenantId"] = "tenant-int" };
-        var statuses = new List<ProcessingStatus>();
-        var payloadHash = ComputePayloadHash(command);
+        var messageId = $"email-{Guid.NewGuid():N}";
+        var command = CreateEmailCommand(messageId);
 
-        await coordinator.ProcessAsync(
-            command.MessageId,
-            "SendWhatsAppMessage",
-            payloadHash,
-            "MessageBridge.Worker",
-            metadata,
-            async _ =>
-            {
-                var snapshot = await store.GetAsync(command.MessageId, "SendWhatsAppMessage");
-                snapshot.ShouldNotBeNull();
-                statuses.Add(snapshot.Status);
-                await Task.CompletedTask;
-            },
-            CancellationToken.None);
+        await harness.PublishAsync(command);
+        await harness.WaitForRecordAsync(messageId, nameof(SendEmailConfirmationCommand), ProcessingStatus.Completed);
+        await harness.PublishAsync(command);
 
-        var record = await store.GetAsync(command.MessageId, "SendWhatsAppMessage");
-        record.ShouldNotBeNull();
-        statuses.ShouldContain(ProcessingStatus.Processing);
+        await harness.AssertQueueDepthRemainsAsync("send-email-confirmation_error", 0, TimeSpan.FromSeconds(1));
+        bus.GetAttemptCount(messageId).ShouldBe(1);
+
+        var record = await harness.WaitForRecordAsync(messageId, nameof(SendEmailConfirmationCommand), ProcessingStatus.Completed);
         record.Status.ShouldBe(ProcessingStatus.Completed);
-        record.PayloadHash.ShouldBe(payloadHash);
-        record.ProviderMetadata.ShouldContainKey("tenantId");
-        record.ProviderMetadata["tenantId"].ShouldBe("tenant-int");
-        record.ProviderMetadata.ShouldHaveSingleItem();
-        statuses.Contains(ProcessingStatus.Received).ShouldBeFalse();
-    }
-
-    [Fact]
-    public async Task Duplicate_succeeded_message_is_skipped_without_provider_execution()
-    {
-        await using var dbContext = await CreateDbContextAsync();
-        var store = new MessageProcessingStore(dbContext);
-        var coordinator = new MessageProcessingCoordinator(store);
-
-        var command = CreateEmailCommand("wamid.int.2");
-        var metadata = new Dictionary<string, string?> { ["tenantId"] = "tenant-int" };
-        var payloadHash = ComputePayloadHash(command);
-
-        var invokedCount = 0;
-        await coordinator.ProcessAsync(
-            command.MessageId,
-            "SendEmailConfirmation",
-            payloadHash,
-            "MessageBridge.Worker",
-            metadata,
-            async _ =>
-            {
-                invokedCount++;
-                await Task.CompletedTask;
-            },
-            CancellationToken.None);
-
-        var secondResult = await coordinator.ProcessAsync(
-            command.MessageId,
-            "SendEmailConfirmation",
-            payloadHash,
-            "MessageBridge.Worker",
-            metadata,
-            async _ =>
-            {
-                invokedCount++;
-                await Task.CompletedTask;
-            },
-            CancellationToken.None);
-
-        invokedCount.ShouldBe(1);
-        secondResult.ShouldBeFalse();
-
-        var record = await store.GetAsync(command.MessageId, "SendEmailConfirmation");
-        record.ShouldNotBeNull();
-        record.Status.ShouldBe(ProcessingStatus.Completed);
-        record.PayloadHash.ShouldBe(payloadHash);
-        record.ProviderMetadata.ShouldContainKey("tenantId");
+        await harness.AssertSingleRecordAsync(messageId, nameof(SendEmailConfirmationCommand));
     }
 
     [Fact]
     public async Task Concurrent_duplicate_deliveries_invoke_provider_once()
     {
-        await using var dbContext = await CreateDbContextAsync();
-        var store = new MessageProcessingStore(dbContext);
-        var coordinator = new MessageProcessingCoordinator(store);
+        var messageId = $"whatsapp-{Guid.NewGuid():N}";
+        var bus = new ScriptedMessageBus();
+        var script = MessageScript.FailTimesThenSucceed(0, Error.Failure("Provider.Send", "unused"), blockFirstAttempt: true);
+        bus.AddScript(messageId, script);
 
-        var command = CreateWhatsAppCommand("wamid.int.concurrent1");
-        var messageType = "SendWhatsAppMessage";
-        var metadata = new Dictionary<string, string?> { ["tenantId"] = "tenant-int" };
-        var payloadHash = ComputePayloadHash(command);
+        await using var harness = await StartHarnessAsync(bus);
+        var command = CreateWhatsAppCommand(messageId);
 
-        var invokeCounter = new ProviderInvokeCounter();
+        await harness.PublishAsync(command);
+        await script.WaitForFirstAttemptAsync();
+        await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Processing);
 
-        var result1 = await coordinator.ProcessAsync(
-            command.MessageId,
-            messageType,
-            payloadHash,
-            "MessageBridge.Worker",
-            metadata,
-            async _ =>
-            {
-                await Task.Delay(50);
-                await invokeCounter.InvokeAsync(command.MessageId);
-            },
-            CancellationToken.None);
+        await harness.PublishAsync(command);
+        await harness.PublishAsync(command);
 
-        var result2 = await coordinator.ProcessAsync(
-            command.MessageId,
-            messageType,
-            payloadHash,
-            "MessageBridge.Worker",
-            metadata,
-            async _ => await invokeCounter.InvokeAsync(command.MessageId),
-            CancellationToken.None);
+        script.ReleaseFirstAttempt();
+        var record = await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Completed);
 
-        var result3 = await coordinator.ProcessAsync(
-            command.MessageId,
-            messageType,
-            payloadHash,
-            "MessageBridge.Worker",
-            metadata,
-            async _ => await invokeCounter.InvokeAsync(command.MessageId),
-            CancellationToken.None);
-
-        invokeCounter.GetCount(command.MessageId).ShouldBe(1);
-        result1.ShouldBe(true);
-        result2.ShouldBe(false);
-        result3.ShouldBe(false);
-
-        var record = await store.GetAsync(command.MessageId, messageType);
-        record.ShouldNotBeNull();
         record.Status.ShouldBe(ProcessingStatus.Completed);
+        bus.GetAttemptCount(messageId).ShouldBe(1);
+        await harness.AssertSingleRecordAsync(messageId, nameof(SendWhatsAppMessageCommand));
+        await harness.AssertQueueDepthRemainsAsync("send-whats-app-message_error", 0, TimeSpan.FromSeconds(1));
+    }
+
+    private async Task<TestHarness> StartHarnessAsync(ScriptedMessageBus bus)
+    {
+        var database = await MigratedDatabaseScenario.CreateAsync(fixture);
+        var connectionString = database.DbContext.Database.GetConnectionString()!;
+        var environmentPrefix = IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix();
+
+        var settings = new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:DefaultConnection"] = connectionString,
+            ["RabbitMq:ConnectionString"] = fixture.GetRabbitMqConnectionString(),
+            ["MessageBridge:Topology:EnvironmentPrefix"] = environmentPrefix,
+            ["MessageBridge:TransportRetry:ImmediateRetryCount"] = "0",
+        };
+
+        var builder = Host.CreateApplicationBuilder();
+        builder.Configuration.AddInMemoryCollection(settings);
+        builder.Services.AddOptions<MassTransitHostOptions>()
+            .Configure(options =>
+            {
+                options.WaitUntilStarted = true;
+                options.StartTimeout = TimeSpan.FromSeconds(30);
+                options.StopTimeout = TimeSpan.FromSeconds(30);
+            });
+        builder.Services.AddSingleton<IMessageBus>(bus.CreateProxy());
+        builder.Services.AddMessageBridgeMassTransit(builder.Configuration);
+
+        var host = builder.Build();
+        try
+        {
+            await host.StartAsync();
+            return new TestHarness(host, database, fixture, environmentPrefix);
+        }
+        catch
+        {
+            host.Dispose();
+            await database.DisposeAsync();
+            throw;
+        }
     }
 
     private static SendWhatsAppMessageCommand CreateWhatsAppCommand(string messageId) =>
@@ -201,8 +137,7 @@ public sealed class WorkerIdempotencyTests : IAsyncLifetime
             TemplateName = "welcome",
             TemplateLanguage = "en",
             TemplateParameters = { ["name"] = "Alice" },
-            CorrelationId = " ",
-            RequestedAtUtc = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
         };
 
     private static SendEmailConfirmationCommand CreateEmailCommand(string messageId) =>
@@ -213,39 +148,94 @@ public sealed class WorkerIdempotencyTests : IAsyncLifetime
             RecipientEmail = "user@example.com",
             RecipientName = "Alice",
             ConfirmationToken = "token-abc",
-            ExpiresAtUtc = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow.AddHours(1)),
-            RequestedAtUtc = Google.Protobuf.WellKnownTypes.Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+            ExpiresAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow.AddHours(1)),
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
         };
 
-    private static string ComputePayloadHash(SendWhatsAppMessageCommand command)
+    private sealed class TestHarness(
+        IHost host,
+        MigratedDatabaseScenario database,
+        IntegrationEnvironmentFixture fixture,
+        string environmentPrefix) : IAsyncDisposable
     {
-        var bytes = command.ToByteArray();
-        var hash = System.Security.Cryptography.SHA256.HashData(bytes);
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
+        private readonly IHost _host = host;
+        private readonly MigratedDatabaseScenario _database = database;
+        private readonly IntegrationEnvironmentFixture _fixture = fixture;
+        private readonly string _environmentPrefix = environmentPrefix;
 
-    private static string ComputePayloadHash(SendEmailConfirmationCommand command)
-    {
-        var bytes = command.ToByteArray();
-        var hash = System.Security.Cryptography.SHA256.HashData(bytes);
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
-
-    private async Task<MessageBridgeDbContext> CreateDbContextAsync()
-    {
-        var baseConnectionString = _connectionString
-            ?? throw new InvalidOperationException("Test database connection string not configured.");
-        var connectionString = new NpgsqlConnectionStringBuilder(baseConnectionString)
+        public async Task PublishAsync<TMessage>(TMessage message)
+            where TMessage : class
         {
-            Database = $"messagebridge_tests_{Guid.NewGuid():N}"
-        };
+            await _host.Services.GetRequiredService<IPublishEndpoint>().Publish(message);
+        }
 
-        var options = new DbContextOptionsBuilder<MessageBridgeDbContext>()
-            .UseNpgsql(connectionString.ConnectionString)
-            .Options;
+        public async Task<MessageProcessingRecord> WaitForRecordAsync(
+            string messageId,
+            string messageType,
+            ProcessingStatus expectedStatus)
+        {
+            MessageProcessingRecord? lastSeen = null;
 
-        var dbContext = new MessageBridgeDbContext(options);
-        await dbContext.Database.EnsureCreatedAsync();
-        return dbContext;
+            try
+            {
+                return await IntegrationEnvironmentFixture.PollUntilAssertedAsync(async () =>
+                {
+                    await using var dbContext = CreateDbContext();
+                    lastSeen = await dbContext.MessageProcessingRecords.SingleOrDefaultAsync(
+                        item => item.MessageId == messageId
+                            && item.MessageType == messageType);
+
+                    return lastSeen?.Status == expectedStatus ? lastSeen : null;
+                });
+            }
+            catch (TimeoutException exception)
+            {
+                var details = lastSeen is null
+                    ? "no record was persisted"
+                    : $"last status={lastSeen.Status}, failure='{lastSeen.FailureReason}', processed_at={lastSeen.ProcessedAt:o}";
+
+                throw new TimeoutException(
+                    $"Expected {messageType}/{messageId} to reach {expectedStatus}; {details}.",
+                    exception);
+            }
+        }
+
+        public async Task AssertSingleRecordAsync(string messageId, string messageType)
+        {
+            await using var dbContext = CreateDbContext();
+            var count = await dbContext.MessageProcessingRecords.CountAsync(
+                item => item.MessageId == messageId && item.MessageType == messageType);
+            count.ShouldBe(1);
+        }
+
+        public async Task<int> GetQueueDepthAsync(string queueSuffix)
+        {
+            return await _fixture.GetQueueDepthAsync(GetQueueName(queueSuffix));
+        }
+
+        public Task AssertQueueDepthRemainsAsync(string queueSuffix, int expectedDepth, TimeSpan duration)
+        {
+            return IntegrationEnvironmentFixture.AssertRemainsAsync(
+                async () => await GetQueueDepthAsync(queueSuffix) == expectedDepth,
+                duration,
+                $"Queue {GetQueueName(queueSuffix)} changed from depth {expectedDepth}.");
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await _host.StopAsync();
+            _host.Dispose();
+            await _database.DisposeAsync();
+        }
+
+        private MessageBridgeDbContext CreateDbContext()
+        {
+            var options = new DbContextOptionsBuilder<MessageBridgeDbContext>()
+                .UseNpgsql(_database.DbContext.Database.GetConnectionString())
+                .Options;
+            return new MessageBridgeDbContext(options);
+        }
+
+        private string GetQueueName(string queueSuffix) => $"{_environmentPrefix}-{queueSuffix}";
     }
 }
