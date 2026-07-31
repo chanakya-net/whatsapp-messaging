@@ -23,8 +23,7 @@ public sealed class MessageProcessingCoordinator(IMessageProcessingStore process
             providerMetadata);
 
         var createResult = await processingStore.CreateAsync(createRequest, cancellationToken);
-        if (createResult.Outcome == CreateMessageProcessingOutcome.Duplicate
-            && createResult.Record.Status == ProcessingStatus.Completed)
+        if (createResult.Outcome == CreateMessageProcessingOutcome.Duplicate)
         {
             return false;
         }

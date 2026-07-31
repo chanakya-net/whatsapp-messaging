@@ -27,7 +27,7 @@ public sealed class MessageProcessingCoordinator(
         var messageId = ReadRequired(contract, "MessageId");
         var messageType = typeof(TContract).Name;
 
-        await store.CreateAsync(
+        var createResult = await store.CreateAsync(
             new MessageBridge.Application.Persistence.CreateMessageProcessingRequest(
                 messageId,
                 messageType,
@@ -39,6 +39,13 @@ public sealed class MessageProcessingCoordinator(
                     ["contract"] = messageType
                 }),
             cancellationToken);
+
+        var isOwnRetryOrRedelivery = context.GetRetryAttempt() > 0 || context.GetRedeliveryCount() > 0;
+        if (createResult.Outcome == MessageBridge.Application.Persistence.CreateMessageProcessingOutcome.Duplicate
+            && !isOwnRetryOrRedelivery)
+        {
+            return;
+        }
 
         var validation = await validator.ValidateAsync(command, cancellationToken);
         if (!validation.IsValid)
