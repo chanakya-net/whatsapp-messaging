@@ -224,7 +224,6 @@ public class MessageBridgeOutboxDispatcherTests
             factory,
             Options.Create(options));
         await cleanupService.StartAsync(default);
-        await Task.Delay(50);
         await cleanupService.StopAsync(default);
 
         await using var verifyContext = await factory.CreateDbContextAsync();
