@@ -68,16 +68,17 @@ public sealed class WorkerIdempotencyTests(IntegrationEnvironmentFixture fixture
         var bus = new ScriptedMessageBus();
         var script = MessageScript.FailTimesThenSucceed(0, Error.Failure("Provider.Send", "unused"), blockFirstAttempt: true);
         bus.AddScript(messageId, script);
+        var duplicateDeliveries = new DuplicateDeliveryObserver(messageId);
 
-        await using var harness = await StartHarnessAsync(bus);
+        await using var harness = await StartHarnessAsync(bus, duplicateDeliveries);
         var command = CreateWhatsAppCommand(messageId);
 
         await harness.PublishAsync(command);
         await script.WaitForFirstAttemptAsync();
         await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Processing);
 
-        await harness.PublishAsync(command);
-        await harness.PublishAsync(command);
+        await Task.WhenAll(harness.PublishAsync(command), harness.PublishAsync(command));
+        await duplicateDeliveries.WaitForCompletedDuplicateDeliveriesAsync();
 
         script.ReleaseFirstAttempt();
         var record = await harness.WaitForRecordAsync(messageId, nameof(SendWhatsAppMessageCommand), ProcessingStatus.Completed);
@@ -88,7 +89,9 @@ public sealed class WorkerIdempotencyTests(IntegrationEnvironmentFixture fixture
         await harness.AssertQueueDepthRemainsAsync("send-whats-app-message_error", 0, TimeSpan.FromSeconds(1));
     }
 
-    private async Task<TestHarness> StartHarnessAsync(ScriptedMessageBus bus)
+    private async Task<TestHarness> StartHarnessAsync(
+        ScriptedMessageBus bus,
+        IConsumeObserver? consumeObserver = null)
     {
         var database = await MigratedDatabaseScenario.CreateAsync(fixture);
         var connectionString = database.DbContext.Database.GetConnectionString()!;
@@ -118,7 +121,10 @@ public sealed class WorkerIdempotencyTests(IntegrationEnvironmentFixture fixture
         try
         {
             await host.StartAsync();
-            return new TestHarness(host, database, fixture, environmentPrefix);
+            var observerHandle = consumeObserver is null
+                ? null
+                : host.Services.GetRequiredService<IBus>().ConnectConsumeObserver(consumeObserver);
+            return new TestHarness(host, database, fixture, environmentPrefix, observerHandle);
         }
         catch
         {
@@ -152,16 +158,58 @@ public sealed class WorkerIdempotencyTests(IntegrationEnvironmentFixture fixture
             RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
         };
 
+    private sealed class DuplicateDeliveryObserver(string messageId) : IConsumeObserver
+    {
+        private readonly TaskCompletionSource _duplicateDeliveriesCompleted = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _completedDeliveries;
+
+        public Task PreConsume<T>(ConsumeContext<T> context)
+            where T : class => Task.CompletedTask;
+
+        public Task PostConsume<T>(ConsumeContext<T> context)
+            where T : class
+        {
+            if (context.Message is SendWhatsAppMessageCommand { MessageId: var observedMessageId }
+                && observedMessageId == messageId
+                && Interlocked.Increment(ref _completedDeliveries) == 2)
+            {
+                _duplicateDeliveriesCompleted.TrySetResult();
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public Task ConsumeFault<T>(ConsumeContext<T> context, Exception exception)
+            where T : class => Task.CompletedTask;
+
+        public async Task WaitForCompletedDuplicateDeliveriesAsync()
+        {
+            try
+            {
+                await _duplicateDeliveriesCompleted.Task.WaitAsync(IntegrationEnvironmentFixture.AssertionTimeout);
+            }
+            catch (TimeoutException exception)
+            {
+                throw new TimeoutException(
+                    "Duplicate deliveries did not complete while the first provider invocation was blocked.",
+                    exception);
+            }
+        }
+    }
+
     private sealed class TestHarness(
         IHost host,
         MigratedDatabaseScenario database,
         IntegrationEnvironmentFixture fixture,
-        string environmentPrefix) : IAsyncDisposable
+        string environmentPrefix,
+        ConnectHandle? consumeObserverHandle) : IAsyncDisposable
     {
         private readonly IHost _host = host;
         private readonly MigratedDatabaseScenario _database = database;
         private readonly IntegrationEnvironmentFixture _fixture = fixture;
         private readonly string _environmentPrefix = environmentPrefix;
+        private readonly ConnectHandle? _consumeObserverHandle = consumeObserverHandle;
 
         public async Task PublishAsync<TMessage>(TMessage message)
             where TMessage : class
@@ -224,6 +272,7 @@ public sealed class WorkerIdempotencyTests(IntegrationEnvironmentFixture fixture
         public async ValueTask DisposeAsync()
         {
             await _host.StopAsync();
+            _consumeObserverHandle?.Dispose();
             _host.Dispose();
             await _database.DisposeAsync();
         }
