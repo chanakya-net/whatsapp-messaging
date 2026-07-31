@@ -61,4 +61,46 @@ public sealed class PlaceholderEmailConfirmationSenderTests
         first["recipient_masked"].ShouldBe(second["recipient_masked"]);
         first["template_name"].ShouldBe(second["template_name"]);
     }
+
+    [Fact]
+    public async Task SendAsync_logs_masked_email_on_success()
+    {
+        var options = Options.Create(new ProviderOptions());
+        var logger = new ProviderTestLogger<PlaceholderEmailConfirmationSender>();
+        var sender = new PlaceholderEmailConfirmationSender(options, logger);
+        var email = "alice@example.org";
+        var message = new EmailConfirmation(
+            MessageId: "msg-email-mask",
+            RecipientEmailAddress: email,
+            TemplateName: "confirm-email",
+            ConfirmationToken: "secret-token-abc",
+            CorrelationId: null,
+            RequestedAtUtc: DateTimeOffset.UtcNow);
+
+        await sender.SendAsync(message, "tenant-3");
+
+        logger.Scopes[0]["recipient_masked"].ShouldBe(RecipientMasker.MaskEmailAddress(email));
+        logger.Messages[0].ShouldNotContain(email);
+        logger.Messages[0].ShouldNotContain("secret-token-abc");
+    }
+
+    [Fact]
+    public async Task SendAsync_with_various_email_formats()
+    {
+        var options = Options.Create(new ProviderOptions());
+        var logger = new ProviderTestLogger<PlaceholderEmailConfirmationSender>();
+        var sender = new PlaceholderEmailConfirmationSender(options, logger);
+        var message = new EmailConfirmation(
+            MessageId: "msg-email-fmt",
+            RecipientEmailAddress: "test+tag@sub.example.co.uk",
+            TemplateName: "confirm-email",
+            ConfirmationToken: "token-fmt",
+            CorrelationId: null,
+            RequestedAtUtc: DateTimeOffset.UtcNow);
+
+        var result = await sender.SendAsync(message, "tenant-2");
+
+        result.IsError.ShouldBeFalse();
+        logger.Scopes[0]["recipient_masked"].ShouldBe(RecipientMasker.MaskEmailAddress("test+tag@sub.example.co.uk"));
+    }
 }

@@ -111,6 +111,110 @@ public sealed class WorkerHostTests
     }
 
     [Fact]
+    public void Contract_WhatsApp_Preserves_TemplateParameters_When_Present()
+    {
+        var contract = new SendWhatsAppMessageCommand
+        {
+            MessageId = "msg-params",
+            TenantId = "tenant-1",
+            RecipientPhoneNumber = "+14155552671",
+            TemplateName = "order_confirmed",
+            TemplateLanguage = "en",
+            TemplateParameters = { ["order_id"] = "ORD-123", ["amount"] = "$50.00" },
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+        };
+
+        var command = contract.ToApplicationCommand();
+
+        command.TemplateParameters.ShouldNotBeNull();
+        command.TemplateParameters["order_id"].ShouldBe("ORD-123");
+        command.TemplateParameters["amount"].ShouldBe("$50.00");
+    }
+
+    [Fact]
+    public void Contract_Email_Preserves_RecipientName_When_Populated()
+    {
+        var contract = new SendEmailConfirmationCommand
+        {
+            MessageId = "msg-name",
+            TenantId = "tenant-1",
+            RecipientEmail = "alice@example.com",
+            RecipientName = "Alice Smith",
+            ConfirmationToken = "token-123",
+            ExpiresAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow.AddHours(1)),
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+        };
+
+        var command = contract.ToApplicationCommand();
+
+        command.RecipientName.ShouldBe("Alice Smith");
+        command.RecipientEmail.ShouldBe("alice@example.com");
+    }
+
+    [Fact]
+    public void Contract_WhatsApp_Null_CorrelationId_WhenWhitespaceOnly()
+    {
+        var contract = new SendWhatsAppMessageCommand
+        {
+            MessageId = "msg-trim",
+            TenantId = "tenant-1",
+            RecipientPhoneNumber = "+14155552671",
+            TemplateName = "alert",
+            TemplateLanguage = "en",
+            CorrelationId = "   ",
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+        };
+
+        var command = contract.ToApplicationCommand();
+
+        command.CorrelationId.ShouldBeNull();
+    }
+
+    [Fact]
+    public void Contract_WhatsApp_Preserves_CorrelationId_When_NonWhitespace()
+    {
+        var contract = new SendWhatsAppMessageCommand
+        {
+            MessageId = "msg-corr-id",
+            TenantId = "tenant-1",
+            RecipientPhoneNumber = "+14155552671",
+            TemplateName = "notify",
+            TemplateLanguage = "en",
+            CorrelationId = "corr-xyz-123",
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+        };
+
+        var command = contract.ToApplicationCommand();
+
+        command.CorrelationId.ShouldBe("corr-xyz-123");
+    }
+
+    [Fact]
+    public void Contract_Email_Phone_Normalization_With_Various_Formats()
+    {
+        var requestedAt = DateTimeOffset.UtcNow;
+        var phones = new[] { "+1 (555) 111-1111", "+44 207183 1132", "5551234567" };
+
+        foreach (var phone in phones)
+        {
+            var contract = new SendWhatsAppMessageCommand
+            {
+                MessageId = $"msg-phone-{phones.ToList().IndexOf(phone)}",
+                TenantId = "tenant-1",
+                RecipientPhoneNumber = phone,
+                TemplateName = "notify",
+                TemplateLanguage = "en",
+                RequestedAtUtc = Timestamp.FromDateTimeOffset(requestedAt)
+            };
+
+            var command = contract.ToApplicationCommand();
+
+            command.RecipientPhoneNumber.ShouldBe(phone);
+            command.MessageId.ShouldBe(contract.MessageId);
+        }
+    }
+
+    [Fact]
     public void Host_Fails_To_Start_With_Invalid_RabbitMq_Options()
     {
         using var factory = BuildWorkerFactory(
@@ -294,6 +398,72 @@ public sealed class WorkerHostTests
         exception.Message.ShouldContain("SendEmailConfirmationCommand");
         exception.Message.ShouldContain("p***n@***.com");
         exception.Message.ShouldNotContain("super_secret_token_value");
+    }
+
+    [Fact]
+    public async Task Consumer_Records_Message_Sent_On_Success_For_WhatsApp()
+    {
+        var sender = new TrackingWhatsAppMessageSender();
+        var store = new TrackingMessageProcessingStore();
+        var lifecycleStore = new TrackingLifecycleMessageProcessingStore();
+
+        await using var factory = BuildWorkerFactory(
+            ValidRabbitMqSettings(),
+            services => AddTestRuntimeServices(
+                services,
+                whatsAppSender: sender,
+                store: store,
+                lifecycleStore: lifecycleStore));
+
+        using var scope = factory.Services.CreateScope();
+        var consumer = scope.ServiceProvider.GetRequiredService<SendWhatsAppMessageConsumer>();
+
+        var contract = new SendWhatsAppMessageCommand
+        {
+            MessageId = "msg-record-whatsapp",
+            TenantId = "tenant-1",
+            RecipientPhoneNumber = "+15551234567",
+            TemplateName = "welcome",
+            TemplateLanguage = "en",
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+        };
+
+        await consumer.Consume(CreateConsumeContext(contract));
+
+        store.RecordedMessageIds.ShouldContain("msg-record-whatsapp");
+    }
+
+    [Fact]
+    public async Task Consumer_Records_Message_Sent_On_Success_For_Email()
+    {
+        var sender = new TrackingEmailConfirmationSender();
+        var store = new TrackingMessageProcessingStore();
+        var lifecycleStore = new TrackingLifecycleMessageProcessingStore();
+
+        await using var factory = BuildWorkerFactory(
+            ValidRabbitMqSettings(),
+            services => AddTestRuntimeServices(
+                services,
+                emailSender: sender,
+                store: store,
+                lifecycleStore: lifecycleStore));
+
+        using var scope = factory.Services.CreateScope();
+        var consumer = scope.ServiceProvider.GetRequiredService<SendEmailConfirmationConsumer>();
+
+        var contract = new SendEmailConfirmationCommand
+        {
+            MessageId = "msg-record-email",
+            TenantId = "tenant-1",
+            RecipientEmail = "user@example.com",
+            ConfirmationToken = "token",
+            ExpiresAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow.AddHours(1)),
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+        };
+
+        await consumer.Consume(CreateConsumeContext(contract));
+
+        store.RecordedMessageIds.ShouldContain("msg-record-email");
     }
 
     private static MessageBridgeWorkerFactory BuildWorkerFactory(

@@ -167,6 +167,57 @@ public sealed class ObservabilityRegistrationTests
         emailMetadata[ConsumerLifecycleMetadata.TemplateNameKey].ShouldBe("confirm-email");
     }
 
+    [Fact]
+    public void ConsumerLifecycleMetadata_Excludes_Sensitive_Fields()
+    {
+        var message = new SendWhatsAppMessageCommand
+        {
+            MessageId = "msg-sensitive",
+            TenantId = "tenant-secure",
+            TemplateName = "verify",
+            TemplateLanguage = "en",
+            TemplateParameters = { ["code"] = "123456", ["url"] = "https://verify.example.com/abc" },
+            RecipientPhoneNumber = "+1 (555) 555-5555",
+            CorrelationId = "corr-xyz"
+        };
+
+        var metadata = ConsumerLifecycleMetadata.ForWhatsApp(message);
+
+        metadata.Keys.ShouldNotContain("TemplateParameters");
+        metadata.Keys.ShouldNotContain("TemplateLanguage");
+        var metadataStr = string.Join("|", metadata.Values);
+        metadataStr.ShouldNotContain("123456");
+        metadataStr.ShouldNotContain("https://verify");
+    }
+
+    [Fact]
+    public void ConsumerLifecycleMetadata_Masks_Different_Email_Formats()
+    {
+        var addresses = new[]
+        {
+            "a@example.com",
+            "test.user+tag@example.co.uk",
+            "user123@sub.domain.example.org"
+        };
+
+        foreach (var addr in addresses)
+        {
+            var message = new SendEmailConfirmationCommand
+            {
+                MessageId = $"msg-{addresses.ToList().IndexOf(addr)}",
+                TenantId = "tenant-1",
+                RecipientEmail = addr,
+                ConfirmationToken = "token"
+            };
+
+            var metadata = ConsumerLifecycleMetadata.ForEmailConfirmation(message);
+            var masked = metadata[ConsumerLifecycleMetadata.RecipientKey]?.ToString() ?? string.Empty;
+
+            masked.ShouldNotContain(addr);
+            masked.ShouldContain("*");
+        }
+    }
+
     private static ServiceProvider CreateServices(IDictionary<string, string?> values)
     {
         var services = new ServiceCollection();

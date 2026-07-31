@@ -153,4 +153,81 @@ public sealed class RabbitMqTopologyOptionsTests
         var opts = new RabbitMqOptions();
         opts.UsesConnectionString.ShouldBeFalse();
     }
+
+    [Fact]
+    public void Validator_TlsConnectionString_Passes()
+    {
+        var validator = new RabbitMqOptionsValidator();
+        var opts = new RabbitMqOptions { ConnectionString = "amqps://secure.broker.com" };
+
+        ValidationResult result = validator.Validate(opts);
+
+        result.IsValid.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Validator_InvalidScheme_DetectsError()
+    {
+        var validator = new RabbitMqOptionsValidator();
+        var opts = new RabbitMqOptions { ConnectionString = "http://localhost" };
+
+        ValidationResult result = validator.Validate(opts);
+
+        result.IsValid.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Validator_BothConnectionStringAndDecomposed_DecomposedWins()
+    {
+        var validator = new RabbitMqOptionsValidator();
+        var opts = new RabbitMqOptions
+        {
+            ConnectionString = "amqp://host1:5672",
+            Host = "host2",
+            Username = "user",
+            Password = "pass"
+        };
+
+        ValidationResult result = validator.Validate(opts);
+
+        result.IsValid.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Validator_DecomposedSettings_WithDefaultHost_Passes()
+    {
+        var validator = new RabbitMqOptionsValidator();
+        var opts = new RabbitMqOptions
+        {
+            Username = "guest",
+            Password = "guest",
+            Port = 5672
+        };
+
+        ValidationResult result = validator.Validate(opts);
+
+        result.IsValid.ShouldBeTrue();
+        opts.Host.ShouldBe("localhost");
+    }
+
+    [Fact]
+    public void QueueName_EmptyBaseName_ThrowsArgumentException()
+    {
+        var opts = new MessageBridgeTopologyOptions { EnvironmentPrefix = "prod" };
+        Should.Throw<ArgumentException>(() => opts.QueueName(string.Empty));
+    }
+
+    [Fact]
+    public void ExchangeName_WithMultipleSegments_RetainsStructure()
+    {
+        var opts = new MessageBridgeTopologyOptions { EnvironmentPrefix = "staging" };
+        opts.ExchangeName("messages.events.processed").ShouldBe("staging.messages.events.processed");
+    }
+
+    [Fact]
+    public void RoutingKey_WithNumbers_PreservesCase()
+    {
+        var opts = new MessageBridgeTopologyOptions();
+        opts.RoutingKey("SendNotification2FA").ShouldBe("sendnotification2fa");
+    }
 }
