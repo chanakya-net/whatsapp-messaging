@@ -120,9 +120,9 @@ public sealed class WorkerRetryAndErrorTests(IntegrationEnvironmentFixture fixtu
         var script = MessageScript.FailForever(
             Error.Failure(
                 "Provider.Send",
-                "temporary outage token=super-secret-token phone=+1 (415) 555-2671 " +
-                "connection_string=Host=database;Username=admin;Password=unsafe-password " +
-                "payload={\"recipient\":\"+14155552671\",\"body\":\"private payload\"}"),
+                "provider response: {\"token\":\"super-secret-token\",\"password\":\"unsafe-password\"," +
+                "\"authorization\":\"Bearer private-auth\",\"payload\":{\"recipient\":\"+14155552671\"," +
+                "\"body\":\"private payload\"}} phone=+1 (415) 555-2671"),
             blockFirstAttempt: true);
         bus.AddScript(messageId, script);
 
@@ -136,11 +136,14 @@ public sealed class WorkerRetryAndErrorTests(IntegrationEnvironmentFixture fixtu
         record.FailureReason.ShouldNotBeNull();
         record.FailureReason.ShouldContain("*******2671");
         record.FailureReason.ShouldNotContain("super-secret-token");
-        record.FailureReason.ShouldNotContain("Host=database");
-        record.FailureReason.ShouldNotContain("admin");
         record.FailureReason.ShouldNotContain("unsafe-password");
+        record.FailureReason.ShouldNotContain("private-auth");
         record.FailureReason.ShouldNotContain("private payload");
         record.FailureReason.ShouldNotContain("+14155552671");
+        record.FailureReason.ShouldContain("REDACTED_TOKEN");
+        record.FailureReason.ShouldContain("REDACTED_PASSWORD");
+        record.FailureReason.ShouldContain("REDACTED_AUTHORIZATION");
+        record.FailureReason.ShouldContain("REDACTED_PAYLOAD");
 
         await harness.WaitForQueueDepthAsync("send-whats-app-message_error", 1);
         await harness.AssertQueueDepthRemainsAsync("send-whats-app-message_error", 1, 1.Seconds());

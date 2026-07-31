@@ -45,6 +45,19 @@ public class ErrorSanitizerTests
     }
 
     [Theory]
+    [InlineData("""provider response: {"token":"abc123"}""", "abc123", "REDACTED_TOKEN")]
+    [InlineData("""provider response: {"password":"unsafe"}""", "unsafe", "REDACTED_PASSWORD")]
+    [InlineData("""provider response: {"authorization":"Bearer private-auth"}""", "Bearer private-auth", "REDACTED_AUTHORIZATION")]
+    public void Sanitize_RedactsJsonQuotedSecrets(string input, string secret, string marker)
+    {
+        var sanitized = MessageBridge.Domain.Privacy.ErrorSanitizer.Sanitize(input);
+
+        sanitized.ShouldStartWith("provider response:");
+        sanitized.ShouldNotContain(secret);
+        sanitized.ShouldContain(marker);
+    }
+
+    [Theory]
     [InlineData("payload={\"meta\":{\"region\":\"in\"},\"body\":\"private text\"}")]
     [InlineData("payload=[\"private text\",{\"body\":\"private text\"}]")]
     [InlineData("payload={\n  \"body\": \"private text\"\n}")]
@@ -54,6 +67,20 @@ public class ErrorSanitizerTests
         var sanitized = MessageBridge.Domain.Privacy.ErrorSanitizer.Sanitize(input);
 
         sanitized.ShouldBe("payload=[REDACTED_PAYLOAD]");
+    }
+
+    [Theory]
+    [InlineData("""provider response: {"payload":{"body":"private text","nested":{"token":"inside"}}} completed""")]
+    [InlineData("provider response: {\n  \"payload\": {\n    \"body\": \"private text\"\n  }\n} completed")]
+    public void Sanitize_RedactsJsonQuotedPayloadProperties(string input)
+    {
+        var sanitized = MessageBridge.Domain.Privacy.ErrorSanitizer.Sanitize(input);
+
+        sanitized.ShouldStartWith("provider response:");
+        sanitized.ShouldEndWith(" completed");
+        sanitized.ShouldContain("REDACTED_PAYLOAD");
+        sanitized.ShouldNotContain("private text");
+        sanitized.ShouldNotContain("\"body\"");
     }
 
     [Fact]

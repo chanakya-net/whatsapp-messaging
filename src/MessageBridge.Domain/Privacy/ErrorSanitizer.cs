@@ -14,7 +14,7 @@ public static class ErrorSanitizer
         RegexOptions.Compiled);
 
     private static readonly Regex SecretRegex = new(
-        @"(?i)(?<prefix>[\s\""'`{=;:]|^)(?<key>password|passwd|pwd|token|secret|api[_-]?key|access[_-]?token|connection[_-]?string|authorization|username|user\s*id|uid)(?<sep>\s*[:=]\s*)(?<value>[^\s;\""'`{,}]+)",
+        """(?i)(?<prefix>[\s"'`{=;:,]|^)(?<key>password|passwd|pwd|token|secret|api[_-]?key|access[_-]?token|connection[_-]?string|authorization|username|user\s*id|uid)(?:["'`])?(?<sep>\s*[:=]\s*)(?<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`[^`]*`|[^\s;"'`{,}]+)""",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex PlainTokenRegex = new(
@@ -22,7 +22,7 @@ public static class ErrorSanitizer
         RegexOptions.Compiled);
 
     private static readonly Regex PayloadPrefixRegex = new(
-        @"(?i)\bpayload\s*[:=]\s*",
+        """(?i)\bpayload(?:["'`])?\s*[:=]\s*""",
         RegexOptions.Compiled);
 
     public static string Sanitize(string? message)
@@ -30,9 +30,7 @@ public static class ErrorSanitizer
         if (string.IsNullOrWhiteSpace(message))
             return string.Empty;
 
-        var sanitized = SecretRegex.Replace(
-            message,
-            match => $"{match.Groups["prefix"].Value}[REDACTED_{match.Groups["key"].Value.ToUpperInvariant()}]");
+        var sanitized = SecretRegex.Replace(message, RedactSecret);
 
         sanitized = RedactPayloadValues(sanitized);
         sanitized = EmailRegex.Replace(sanitized, match => RecipientMasker.MaskEmailAddress(match.Value));
@@ -42,6 +40,15 @@ public static class ErrorSanitizer
             match => $"<{match.Value.AsSpan(0, 3)}...redacted>");
 
         return sanitized;
+    }
+
+    private static string RedactSecret(Match match)
+    {
+        var prefix = match.Groups["prefix"].Value;
+        var marker = $"[REDACTED_{match.Groups["key"].Value.ToUpperInvariant()}]";
+        return prefix is "\"" or "'" or "`"
+            ? $"{prefix}{marker}{prefix}"
+            : $"{prefix}{marker}";
     }
 
     private static string RedactPayloadValues(string message)
