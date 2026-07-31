@@ -30,7 +30,7 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
             .Build();
 
         _rabbitMq = new RabbitMqBuilder()
-            .WithImage("rabbitmq:4.0-management-alpine")
+            .WithImage("masstransit/rabbitmq:3.13")
             .Build();
 
         try
@@ -147,6 +147,28 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
 
     /// <summary>Raw RabbitMQ connection string, for tests that need to connect to the broker.</summary>
     public string GetRabbitMqConnectionString() => _rabbitMq!.GetConnectionString();
+
+    /// <summary>Returns the depth of a queue with the exact topology name.</summary>
+    public async Task<int> GetQueueDepthAsync(string queueName)
+    {
+        var result = await _rabbitMq!.ExecAsync(["rabbitmqctl", "list_queues", "name", "messages"]);
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"Could not read RabbitMQ queue depth: {result.Stderr}");
+        }
+
+        foreach (var line in result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var columns = line.Split('\t', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (columns.Length == 2 && columns[0] == queueName)
+            {
+                return int.TryParse(columns[1], out var depth) ? depth : 0;
+            }
+        }
+
+        return 0;
+    }
 
     /// <summary>RabbitMQ connection string with credentials redacted, safe for logging/reporting.</summary>
     public string GetRedactedRabbitMqConnectionString()
