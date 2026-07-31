@@ -4,7 +4,6 @@ using MessageBridge.IntegrationTests.Fixtures;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
-using Xunit.Sdk;
 
 namespace MessageBridge.IntegrationTests.Persistence;
 
@@ -58,11 +57,19 @@ public sealed class ProcessingHistoryCleanupTests(IntegrationEnvironmentFixture 
             BuildRecord("wamid.should-keep", ProcessingStatus.Completed, now.AddHours(-2), now.AddHours(-2), now.AddHours(-2)));
         await scenario.DbContext.SaveChangesAsync();
 
-        var cleanup = CreateCleanup(new TestHistoryCleanupDbContextFactory(options), enabled: false);
+        var factory = new TestHistoryCleanupDbContextFactory(options);
+        var cleanup = CreateCleanup(factory, enabled: false);
         try
         {
             await cleanup.StartAsync(default);
-            await Task.Delay(20);
+            await IntegrationEnvironmentFixture.AssertRemainsAsync(
+                async () =>
+                {
+                    await using var context = await factory.CreateDbContextAsync();
+                    return await ExistsAsync(context, "wamid.should-keep");
+                },
+                TimeSpan.FromMilliseconds(250),
+                "Disabled cleanup removed processing history.");
         }
         finally
         {
@@ -119,30 +126,13 @@ public sealed class ProcessingHistoryCleanupTests(IntegrationEnvironmentFixture 
         IDbContextFactory<MessageBridgeDbContext> factory,
         string messageId)
     {
-        await WaitUntilAsync(
+        await IntegrationEnvironmentFixture.PollUntilAssertedAsync(
             async () =>
             {
                 await using var context = await factory.CreateDbContextAsync();
                 return !await ExistsAsync(context, messageId);
             },
-            TimeSpan.FromSeconds(1),
             $"Record '{messageId}' was not removed in time.");
-    }
-
-    private static async Task WaitUntilAsync(Func<Task<bool>> predicate, TimeSpan timeout, string message)
-    {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (await predicate())
-            {
-                return;
-            }
-
-            await Task.Delay(10);
-        }
-
-        throw new XunitException(message);
     }
 }
 

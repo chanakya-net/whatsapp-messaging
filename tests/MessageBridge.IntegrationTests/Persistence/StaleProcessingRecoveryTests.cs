@@ -4,7 +4,6 @@ using MessageBridge.IntegrationTests.Fixtures;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
-using Xunit.Sdk;
 
 namespace MessageBridge.IntegrationTests.Persistence;
 
@@ -118,29 +117,23 @@ public sealed class StaleProcessingRecoveryTests(IntegrationEnvironmentFixture f
             .UseNpgsql(context.Database.GetConnectionString()!)
             .Options;
 
-    private static async Task WaitUntilStatusAsync(
+    private static Task WaitUntilStatusAsync(
         DbContextOptions<MessageBridgeDbContext> options,
         string messageId,
         ProcessingStatus expectedStatus)
     {
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(1);
-        while (DateTimeOffset.UtcNow < deadline)
-        {
-            await using var context = new MessageBridgeDbContext(options);
-            var status = await context.MessageProcessingRecords
-                .AsNoTracking()
-                .Where(item => item.MessageId == messageId)
-                .Select(item => item.Status)
-                .SingleAsync();
-            if (status == expectedStatus)
+        return IntegrationEnvironmentFixture.PollUntilAssertedAsync(
+            async () =>
             {
-                return;
-            }
-
-            await Task.Delay(10);
-        }
-
-        throw new XunitException($"Message '{messageId}' did not reach status '{expectedStatus}'.");
+                await using var context = new MessageBridgeDbContext(options);
+                var status = await context.MessageProcessingRecords
+                    .AsNoTracking()
+                    .Where(item => item.MessageId == messageId)
+                    .Select(item => item.Status)
+                    .SingleAsync();
+                return status == expectedStatus;
+            },
+            $"Message '{messageId}' did not reach status '{expectedStatus}'.");
     }
 }
 
