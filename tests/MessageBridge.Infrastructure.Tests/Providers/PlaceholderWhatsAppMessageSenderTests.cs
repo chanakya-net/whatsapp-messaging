@@ -107,4 +107,50 @@ public sealed class PlaceholderWhatsAppMessageSenderTests
 
         logger.Scopes[0]["template_parameters_count"].ShouldBe("0");
     }
+
+    [Fact]
+    public void SendAsync_propagates_provider_failure_without_logging_sensitive_data()
+    {
+        var logger = new ProviderTestLogger<PlaceholderWhatsAppMessageSender>();
+        var sender = new PlaceholderWhatsAppMessageSender(
+            new ThrowingOptions<ProviderOptions>(new InvalidOperationException("provider unavailable")),
+            logger);
+
+        var exception = Should.Throw<InvalidOperationException>(() =>
+            sender.SendAsync(CreateMessage("failure", "+15551234567"), "tenant-1"));
+
+        exception.Message.ShouldBe("provider unavailable");
+        logger.Scopes.ShouldBeEmpty();
+        logger.Messages.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void SendAsync_propagates_cancellation_without_logging_sensitive_data()
+    {
+        var logger = new ProviderTestLogger<PlaceholderWhatsAppMessageSender>();
+        var sender = new PlaceholderWhatsAppMessageSender(
+            new ThrowingOptions<ProviderOptions>(new OperationCanceledException("cancelled")),
+            logger);
+
+        Should.Throw<OperationCanceledException>(() =>
+            sender.SendAsync(CreateMessage("cancelled", "+15551234567"), "tenant-1"));
+
+        logger.Scopes.ShouldBeEmpty();
+        logger.Messages.ShouldBeEmpty();
+    }
+
+    private static WhatsAppMessage CreateMessage(string messageId, string phone) => new(
+        MessageId: messageId,
+        RecipientPhoneNumber: phone,
+        TemplateName: "welcome",
+        TemplateLanguage: "en",
+        TemplateParameters: null,
+        CorrelationId: null,
+        RequestedAtUtc: DateTimeOffset.UtcNow);
+
+    private sealed class ThrowingOptions<T>(Exception exception) : IOptions<T>
+        where T : class
+    {
+        public T Value => throw exception;
+    }
 }

@@ -103,4 +103,49 @@ public sealed class PlaceholderEmailConfirmationSenderTests
         result.IsError.ShouldBeFalse();
         logger.Scopes[0]["recipient_masked"].ShouldBe(RecipientMasker.MaskEmailAddress("test+tag@sub.example.co.uk"));
     }
+
+    [Fact]
+    public void SendAsync_propagates_provider_failure_without_logging_sensitive_data()
+    {
+        var logger = new ProviderTestLogger<PlaceholderEmailConfirmationSender>();
+        var sender = new PlaceholderEmailConfirmationSender(
+            new ThrowingOptions<ProviderOptions>(new InvalidOperationException("provider unavailable")),
+            logger);
+
+        var exception = Should.Throw<InvalidOperationException>(() =>
+            sender.SendAsync(CreateMessage("failure", "user@example.com"), "tenant-1"));
+
+        exception.Message.ShouldBe("provider unavailable");
+        logger.Scopes.ShouldBeEmpty();
+        logger.Messages.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void SendAsync_propagates_cancellation_without_logging_sensitive_data()
+    {
+        var logger = new ProviderTestLogger<PlaceholderEmailConfirmationSender>();
+        var sender = new PlaceholderEmailConfirmationSender(
+            new ThrowingOptions<ProviderOptions>(new OperationCanceledException("cancelled")),
+            logger);
+
+        Should.Throw<OperationCanceledException>(() =>
+            sender.SendAsync(CreateMessage("cancelled", "user@example.com"), "tenant-1"));
+
+        logger.Scopes.ShouldBeEmpty();
+        logger.Messages.ShouldBeEmpty();
+    }
+
+    private static EmailConfirmation CreateMessage(string messageId, string email) => new(
+        MessageId: messageId,
+        RecipientEmailAddress: email,
+        TemplateName: "confirm-email",
+        ConfirmationToken: "secret-token",
+        CorrelationId: null,
+        RequestedAtUtc: DateTimeOffset.UtcNow);
+
+    private sealed class ThrowingOptions<T>(Exception exception) : IOptions<T>
+        where T : class
+    {
+        public T Value => throw exception;
+    }
 }

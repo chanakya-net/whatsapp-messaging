@@ -187,4 +187,25 @@ public sealed class MessageBridgeSerializationTests
         payload1.Headers[MessageBridgeHeaders.CommandHeader].ShouldBe(nameof(SendWhatsAppMessageCommand));
         payload2.Headers[MessageBridgeHeaders.CommandHeader].ShouldBe(nameof(SendWhatsAppMessageCommand));
     }
+
+    [Fact]
+    public void Generic_Deserialize_Throws_For_Invalid_Bytes_Without_Leaking_Input()
+    {
+        var secret = "secret-token-not-a-valid-payload";
+
+        var exception = Should.Throw<InvalidProtocolBufferException>(() =>
+            MessageBridgeCommandSerialization.Deserialize<SendEmailConfirmationCommand>(
+                System.Text.Encoding.UTF8.GetBytes(secret)));
+
+        exception.Message.ShouldNotContain(secret);
+    }
+
+    [Fact]
+    public void NonGeneric_Deserialize_Throws_For_Invalid_Bytes_Through_Adapter()
+    {
+        var descriptor = MessageBridgeCommandRegistry.GetRequired<SendWhatsAppMessageCommand>();
+
+        Should.Throw<InvalidProtocolBufferException>(() =>
+            MessageBridgeCommandSerialization.Deserialize(new byte[] { 0xFF, 0xFF }, descriptor));
+    }
 }

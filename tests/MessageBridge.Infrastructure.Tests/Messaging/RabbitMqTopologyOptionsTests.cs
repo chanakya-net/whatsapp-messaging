@@ -177,20 +177,55 @@ public sealed class RabbitMqTopologyOptionsTests
     }
 
     [Fact]
-    public void Validator_BothConnectionStringAndDecomposed_DecomposedWins()
+    public void Validator_BothConnectionStringAndDecomposed_ConnectionStringTakesPrecedence()
     {
         var validator = new RabbitMqOptionsValidator();
         var opts = new RabbitMqOptions
         {
             ConnectionString = "amqp://host1:5672",
-            Host = "host2",
-            Username = "user",
-            Password = "pass"
+            Host = string.Empty,
+            Username = null,
+            Password = null,
+            Port = 0
         };
 
         ValidationResult result = validator.Validate(opts);
 
         result.IsValid.ShouldBeTrue();
+        opts.UsesConnectionString.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Validator_DecomposedSettings_WithTls_Passes()
+    {
+        var validator = new RabbitMqOptionsValidator();
+        var opts = new RabbitMqOptions
+        {
+            Host = "secure.rabbit.internal",
+            Port = 5671,
+            Username = "guest",
+            Password = "guest",
+            UseSsl = true
+        };
+
+        validator.Validate(opts).IsValid.ShouldBeTrue();
+        opts.UseSsl.ShouldBeTrue();
+        opts.Port.ShouldBe((ushort)5671);
+    }
+
+    [Fact]
+    public void Validator_DecomposedSettings_WithZeroPort_Fails()
+    {
+        var result = new RabbitMqOptionsValidator().Validate(new RabbitMqOptions
+        {
+            Host = "rabbit.internal",
+            Username = "guest",
+            Password = "guest",
+            Port = 0
+        });
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(error => error.PropertyName == nameof(RabbitMqOptions.Port));
     }
 
     [Fact]
