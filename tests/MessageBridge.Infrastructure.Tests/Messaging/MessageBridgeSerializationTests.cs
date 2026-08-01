@@ -114,4 +114,98 @@ public sealed class MessageBridgeSerializationTests
 
         Should.Throw<ArgumentException>(() => descriptor.Serialize(message));
     }
+
+    [Fact]
+    public void NonGeneric_Serialize_Handles_IMessage_Interface()
+    {
+        IMessage message = new SendWhatsAppMessageCommand
+        {
+            MessageId = "msg-generic",
+            TenantId = "tenant-1",
+            RecipientPhoneNumber = "+14155552671",
+            TemplateName = "alert",
+            TemplateLanguage = "en",
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+        };
+
+        var payload = MessageBridgeCommandSerialization.Serialize(message);
+
+        payload.ShouldNotBeNull();
+        payload.Body.ShouldNotBeEmpty();
+        payload.Descriptor.ContractType.ShouldBe(typeof(SendWhatsAppMessageCommand));
+    }
+
+    [Fact]
+    public void NonGeneric_Deserialize_WithDescriptor_RoundTrips()
+    {
+        var original = new SendEmailConfirmationCommand
+        {
+            MessageId = "email-roundtrip",
+            TenantId = "tenant-1",
+            RecipientEmail = "test@example.com",
+            ConfirmationToken = "token-rt",
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow),
+            ExpiresAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow.AddHours(1))
+        };
+
+        var payload = MessageBridgeCommandSerialization.Serialize(original);
+        var deserialized = MessageBridgeCommandSerialization.Deserialize(payload.Body, payload.Descriptor);
+
+        deserialized.ShouldBeOfType<SendEmailConfirmationCommand>();
+        var email = (SendEmailConfirmationCommand)deserialized;
+        email.MessageId.ShouldBe(original.MessageId);
+        email.RecipientEmail.ShouldBe(original.RecipientEmail);
+    }
+
+    [Fact]
+    public void Serialization_Produces_Consistent_Headers()
+    {
+        var cmd1 = new SendWhatsAppMessageCommand
+        {
+            MessageId = "msg-hdr-1",
+            TenantId = "tenant-1",
+            RecipientPhoneNumber = "+15551234567",
+            TemplateName = "welcome",
+            TemplateLanguage = "en",
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+        };
+        var cmd2 = new SendWhatsAppMessageCommand
+        {
+            MessageId = "msg-hdr-2",
+            TenantId = "tenant-1",
+            RecipientPhoneNumber = "+15559876543",
+            TemplateName = "confirm",
+            TemplateLanguage = "es",
+            RequestedAtUtc = Timestamp.FromDateTimeOffset(DateTimeOffset.UtcNow)
+        };
+
+        var payload1 = MessageBridgeCommandSerialization.Serialize(cmd1);
+        var payload2 = MessageBridgeCommandSerialization.Serialize(cmd2);
+
+        payload1.Headers.Keys.ShouldBe(payload2.Headers.Keys);
+        payload1.Headers[MessageBridgeHeaders.ContentTypeHeader].ShouldBe(payload2.Headers[MessageBridgeHeaders.ContentTypeHeader]);
+        payload1.Headers[MessageBridgeHeaders.CommandHeader].ShouldBe(nameof(SendWhatsAppMessageCommand));
+        payload2.Headers[MessageBridgeHeaders.CommandHeader].ShouldBe(nameof(SendWhatsAppMessageCommand));
+    }
+
+    [Fact]
+    public void Generic_Deserialize_Throws_For_Invalid_Bytes_Without_Leaking_Input()
+    {
+        var secret = "secret-token-not-a-valid-payload";
+
+        var exception = Should.Throw<InvalidProtocolBufferException>(() =>
+            MessageBridgeCommandSerialization.Deserialize<SendEmailConfirmationCommand>(
+                System.Text.Encoding.UTF8.GetBytes(secret)));
+
+        exception.Message.ShouldNotContain(secret);
+    }
+
+    [Fact]
+    public void NonGeneric_Deserialize_Throws_For_Invalid_Bytes_Through_Adapter()
+    {
+        var descriptor = MessageBridgeCommandRegistry.GetRequired<SendWhatsAppMessageCommand>();
+
+        Should.Throw<InvalidProtocolBufferException>(() =>
+            MessageBridgeCommandSerialization.Deserialize(new byte[] { 0xFF, 0xFF }, descriptor));
+    }
 }
