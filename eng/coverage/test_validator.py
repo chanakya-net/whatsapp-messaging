@@ -32,6 +32,13 @@ def assert_case(name: str, expected_code: int, expected_text: str) -> str:
 
 
 def main() -> int:
+    runsettings = ROOT.parent.parent / "tests" / "coverlet.runsettings"
+    exclusion_value = ET.parse(runsettings).findtext(
+        ".//DataCollector[@friendlyName='XPlat code coverage']/Configuration/Exclude"
+    )
+    assert exclusion_value is not None, "coverage collector must configure exclusions"
+    assert "[JasperFx]*" in exclusion_value, "coverage must exclude the JasperFx dependency assembly"
+
     exclusion_report = FIXTURES / "exclusions" / "coverage.cobertura.xml"
     report_text = exclusion_report.read_text(encoding="utf-8")
     assert "MessageBridge.Application.OrdinaryClass" in report_text
