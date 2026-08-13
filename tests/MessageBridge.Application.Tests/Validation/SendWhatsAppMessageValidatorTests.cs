@@ -79,7 +79,8 @@ public sealed class SendWhatsAppMessageValidatorTests
     {
         var command = new SendWhatsAppMessage(
             "msg-001", "tenant-1", "+15551234567", "welcome", "en-US", null, null, DateTimeOffset.UtcNow)
-            with { TemplateLanguage = value };
+            with
+        { TemplateLanguage = value };
 
         if (propertyName == "RecipientPhoneNumber")
             command = command with { RecipientPhoneNumber = value, TemplateLanguage = "en-US" };
