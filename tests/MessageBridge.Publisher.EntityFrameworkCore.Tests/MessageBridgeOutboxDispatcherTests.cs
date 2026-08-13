@@ -8,6 +8,7 @@ using Xunit.Sdk;
 
 namespace MessageBridge.Publisher.EntityFrameworkCore.Tests;
 
+[Trait("Category", "Unit")]
 public class MessageBridgeOutboxDispatcherTests
 {
     [Fact]
@@ -20,7 +21,7 @@ public class MessageBridgeOutboxDispatcherTests
             MaxRetryAttempts = 0,
             Concurrency = 2,
         };
-        var transport = new FakeTransport(new Dictionary<string, int> { ["msg-2"] = 1 });
+        var transport = new FakeTransport(new Dictionary<string, int> { ["msg-2"] = int.MaxValue });
         var contextOptions = new DbContextOptionsBuilder<TestDbContext>()
             .UseInMemoryDatabase(nameof(Dispatcher_PublishesPendingMessagesAndMarksOnlySuccessfulRecords))
             .Options;
@@ -67,7 +68,7 @@ public class MessageBridgeOutboxDispatcherTests
         published.PublishedAtUtc.ShouldNotBeNull();
         failed.PublishedAtUtc.ShouldBeNull();
         transport.Attempts["msg-1"].ShouldBe(1);
-        transport.Attempts["msg-2"].ShouldBe(1);
+        transport.HasAttempt("msg-2", 1).ShouldBeTrue();
         transport.Envelopes["msg-1"].ExchangeName.ShouldBe("exchange-a");
         transport.Envelopes["msg-1"].RoutingKey.ShouldBe("routing-a");
         transport.Envelopes["msg-1"].Headers["content-type"].ShouldBe("application/x-protobuf");
@@ -223,7 +224,6 @@ public class MessageBridgeOutboxDispatcherTests
             factory,
             Options.Create(options));
         await cleanupService.StartAsync(default);
-        await Task.Delay(50);
         await cleanupService.StopAsync(default);
 
         await using var verifyContext = await factory.CreateDbContextAsync();

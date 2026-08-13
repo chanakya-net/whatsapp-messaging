@@ -14,6 +14,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="Npgsql" />
     <PackageReference Include="RabbitMQ.Client" />
+    <PackageReference Include="SSH.NET" />
     <PackageReference Include="Shouldly" />
     <PackageReference Include="Testcontainers" />
     <PackageReference Include="Testcontainers.PostgreSql" />
@@ -28,6 +29,7 @@
     <ProjectReference Include="..\..\src\MessageBridge.Domain\MessageBridge.Domain.csproj" />
     <ProjectReference Include="..\..\src\MessageBridge.Infrastructure\MessageBridge.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\MessageBridge.Publisher\MessageBridge.Publisher.csproj" />
+    <ProjectReference Include="..\..\src\MessageBridge.Publisher.EntityFrameworkCore\MessageBridge.Publisher.EntityFrameworkCore.csproj" />
     <ProjectReference Include="..\..\src\MessageBridge.Worker\MessageBridge.Worker.csproj" />
   </ItemGroup>
 

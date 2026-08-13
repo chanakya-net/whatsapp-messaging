@@ -1,0 +1,222 @@
+name: Validation
+
+on:
+  workflow_call:
+    inputs:
+      base-ref:
+        description: Pull request base branch for Buf breaking checks.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CI: true
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  BUILD_CONFIGURATION: Release
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          global-json-file: global.json
+      - name: Restore for formatting
+        run: dotnet restore MessageBridge.sln
+      - name: Validate formatting
+        run: dotnet format MessageBridge.sln --verify-no-changes --no-restore
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          global-json-file: global.json
+      - name: Restore for build
+        run: dotnet restore MessageBridge.sln
+      - name: Build solution
+        run: dotnet build MessageBridge.sln -c "$BUILD_CONFIGURATION" --no-restore
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          global-json-file: global.json
+      - name: Restore unit tests
+        run: dotnet restore MessageBridge.UnitTests.slnf
+      - name: Build unit tests
+        run: dotnet build MessageBridge.UnitTests.slnf -c "$BUILD_CONFIGURATION" --no-restore
+      - name: Restore coverage report tool
+        run: dotnet tool restore --tool-manifest .config/dotnet-tools.json
+      - name: Validate coverage tooling
+        run: bash eng/verify-coverage.sh --self-test
+      - name: Run unit tests with coverage
+        run: >-
+          dotnet test MessageBridge.UnitTests.slnf -c "$BUILD_CONFIGURATION" --no-restore --no-build
+          --settings tests/coverlet.runsettings --collect:"XPlat Code Coverage"
+          --results-directory artifacts/test-results/unit --logger "trx;LogFilePrefix=unit"
+          --logger "console;verbosity=minimal"
+      - name: Generate unit coverage report
+        run: >-
+          dotnet tool run reportgenerator
+          -reports:"artifacts/test-results/unit/**/coverage.cobertura.xml"
+          -targetdir:"artifacts/coverage-unit/report"
+          -reporttypes:"HtmlSummary;HtmlChart;XmlSummary" -verbosity:off
+      - name: Validate unit coverage
+        run: bash eng/verify-coverage.sh --validate-unit artifacts/coverage-unit/report
+      - name: Upload unit test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unit-test-results
+          path: |
+            artifacts/test-results/unit
+            artifacts/coverage-unit/report
+          if-no-files-found: warn
+          retention-days: 14
+
+  integration-tests:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          global-json-file: global.json
+      - name: Verify Docker is available
+        run: docker info
+      - name: Restore integration tests
+        run: dotnet restore tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj
+      - name: Build integration tests
+        run: >-
+          dotnet build tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj
+          -c "$BUILD_CONFIGURATION" --no-restore
+      - name: Restore coverage report tool
+        run: dotnet tool restore --tool-manifest .config/dotnet-tools.json
+      - name: Run integration tests with coverage
+        run: >-
+          dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj
+          -c "$BUILD_CONFIGURATION" --no-restore --no-build --settings tests/coverlet.runsettings
+          --collect:"XPlat Code Coverage" --results-directory artifacts/test-results/integration
+          --logger "trx;LogFilePrefix=integration" --logger "console;verbosity=minimal"
+      - name: Generate integration coverage report
+        run: >-
+          dotnet tool run reportgenerator
+          -reports:"artifacts/test-results/integration/**/coverage.cobertura.xml"
+          -targetdir:"artifacts/coverage-integration/report" -reporttypes:"HtmlSummary;HtmlChart"
+          -verbosity:off
+      - name: Upload sanitized container logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: integration-container-logs
+          path: artifacts/container-logs
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload integration test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: integration-test-results
+          path: |
+            artifacts/test-results/integration
+            artifacts/coverage-integration/report
+          if-no-files-found: warn
+          retention-days: 14
+
+  buf-checks:
+    name: Buf checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Setup Buf
+        uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
+      - name: Lint protobuf contracts
+        run: buf lint
+      - name: Fetch base branch for comparison
+        if: inputs.base-ref != ''
+        env:
+          BASE_REF: ${{ inputs.base-ref }}
+        run: git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+      - name: Check breaking changes against base branch
+        if: inputs.base-ref != ''
+        env:
+          BASE_REF: ${{ inputs.base-ref }}
+        run: |
+          module_path="src/MessageBridge.Contracts/protos"
+          if git ls-tree -r --name-only "origin/$BASE_REF" -- "$module_path" | grep -Eq '\.proto$'; then
+            buf breaking --against ".git#branch=origin/$BASE_REF"
+          else
+            echo "No protobuf contracts found on $BASE_REF; skipping breaking-change comparison."
+          fi
+
+  samples:
+    name: Sample build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          global-json-file: global.json
+      - name: Restore for sample build
+        run: dotnet restore MessageBridge.sln
+      - name: Build sample project
+        run: >-
+          dotnet build samples/MessageBridge.SampleClient/MessageBridge.SampleClient.csproj
+          -c "$BUILD_CONFIGURATION" --no-restore
+
+  package-generation:
+    name: Package generation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          global-json-file: global.json
+      - name: Restore for packing
+        run: dotnet restore MessageBridge.sln
+      - name: Pack NuGet packages
+        run: |
+          dotnet pack src/MessageBridge.Contracts/MessageBridge.Contracts.csproj -c "$BUILD_CONFIGURATION" --no-restore -o artifacts/packages
+          dotnet pack src/MessageBridge.Publisher/MessageBridge.Publisher.csproj -c "$BUILD_CONFIGURATION" --no-restore -o artifacts/packages
+          dotnet pack src/MessageBridge.Publisher.EntityFrameworkCore/MessageBridge.Publisher.EntityFrameworkCore.csproj -c "$BUILD_CONFIGURATION" --no-restore -o artifacts/packages

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <Format>cobertura</Format>
+          <Exclude>[*]*.Generated.*,[JasperFx]*,[MessageBridge.Contracts]MessageBridge.Contracts.V1.*Reflection,[MessageBridge.Infrastructure]MessageBridge.Infrastructure.Migrations.*,[MessageBridge.Worker]Program</Exclude>
+          <ExcludeByFile>**/*.g.cs,**/*.g.i.cs,**/*Designer.cs,**/Migrations/*.cs,**/Migrations/**/*.cs,**/obj/**/*.cs,**/bin/**/*.cs</ExcludeByFile>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>
