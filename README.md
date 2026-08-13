@@ -6,31 +6,45 @@ WhatsApp and email confirmation messaging service built with .NET 10, RabbitMQ, 
 
 ### Prerequisites
 
-- .NET 10 SDK or later
-- Docker & Docker Compose
-- Git
+- **.NET 10 SDK or later** (required)
+- **Git** (required)
+- **Docker & Docker Compose** (optional, for local application development; integration tests use Testcontainers)
 
-### Local Setup (5 minutes)
+### Running Tests
+
+**Unit tests** (Docker-free, ~5–8 seconds):
 
 ```bash
-# Clone the repository
-git clone https://github.com/chanakya-net/whatsapp-messaging.git
-cd whatsapp-messaging
+dotnet test MessageBridge.UnitTests.slnf -c Release
+```
 
-# Start local services (RabbitMQ, PostgreSQL)
+**Integration tests** (Testcontainers-backed, ~35–50 seconds, requires Docker):
+
+```bash
+dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj -c Release
+```
+
+See [**Testing Guide**](docs/testing.md) for complete instructions, coverage validation, single-test filters, and CI behavior.
+
+### Local Development Setup
+
+Start optional Docker Compose services for manual application testing (not required for automated tests):
+
+```bash
+# Start RabbitMQ and PostgreSQL for local development
 docker-compose up -d
 
 # Build the solution
 dotnet build MessageBridge.sln
-
-# Run integration tests
-dotnet test MessageBridge.sln
 ```
 
-Services start automatically:
+Services available at:
 
-- **RabbitMQ**: `localhost:5672` (management UI: `http://localhost:15672`, credentials: `guest/guest`)
+- **RabbitMQ** AMQP: `localhost:5672` (credentials: `guest/guest`)
+- **RabbitMQ Management**: `http://localhost:15672`
 - **PostgreSQL**: `localhost:5432` (database: `messagebridge_dev`, credentials: `dev/dev`)
+
+Stop services with `docker-compose down`.
 
 ## Architecture Overview
 
@@ -70,7 +84,8 @@ Services start automatically:
 
 ## Documentation
 
-- **[Local Development](docs/local-development.md)** — Docker Compose setup, service verification, database configuration
+- **[Testing Guide](docs/testing.md)** — Unit tests, integration tests, Testcontainers, coverage validation, CI behavior
+- **[Local Development](docs/local-development.md)** — Docker Compose setup for application development, service verification
 - **[Message Contracts](docs/contracts.md)** — Protobuf definitions, versioning, breaking-change checks
 - **[Publisher Guide](docs/publisher.md)** — Direct & outbox modes, registration, usage examples
 - **[Sample Client](samples/MessageBridge.SampleClient/README.md)** — Complete working example (direct & outbox)
@@ -188,7 +203,7 @@ dotnet test MessageBridge.sln
 # Unit tests only
 dotnet test tests/MessageBridge.Domain.Tests/MessageBridge.Domain.Tests.csproj --filter Category=Unit --logger "console;verbosity=detailed"
 
-# Integration tests only (requires Docker Compose running)
+# Integration tests only (requires a running Docker daemon; Testcontainers starts its own services)
 dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj
 ```
 
