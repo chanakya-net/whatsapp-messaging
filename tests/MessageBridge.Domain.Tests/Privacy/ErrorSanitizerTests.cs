@@ -83,6 +83,19 @@ public class ErrorSanitizerTests
     }
 
     [Theory]
+    [InlineData("payload=", "payload=[REDACTED_PAYLOAD]")]
+    [InlineData("payload=private data; status=failed", "payload=[REDACTED_PAYLOAD]; status=failed")]
+    [InlineData("payload=\"unterminated", "payload=[REDACTED_PAYLOAD]")]
+    [InlineData("payload=[\"unterminated\"", "payload=[REDACTED_PAYLOAD]")]
+    [InlineData("payload={\"body\":\"escaped \\\" quote\"}", "payload=[REDACTED_PAYLOAD]")]
+    public void Sanitize_RedactsPayloadValuesAtInputBoundaries(string input, string expected)
+    {
+        var sanitized = MessageBridge.Domain.Privacy.ErrorSanitizer.Sanitize(input);
+
+        sanitized.ShouldBe(expected);
+    }
+
+    [Theory]
     [InlineData("""provider response: {"payload":{"body":"private text","nested":{"token":"inside"}}} completed""")]
     [InlineData("provider response: {\n  \"payload\": {\n    \"body\": \"private text\"\n  }\n} completed")]
     public void Sanitize_RedactsJsonQuotedPayloadProperties(string input)

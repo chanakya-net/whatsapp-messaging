@@ -181,17 +181,17 @@ public sealed class MessageBridgeOutboxDispatcherBehaviorTests
         string id,
         string headers = "{}",
         DateTime? publishedAtUtc = null) => new()
-    {
-        Id = id,
-        MessageId = $"message-{id}",
-        CorrelationId = "correlation",
-        ExchangeName = "exchange",
-        RoutingKey = "routing",
-        Headers = headers,
-        Payload = [1],
-        CreatedAtUtc = DateTime.UtcNow,
-        PublishedAtUtc = publishedAtUtc,
-    };
+        {
+            Id = id,
+            MessageId = $"message-{id}",
+            CorrelationId = "correlation",
+            ExchangeName = "exchange",
+            RoutingKey = "routing",
+            Headers = headers,
+            Payload = [1],
+            CreatedAtUtc = DateTime.UtcNow,
+            PublishedAtUtc = publishedAtUtc,
+        };
 
     private static async Task SeedAsync(TestDbContextFactory factory, params MessageBridgeOutboxMessage[] messages)
     {

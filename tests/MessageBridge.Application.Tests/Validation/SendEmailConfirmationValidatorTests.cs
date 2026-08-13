@@ -94,7 +94,8 @@ public sealed class SendEmailConfirmationValidatorTests
         var requestedAt = DateTimeOffset.UtcNow;
         var command = new SendEmailConfirmation(
             "msg-001", "tenant-1", "user@example.com", null, "token-abc123", requestedAt.AddMinutes(1), null, requestedAt)
-            with { ConfirmationToken = value };
+            with
+        { ConfirmationToken = value };
 
         if (propertyName == "RecipientEmail")
             command = command with { RecipientEmail = value, ConfirmationToken = "token-abc123" };
