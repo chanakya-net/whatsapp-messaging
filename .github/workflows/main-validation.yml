@@ -1,4 +1,4 @@
-name: CI
+name: Main Validation
 
 on:
   push:
@@ -8,8 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: main-validation
+  cancel-in-progress: false
+
 jobs:
   validate:
     uses: ./.github/workflows/_validation.yml
-    with:
-      base-ref: ${{ github.base_ref }}
