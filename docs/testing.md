@@ -40,13 +40,13 @@ dotnet test MessageBridge.UnitTests.slnf -c Release
 ### Run Specific Unit Test Class
 
 ```bash
-dotnet test MessageBridge.UnitTests.slnf -c Release --filter "FullyQualifiedName=MessageBridge.Publisher.Tests.PublisherRegistrationTests"
+dotnet test MessageBridge.UnitTests.slnf -c Release --filter "FullyQualifiedName~MessageBridge.Publisher.Tests.PublisherDependencyInjectionTests"
 ```
 
 ### Run Specific Test Method
 
 ```bash
-dotnet test MessageBridge.UnitTests.slnf -c Release --filter "Name=ShouldRegisterPublisherWithDirectMode"
+dotnet test MessageBridge.UnitTests.slnf -c Release --filter "FullyQualifiedName~AddMessageBridgePublisher_RegistersPublisherAndDependencies"
 ```
 
 ### View Verbose Output
@@ -77,19 +77,22 @@ dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.
 ### Run Specific Integration Test Class
 
 ```bash
-dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj -c Release --filter "FullyQualifiedName=MessageBridge.IntegrationTests.RabbitMqPublishConsumeTests"
+dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj -c Release --filter "FullyQualifiedName~MessageBridge.IntegrationTests.RabbitMqPublishConsumeTests"
 ```
 
 ### Run Specific Integration Test Method
 
 ```bash
-dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj -c Release --filter "Name=ShouldPublishAndConsumeViaRabbitMq"
+dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj \
+  -c Release --filter "FullyQualifiedName~PublishWhatsAppMessage_"
 ```
 
 ### Run Single Test with Debug Output
 
 ```bash
-dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj -c Release --logger "console;verbosity=detailed" --filter "Name=ShouldPublishAndConsumeViaRabbitMq"
+dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj \
+  -c Release --logger "console;verbosity=detailed" \
+  --filter "FullyQualifiedName~PublishWhatsAppMessage_"
 ```
 
 ## Full Test Suite (Unit + Integration)
@@ -108,7 +111,7 @@ dotnet test MessageBridge.sln -c Release
 If Docker is unavailable or you want fast feedback:
 
 ```bash
-dotnet test MessageBridge.sln -c Release --filter "FullyQualifiedName!~IntegrationTests"
+dotnet test MessageBridge.UnitTests.slnf -c Release
 ```
 
 ## Coverage Generation and Validation
@@ -214,7 +217,7 @@ Containers are assigned ephemeral ports (e.g., `5432` → `32891`). Tests discov
 
 If tests are not properly isolated, verify:
 1. No shared static state in test classes
-2. Each test uses `CreateMiqueTopologyPrefix()` for queue names
+2. Each test uses `CreateUniqueTopologyPrefix()` for queue names
 3. Integration fixture is properly cleaned up after each test collection
 
 ### Cleanup and Disk Space
@@ -252,9 +255,11 @@ Error: Cannot connect to Docker daemon at unix:///var/run/docker.sock
 3. Restart Docker daemon: `docker restart` or restart Docker Desktop.
 4. Check Docker logs: On macOS, `log stream --predicate 'process=="Docker"'`.
 
-### Port already in use
+### Docker resource contention
 
-If Docker Compose services are running on `5432` or `5672`, Testcontainers may fail to allocate a container port. Stop Docker Compose before running integration tests:
+Testcontainers uses dynamically allocated host ports, so Docker Compose is not a
+prerequisite and can remain running. If Docker is under-resourced, stop unused
+local application services before running integration tests:
 
 ```bash
 docker-compose down
@@ -267,21 +272,27 @@ GitHub Actions pipelines validate all pull requests and merges to main. This sec
 
 ### PR Validation (`pr-validation.yml`)
 
-**Trigger**: Pull request opened, reopened, or synchronized against `main`.
+**Trigger**: Pull request opened, reopened, synchronized, or marked ready for
+review against `main`.
 
 **Concurrency**: Cancels in-progress runs for the same PR when a new commit is pushed.
 
 **Jobs** (via `_validation.yml`):
 
 | Job | Timeout | Purpose |
-|-----|---------|---------|
-| format | 10 min | Code formatting compliance (dotnet format) |
-| build | 10 min | Release build without tests |
+| --- | --- | --- |
+| format | — | Code formatting compliance (dotnet format) |
+| build | — | Release build without tests |
 | unit-tests | 20 min | Unit tests with coverage validation |
 | integration-tests | 45 min | Testcontainers-backed integration tests |
-| buf-checks | 10 min | Protobuf schema linting and breaking-change detection |
-| samples | 10 min | Build the sample client application |
-| package-generation | 10 min | Generate NuGet packages |
+| buf-checks | — | Protobuf schema linting and breaking-change detection |
+| samples | — | Build the sample client application |
+| package-generation | — | Generate NuGet packages |
+
+Only `unit-tests` and `integration-tests` currently declare job-level timeout
+ceilings (`20` and `45` minutes) in `_validation.yml`. The other jobs have no
+explicit job-level timeout configured and therefore use GitHub Actions' default
+timeout.
 
 **Runtime targets** (not enforced; informational):
 - Unit tests: ~5–10 minutes
@@ -386,11 +397,11 @@ dotnet watch test MessageBridge.UnitTests.slnf
 ### Filter by Test Category or Behavior
 
 ```bash
-# Run only subscription-related tests
-dotnet test MessageBridge.sln -c Release --filter "Class~Subscription"
+# Run only publisher registration tests
+dotnet test MessageBridge.UnitTests.slnf -c Release --filter "FullyQualifiedName~PublisherDependencyInjectionTests"
 
 # Run only tests for error handling
-dotnet test MessageBridge.sln -c Release --filter "Name~Error"
+dotnet test MessageBridge.UnitTests.slnf -c Release --filter "FullyQualifiedName~ErrorSanitizer"
 ```
 
 ### Debugging a Single Test
@@ -398,7 +409,7 @@ dotnet test MessageBridge.sln -c Release --filter "Name~Error"
 ```bash
 # Enable debug output and run a specific test
 dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj \
-  --filter "Name=ShouldPublishAndConsumeViaRabbitMq" \
+  --filter "FullyQualifiedName~PublishWhatsAppMessage_" \
   --logger "console;verbosity=detailed" \
   -c Release
 ```
@@ -406,8 +417,11 @@ dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.
 ### Check Test Count
 
 ```bash
-# Count total tests in the solution
-dotnet test MessageBridge.sln --collect:"XPlat Code Coverage" --no-build -c Release --filter "Name=NONEXISTENT_TEST" 2>&1 | grep "Total tests:"
+# List the unit-test cases in the solution and count them
+dotnet test MessageBridge.UnitTests.slnf --no-build \
+  -c Release --list-tests \
+  | grep -E '^\s+MessageBridge\.' \
+  | wc -l
 ```
 
 ## Related Documentation

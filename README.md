@@ -203,7 +203,7 @@ dotnet test MessageBridge.sln
 # Unit tests only
 dotnet test tests/MessageBridge.Domain.Tests/MessageBridge.Domain.Tests.csproj --filter Category=Unit --logger "console;verbosity=detailed"
 
-# Integration tests only (requires Docker Compose running)
+# Integration tests only (requires a running Docker daemon; Testcontainers starts its own services)
 dotnet test tests/MessageBridge.IntegrationTests/MessageBridge.IntegrationTests.csproj
 ```
 
