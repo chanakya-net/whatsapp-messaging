@@ -5,6 +5,7 @@ module "worker" {
     name                         = local.worker_name
     container_app_environment_id = module.container_environment.environment_id
     resource_group_name          = local.resource_group_name
+    location                     = local.location
     tags                         = merge(local.mandatory_tags, { component = "worker" })
   }
   runtime_identity = {
@@ -23,5 +24,10 @@ module "worker" {
   image                 = var.worker_image
   runtime_configuration = local.worker_runtime_configuration
 
-  depends_on = [module.key_vault]
+  # The migration job reads no Key Vault secret, so the module is not made to depend on the vault
+  # as a whole. The worker keeps its vault ordering through local.worker_vault_references.
+  migration_job_name = local.migration_job_name
+  migrator_identity  = local.migrator_identity
+  migration_database = local.migration_database
+  migration_image    = var.migration_image
 }

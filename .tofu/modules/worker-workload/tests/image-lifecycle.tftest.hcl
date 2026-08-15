@@ -5,6 +5,7 @@ variables {
     name                         = "ca-messagebridge-prod-cin-042"
     container_app_environment_id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.App/managedEnvironments/cae-messagebridge-prod-cin-042"
     resource_group_name          = "rg-messagebridge-prod-centralindia-042"
+    location                     = "centralindia"
     tags = {
       project     = "messagebridge"
       environment = "prod"
@@ -42,6 +43,23 @@ variables {
     repository = "ghcr.io/tarampampam/error-pages"
     digest     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   }
+  migration_job_name = "mig-messagebridge-prod-cin-042"
+  migrator_identity = {
+    resource_id  = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-migrator-prod-cin-042"
+    principal_id = "00000000-0000-4000-8000-000000000005"
+    client_id    = "00000000-0000-4000-8000-000000000015"
+  }
+  migration_database = {
+    host          = "psql-messagebridge-shared-cin-042.postgres.database.azure.com"
+    port          = 5432
+    name          = "messagebridge_prod"
+    username      = "id-messagebridge-migrator-prod-cin-042"
+    max_pool_size = 2
+  }
+  migration_image = {
+    repository = "ghcr.io/chanakya-net/whatsapp-messaging/migrate"
+    digest     = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  }
   runtime_configuration = {
     aspnetcore_environment  = "Production"
     topology_prefix         = "prod"
@@ -70,6 +88,11 @@ run "apply_bootstrap_image" {
     condition     = azurerm_container_app.worker.template[0].container[0].image == "ghcr.io/tarampampam/error-pages@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     error_message = "Test setup must apply the original bootstrap digest."
   }
+
+  assert {
+    condition     = azurerm_container_app_job.migration.template[0].container[0].image == "ghcr.io/chanakya-net/whatsapp-messaging/migrate@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    error_message = "Test setup must apply the original migration digest."
+  }
 }
 
 run "ignores_only_delivery_image_changes" {
@@ -80,6 +103,7 @@ run "ignores_only_delivery_image_changes" {
       name                         = "ca-messagebridge-prod-cin-042"
       container_app_environment_id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.App/managedEnvironments/cae-messagebridge-prod-cin-042"
       resource_group_name          = "rg-messagebridge-prod-centralindia-042"
+      location                     = "centralindia"
       tags = {
         project     = "messagebridge"
         environment = "prod"
@@ -93,6 +117,17 @@ run "ignores_only_delivery_image_changes" {
       repository = "ghcr.io/tarampampam/error-pages"
       digest     = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     }
+    migration_image = {
+      repository = "ghcr.io/chanakya-net/whatsapp-messaging/migrate"
+      digest     = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+    migration_database = {
+      host          = "psql-messagebridge-shared-cin-042.postgres.database.azure.com"
+      port          = 5432
+      name          = "messagebridge_prod"
+      username      = "id-messagebridge-migrator-prod-cin-042"
+      max_pool_size = 3
+    }
   }
 
   assert {
@@ -101,7 +136,20 @@ run "ignores_only_delivery_image_changes" {
   }
 
   assert {
+    condition     = azurerm_container_app_job.migration.template[0].container[0].image == "ghcr.io/chanakya-net/whatsapp-messaging/migrate@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    error_message = "Delivery-owned migration image drift must retain the applied digest in OpenTofu plans."
+  }
+
+  assert {
     condition     = azurerm_container_app.worker.tags["release"] == "candidate"
     error_message = "Non-image drift must remain visible so the lifecycle exception cannot hide configuration changes."
+  }
+
+  assert {
+    condition = one([
+      for setting in azurerm_container_app_job.migration.template[0].container[0].env : setting
+      if setting.name == "Database__MaxPoolSize"
+    ]).value == "3"
+    error_message = "Non-image migration job drift must remain visible so the lifecycle exception stays image-only."
   }
 }

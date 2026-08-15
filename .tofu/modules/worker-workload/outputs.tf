@@ -23,6 +23,21 @@ output "outbound_ip_addresses" {
   value       = toset(azurerm_container_app.worker.outbound_ip_addresses)
 }
 
+output "migration_job_id" {
+  description = "Resource ID of the manually triggered migration job."
+  value       = azurerm_container_app_job.migration.id
+}
+
+output "migration_job_name" {
+  description = "Name of the manually triggered migration job."
+  value       = azurerm_container_app_job.migration.name
+}
+
+output "migration_job_outbound_ip_addresses" {
+  description = "Migration job outbound addresses for downstream database firewall reconciliation."
+  value       = toset(azurerm_container_app_job.migration.outbound_ip_addresses)
+}
+
 output "alertable_resource_ids" {
   description = "Worker IDs eligible for downstream environment alerting."
   value       = toset([azurerm_container_app.worker.id])
