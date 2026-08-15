@@ -259,6 +259,17 @@ Suggested alert targets:
 - `MessageBridgeOutboxMessages` with growing `PublishedAtUtc IS NULL` counts
 - repeated publish failures in application logs
 
+## Database Restore Drill
+
+A quarterly point-in-time restore drill validates that PostgreSQL backups
+are usable and records RPO/RTO evidence, without touching the production
+server. See [Database Restore Drill runbook](runbooks/database-restore.md)
+for prerequisites, execution steps, and failure/escalation handling.
+
+A failed migration is never automatically reversed by application
+delivery; recovery requires inspection and either a forward-fix migration
+or an operator-performed point-in-time restore.
+
 ## Incident Response
 
 1. Check `/health/ready`
@@ -273,3 +284,4 @@ Suggested alert targets:
 - [Deployment](deployment.md)
 - [Message Contracts](contracts.md)
 - [Publisher Guide](publisher.md)
+- [Database Restore Drill](runbooks/database-restore.md)
