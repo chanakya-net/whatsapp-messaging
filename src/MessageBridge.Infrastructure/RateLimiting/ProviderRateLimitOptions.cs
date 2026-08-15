@@ -8,7 +8,10 @@ public sealed class ProviderRateLimitOptions
     public const string SectionName = "MessageBridge:RateLimiting";
 
     [Range(1, int.MaxValue)]
-    public int PermitsPerWindow { get; set; } = 60;
+    public int WhatsAppPermitsPerWindow { get; set; } = 60;
+
+    [Range(1, int.MaxValue)]
+    public int EmailPermitsPerWindow { get; set; } = 60;
 
     [Range(1, int.MaxValue)]
     public int WindowSizeSeconds { get; set; } = 60;
@@ -20,8 +23,11 @@ public sealed class ProviderRateLimitOptionsValidator : IValidateOptions<Provide
     {
         var failures = new List<string>();
 
-        if (options.PermitsPerWindow < 1)
-            failures.Add($"{nameof(ProviderRateLimitOptions.PermitsPerWindow)} must be >= 1.");
+        if (options.WhatsAppPermitsPerWindow < 1)
+            failures.Add($"{nameof(ProviderRateLimitOptions.WhatsAppPermitsPerWindow)} must be >= 1.");
+
+        if (options.EmailPermitsPerWindow < 1)
+            failures.Add($"{nameof(ProviderRateLimitOptions.EmailPermitsPerWindow)} must be >= 1.");
 
         if (options.WindowSizeSeconds < 1)
             failures.Add($"{nameof(ProviderRateLimitOptions.WindowSizeSeconds)} must be >= 1.");

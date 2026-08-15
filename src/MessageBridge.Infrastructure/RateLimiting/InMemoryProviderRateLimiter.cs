@@ -25,9 +25,14 @@ public sealed class InMemoryProviderRateLimiter : IProviderRateLimiter
         if (string.IsNullOrWhiteSpace(providerType))
             return Task.FromResult<ErrorOr<Success>>(Error.Validation("ProviderType.Required", "Provider type is required."));
 
-        var key = BuildKey(tenantId, providerType);
+        var normalizedProviderType = providerType.ToLowerInvariant();
+        if (!IsValidChannel(normalizedProviderType))
+            return Task.FromResult<ErrorOr<Success>>(Error.Validation("ProviderType.Unsupported", $"Unsupported provider type: {providerType}"));
+
+        var key = BuildKey(tenantId, normalizedProviderType);
         var opts = _options.Value;
         var now = DateTime.UtcNow;
+        var permits = GetPermitsForChannel(normalizedProviderType, opts);
 
         lock (_lockObj)
         {
@@ -36,7 +41,7 @@ public sealed class InMemoryProviderRateLimiter : IProviderRateLimiter
                 var windowElapsed = now - state.WindowOpenUtc;
                 if (windowElapsed.TotalSeconds >= opts.WindowSizeSeconds)
                 {
-                    _windows[key] = new WindowState(opts.PermitsPerWindow - 1, now);
+                    _windows[key] = new WindowState(permits - 1, now);
                     return Task.FromResult<ErrorOr<Success>>(new Success());
                 }
 
@@ -49,15 +54,20 @@ public sealed class InMemoryProviderRateLimiter : IProviderRateLimiter
                 return Task.FromResult<ErrorOr<Success>>(Error.Conflict("RateLimit.Exceeded", "Rate limit exceeded."));
             }
 
-            _windows[key] = new WindowState(opts.PermitsPerWindow - 1, now);
+            _windows[key] = new WindowState(permits - 1, now);
             return Task.FromResult<ErrorOr<Success>>(new Success());
         }
     }
 
-    private static string BuildKey(string tenantId, string providerType)
+    private static bool IsValidChannel(string normalizedProviderType) =>
+        normalizedProviderType == "whatsapp" || normalizedProviderType == "email";
+
+    private static int GetPermitsForChannel(string normalizedProviderType, ProviderRateLimitOptions opts) =>
+        normalizedProviderType == "whatsapp" ? opts.WhatsAppPermitsPerWindow : opts.EmailPermitsPerWindow;
+
+    private static string BuildKey(string tenantId, string normalizedProviderType)
     {
         var normalizedTenantId = tenantId.ToLowerInvariant();
-        var normalizedProviderType = providerType.ToLowerInvariant();
         return $"{normalizedTenantId}|{normalizedProviderType}";
     }
 }

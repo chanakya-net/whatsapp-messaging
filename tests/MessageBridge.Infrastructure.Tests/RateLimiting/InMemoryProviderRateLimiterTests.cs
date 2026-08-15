@@ -25,7 +25,7 @@ public sealed class InMemoryProviderRateLimiterTests
     [Fact]
     public async Task CheckRateLimitAsync_tracks_permits_by_tenant_and_channel()
     {
-        var options = Options.Create(new ProviderRateLimitOptions { PermitsPerWindow = 2 });
+        var options = Options.Create(new ProviderRateLimitOptions { WhatsAppPermitsPerWindow = 2, EmailPermitsPerWindow = 2 });
         var limiter = new InMemoryProviderRateLimiter(options);
 
         var r1 = await limiter.CheckRateLimitAsync("tenant-1", "whatsapp");
@@ -45,7 +45,7 @@ public sealed class InMemoryProviderRateLimiterTests
     [Fact]
     public async Task CheckRateLimitAsync_isolates_channels()
     {
-        var options = Options.Create(new ProviderRateLimitOptions { PermitsPerWindow = 1 });
+        var options = Options.Create(new ProviderRateLimitOptions { WhatsAppPermitsPerWindow = 1, EmailPermitsPerWindow = 1 });
         var limiter = new InMemoryProviderRateLimiter(options);
 
         var r1 = await limiter.CheckRateLimitAsync("tenant-1", "whatsapp");
@@ -64,7 +64,7 @@ public sealed class InMemoryProviderRateLimiterTests
     [Fact]
     public async Task CheckRateLimitAsync_normalizes_tenant_id_to_lowercase()
     {
-        var options = Options.Create(new ProviderRateLimitOptions { PermitsPerWindow = 1 });
+        var options = Options.Create(new ProviderRateLimitOptions { WhatsAppPermitsPerWindow = 1, EmailPermitsPerWindow = 1 });
         var limiter = new InMemoryProviderRateLimiter(options);
 
         var r1 = await limiter.CheckRateLimitAsync("Tenant-1", "whatsapp");
@@ -80,7 +80,7 @@ public sealed class InMemoryProviderRateLimiterTests
     [Fact]
     public async Task CheckRateLimitAsync_exhaustion_returns_transient_error()
     {
-        var options = Options.Create(new ProviderRateLimitOptions { PermitsPerWindow = 1 });
+        var options = Options.Create(new ProviderRateLimitOptions { WhatsAppPermitsPerWindow = 1, EmailPermitsPerWindow = 1 });
         var limiter = new InMemoryProviderRateLimiter(options);
 
         await limiter.CheckRateLimitAsync("tenant-1", "whatsapp");
@@ -95,7 +95,7 @@ public sealed class InMemoryProviderRateLimiterTests
     [Fact]
     public async Task CheckRateLimitAsync_window_resets_after_configured_duration()
     {
-        var options = Options.Create(new ProviderRateLimitOptions { PermitsPerWindow = 1, WindowSizeSeconds = 1 });
+        var options = Options.Create(new ProviderRateLimitOptions { WhatsAppPermitsPerWindow = 1, EmailPermitsPerWindow = 1, WindowSizeSeconds = 1 });
         var limiter = new InMemoryProviderRateLimiter(options);
 
         var r1 = await limiter.CheckRateLimitAsync("tenant-1", "whatsapp");
@@ -108,5 +108,35 @@ public sealed class InMemoryProviderRateLimiterTests
 
         var r3 = await limiter.CheckRateLimitAsync("tenant-1", "whatsapp");
         r3.IsError.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task CheckRateLimitAsync_rejects_unsupported_provider_type()
+    {
+        var options = Options.Create(new ProviderRateLimitOptions());
+        var limiter = new InMemoryProviderRateLimiter(options);
+
+        var result = await limiter.CheckRateLimitAsync("tenant-1", "sms");
+
+        result.IsError.ShouldBeTrue();
+        result.Errors[0].Type.ShouldBe(ErrorType.Validation);
+    }
+
+    [Fact]
+    public async Task CheckRateLimitAsync_default_permits_exactly_60_requests()
+    {
+        var options = Options.Create(new ProviderRateLimitOptions());
+        var limiter = new InMemoryProviderRateLimiter(options);
+
+        for (int i = 0; i < 60; i++)
+        {
+            var result = await limiter.CheckRateLimitAsync("tenant-1", "whatsapp");
+            result.IsError.ShouldBeFalse($"Request {i + 1} should succeed");
+        }
+
+        var finalResult = await limiter.CheckRateLimitAsync("tenant-1", "whatsapp");
+        finalResult.IsError.ShouldBeTrue();
+        finalResult.Errors[0].Type.ShouldBe(ErrorType.Conflict);
+        finalResult.Errors[0].Code.ShouldBe("RateLimit.Exceeded");
     }
 }

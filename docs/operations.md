@@ -49,7 +49,8 @@ Configuration via `MessageBridge:RateLimiting`:
 
 | Setting | Default | Description |
 |---------|---------|---|
-| `PermitsPerWindow` | `60` | Maximum messages per window |
+| `WhatsAppPermitsPerWindow` | `60` | Maximum WhatsApp messages per window |
+| `EmailPermitsPerWindow` | `60` | Maximum email messages per window |
 | `WindowSizeSeconds` | `60` | Rate limit window duration in seconds |
 
 Example:
@@ -58,7 +59,8 @@ Example:
 {
   "MessageBridge": {
     "RateLimiting": {
-      "PermitsPerWindow": 60,
+      "WhatsAppPermitsPerWindow": 60,
+      "EmailPermitsPerWindow": 60,
       "WindowSizeSeconds": 60
     }
   }
