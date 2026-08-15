@@ -1,0 +1,8 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+bootstrap.plan
+bootstrap-outputs.*.json
+gh-environment-*.err
+.bootstrap-migration-required
