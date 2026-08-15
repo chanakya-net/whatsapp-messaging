@@ -16,6 +16,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Npgsql;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
@@ -120,7 +121,10 @@ public sealed class ObservabilityRegistrationTests
                 ["RabbitMq:Host"] = "localhost",
                 ["RabbitMq:Username"] = "guest",
                 ["RabbitMq:Password"] = "guest",
-                ["ConnectionStrings:DefaultConnection"] = "Host=localhost;Database=messagebridge_dev;Username=db_user;Password=super_secret_pwd;"
+                ["Database:Host"] = "localhost",
+                ["Database:Database"] = "messagebridge_dev",
+                ["Database:Username"] = "db_user",
+                ["Database:Password"] = "super_secret_pwd"
             },
             AddDependencyHealthProbes);
 
@@ -285,24 +289,11 @@ public sealed class ObservabilityRegistrationTests
     }
 
     [Fact]
-    public async Task PostgresReadinessProbe_returns_false_without_connection_string()
+    public async Task PostgresReadinessProbe_uses_shared_data_source_and_honors_cancellation()
     {
-        var configuration = new ConfigurationBuilder().Build();
-        var probe = new PostgresReadinessProbe(configuration);
-
-        (await probe.IsReadyAsync(CancellationToken.None)).ShouldBeFalse();
-    }
-
-    [Fact]
-    public async Task PostgresReadinessProbe_honors_cancellation_before_database_access()
-    {
-        var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ConnectionStrings:DefaultConnection"] = "Host=unit-test;Database=bridge"
-            })
-            .Build();
-        var probe = new PostgresReadinessProbe(configuration);
+        await using var dataSource = NpgsqlDataSource.Create(
+            "Host=unit-test;Database=bridge;Username=user;Password=password");
+        var probe = new PostgresReadinessProbe(dataSource);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 

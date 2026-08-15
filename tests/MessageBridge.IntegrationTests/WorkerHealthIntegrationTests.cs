@@ -5,6 +5,7 @@ using FluentAssertions;
 using MessageBridge.IntegrationTests.Fixtures;
 using MessageBridge.IntegrationTests.Persistence;
 using MessageBridge.Infrastructure.Messaging.Options;
+using MessageBridge.Infrastructure;
 using MessageBridge.Worker.Observability;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -161,6 +162,7 @@ public sealed class WorkerHealthIntegrationTests(IntegrationEnvironmentFixture f
             builder.Logging.AddProvider(logs);
             builder.Services.Configure<RabbitMqOptions>(
                 builder.Configuration.GetSection(RabbitMqOptions.SectionName));
+            builder.Services.AddMessageBridgeProcessingStore(builder.Configuration);
             builder.Services.AddMessageBridgeObservability(builder.Configuration);
             var app = builder.Build();
             app.MapMessageBridgeHealthAndMetrics();
@@ -238,16 +240,17 @@ public sealed class WorkerHealthIntegrationTests(IntegrationEnvironmentFixture f
 
         private static Dictionary<string, string?> CreateSettings(
             string postgres,
-            string rabbitMq) =>
-            new()
-            {
-                ["ConnectionStrings:DefaultConnection"] = postgres,
-                ["MESSAGEBRIDGE_CONNECTION_STRING"] = postgres,
-                ["RabbitMq:ConnectionString"] = rabbitMq,
-                ["MessageBridge:Topology:EnvironmentPrefix"] =
-                    IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix(),
-                ["Observability:MetricsEndpointEnabled"] = "false"
-            };
+            string rabbitMq)
+        {
+            var settings = IntegrationEnvironmentFixture.CreateDatabaseSettings(postgres);
+            settings.Add("RabbitMq:ConnectionString", rabbitMq);
+            settings.Add(
+                "MessageBridge:Topology:EnvironmentPrefix",
+                IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix());
+            settings.Add("MessageBridge:ProcessingHistory:RecoveryEnabled", "false");
+            settings.Add("Observability:MetricsEndpointEnabled", "false");
+            return settings;
+        }
     }
 
     private sealed record ReadinessObservation(

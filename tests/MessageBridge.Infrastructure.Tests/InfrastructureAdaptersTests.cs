@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using Shouldly;
 
 namespace MessageBridge.Infrastructure.Tests;
@@ -98,22 +99,40 @@ public sealed class InfrastructureAdaptersTests
     }
 
     [Fact]
-    public void DbContextFactory_creates_configured_context_without_database_access()
+    public void DbContextFactory_uses_Database_contract_without_database_access()
     {
-        var previous = Environment.GetEnvironmentVariable("MESSAGEBRIDGE_CONNECTION_STRING");
+        var settings = new Dictionary<string, string?>
+        {
+            ["Database__Host"] = "unreachable.invalid",
+            ["Database__Port"] = "5544",
+            ["Database__Database"] = "bridge",
+            ["Database__Username"] = "user",
+            ["Database__Password"] = "p;a=s\"word",
+            ["Database__UseEntraAuth"] = "false",
+            ["Database__MaxPoolSize"] = "19"
+        };
+        var previous = settings.Keys.ToDictionary(
+            key => key,
+            Environment.GetEnvironmentVariable);
         try
         {
-            Environment.SetEnvironmentVariable(
-                "MESSAGEBRIDGE_CONNECTION_STRING",
-                "Host=unit-test;Port=5432;Database=bridge;Username=user;Password=password");
+            foreach (var setting in settings)
+                Environment.SetEnvironmentVariable(setting.Key, setting.Value);
 
             using var context = new MessageBridgeDbContextFactory().CreateDbContext([]);
+            var builder = new NpgsqlConnectionStringBuilder(
+                context.Database.GetDbConnection().ConnectionString);
 
             (context.Database.ProviderName ?? string.Empty).ShouldContain("Npgsql");
+            builder.Host.ShouldBe("unreachable.invalid");
+            builder.Port.ShouldBe(5544);
+            builder.Password.ShouldBeNull();
+            builder.MaxPoolSize.ShouldBe(19);
         }
         finally
         {
-            Environment.SetEnvironmentVariable("MESSAGEBRIDGE_CONNECTION_STRING", previous);
+            foreach (var setting in previous)
+                Environment.SetEnvironmentVariable(setting.Key, setting.Value);
         }
     }
 
@@ -123,11 +142,15 @@ public sealed class InfrastructureAdaptersTests
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:DefaultConnection"] = "Host=unit-test;Database=bridge",
+                ["Database:Host"] = "unit-test",
+                ["Database:Database"] = "bridge",
+                ["Database:Username"] = "user",
+                ["Database:Password"] = "password",
                 ["RabbitMq:ConnectionString"] = "amqp://guest:guest@localhost"
             })
             .Build();
         var services = new ServiceCollection();
+        services.AddMessageBridgeProcessingStore(configuration);
         services.AddMessageBridgeMassTransit(configuration);
 
         await using var provider = services.BuildServiceProvider();
