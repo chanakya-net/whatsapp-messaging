@@ -27,7 +27,7 @@ next_state() {
 }
 
 case "$*" in
-  'containerapp show '*)
+  'containerapp revision show '*)
     state="$(next_state)"
 
     # Parse "HealthState:sha256:digest" format, splitting on the first colon only
@@ -45,8 +45,8 @@ case "$*" in
     # Default digest if not specified
     [ -n "$digest" ] || digest="sha256:abc123def456"
 
-    # Build response JSON with provisioning state
-    printf '{"properties":{"latestRevisionName":"ca-messagebridge-dev-cin-042--v1","provisioning_state":"%s","template":{"containers":[{"image":"mcr.microsoft.com/app@%s"}]}}}\n' "$health" "$digest"
+    # Build response JSON with revision healthState (camelCase per Azure API)
+    printf '{"properties":{"healthState":"%s","template":{"containers":[{"image":"mcr.microsoft.com/app@%s"}]}}}\n' "$health" "$digest"
     ;;
   *)
     printf 'Unsupported az invocation in fixture: %s\n' "$*" >&2

@@ -65,16 +65,16 @@ wait_for_revision() {
     fi
 
     # Poll revision status
-    local app_json
-    app_json="$(az containerapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
+    local revision_json
+    revision_json="$(az containerapp revision show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" \
       --output json 2>/dev/null)" || {
       printf 'Failed to query revision status.\n' >&2
       return 1
     }
 
     # Extract health and digest
-    health="$(printf '%s\n' "$app_json" | jq -r '.properties.provisioning_state // "Unknown"' 2>/dev/null)"
-    actual_digest="$(extract_image_digest "$app_json")"
+    health="$(printf '%s\n' "$revision_json" | jq -r '.properties.healthState // "Unknown"' 2>/dev/null)"
+    actual_digest="$(extract_image_digest "$revision_json")"
 
     # Check digest match
     if [ -n "$actual_digest" ] && [[ "$actual_digest" != "@"* ]]; then

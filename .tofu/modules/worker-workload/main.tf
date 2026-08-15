@@ -204,16 +204,16 @@ resource "azurerm_container_app_job" "smoke" {
         "-c",
         <<-EOC
           set -e
-          worker_fqdn="${var.worker_fqdn}"
+          worker_fqdn="${azurerm_container_app.worker.latest_revision_fqdn}"
 
           echo "Testing /health/live..."
-          if ! curl -sS "http://$${worker_fqdn}:8080/health/live" -f -w "\nStatus: %%{http_code}\n"; then
+          if ! curl -sS "https://$${worker_fqdn}/health/live" -f -w "\nStatus: %%{http_code}\n"; then
             echo "health/live check failed"
             exit 1
           fi
 
           echo "Testing /health/ready..."
-          if ! curl -sS "http://$${worker_fqdn}:8080/health/ready" -f -w "\nStatus: %%{http_code}\n"; then
+          if ! curl -sS "https://$${worker_fqdn}/health/ready" -f -w "\nStatus: %%{http_code}\n"; then
             echo "health/ready check failed"
             exit 1
           fi
@@ -230,11 +230,6 @@ resource "azurerm_container_app_job" "smoke" {
     precondition {
       condition = var.smoke_job_name != ""
       error_message = "The smoke job name must not be empty."
-    }
-
-    precondition {
-      condition = var.worker_fqdn != ""
-      error_message = "The worker FQDN must not be empty."
     }
   }
 }

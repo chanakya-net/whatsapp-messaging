@@ -200,18 +200,6 @@ variable "smoke_job_name" {
   }
 }
 
-variable "worker_fqdn" {
-  description = "Fully qualified domain name of the worker app for health endpoint probing."
-  type        = string
-
-  validation {
-    condition = (
-      can(regex("^[a-z0-9][a-z0-9.-]*[a-z0-9](?:\\.[a-z]{2,})?$", var.worker_fqdn))
-    )
-    error_message = "worker_fqdn must be a valid domain name."
-  }
-}
-
 variable "runtime_configuration" {
   description = "Non-secret MessageBridge worker runtime settings."
   type = object({

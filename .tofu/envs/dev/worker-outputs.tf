@@ -33,6 +33,16 @@ output "migration_job_name" {
   value       = module.worker.migration_job_name
 }
 
+output "smoke_job_id" {
+  description = "Resource ID of the manually triggered dev smoke test job."
+  value       = module.worker.smoke_job_id
+}
+
+output "smoke_job_name" {
+  description = "Name of the manually triggered dev smoke test job."
+  value       = module.worker.smoke_job_name
+}
+
 output "migration_job_outbound_ip_addresses" {
   description = "Dev migration job egress addresses for downstream database firewall reconciliation."
   value       = module.worker.migration_job_outbound_ip_addresses

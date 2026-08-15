@@ -153,6 +153,26 @@ test_sanitized_diagnostics_on_timeout() {
   assert_output_excludes 'resource.group\|--resource-group' "$output" 'Diagnostics must not contain config'
 }
 
+test_missing_execution_fails() {
+  local output exit_code
+  output="$(wait_with_stream missing-execution-stream.txt 2 5)" || exit_code=$?
+  exit_code=${exit_code:-1}
+  assert_exit_code 1 "$exit_code" 'Missing execution must exit 1'
+  assert_output_contains 'Failed\|fail\|error' "$output" 'Output must indicate failure'
+  # Ensure no secrets/config in diagnostics
+  assert_output_excludes 'RABBITMQ\|POSTGRES\|vault\|secret' "$output" 'Diagnostics must not contain secrets'
+  assert_output_excludes 'resource.group\|--resource-group' "$output" 'Diagnostics must not contain config'
+}
+
+test_diagnostics_include_identifiers() {
+  local output exit_code
+  output="$(wait_with_stream failed-stream.txt 4 5)" || exit_code=$?
+  exit_code=${exit_code:-1}
+  assert_exit_code 1 "$exit_code" 'Failed execution must exit 1'
+  # Output should mention job or execution for diagnostics (but not secrets)
+  assert_output_excludes 'RABBITMQ\|POSTGRES\|vault\|secret' "$output" 'No secrets in diagnostics'
+}
+
 test_distinct_outcomes() {
   local results=() stream exit_code
   for stream in succeeded-stream.txt failed-stream.txt nonterminal-stream.txt; do
@@ -175,6 +195,8 @@ test_timeout_on_nonterminal
 test_bounded_poll_count
 test_sanitized_diagnostics_on_failure
 test_sanitized_diagnostics_on_timeout
+test_missing_execution_fails
+test_diagnostics_include_identifiers
 test_distinct_outcomes
 
 printf '%s\n' 'All wait-for-container-app-job tests passed.'

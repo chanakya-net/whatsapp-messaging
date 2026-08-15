@@ -33,5 +33,4 @@ module "worker" {
 
   # Smoke job calls worker health endpoints through internal routing with no secrets.
   smoke_job_name = local.smoke_job_name
-  worker_fqdn    = local.worker_fqdn
 }

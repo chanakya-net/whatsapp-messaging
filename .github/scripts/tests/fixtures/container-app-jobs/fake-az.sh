@@ -14,9 +14,20 @@ execution_name() {
 
 next_status() {
   local cursor total
-  cursor="$(head -n 1 "$FAKE_AZ_STREAM_CURSOR" 2>/dev/null || true)"
+  cursor="$(cat "$FAKE_AZ_STREAM_CURSOR" 2>/dev/null || echo 0)" && cursor="${cursor%$'\n'}"
   [ -n "$cursor" ] || cursor=0
-  total="$(grep -c '' "$FAKE_AZ_STREAM")"
+
+  # Count lines; empty file = 0 lines
+  if [ ! -s "$FAKE_AZ_STREAM" ]; then
+    total=0
+  else
+    total="$(wc -l < "$FAKE_AZ_STREAM")"
+  fi
+
+  # Empty stream means no execution; return error
+  if [ "$total" -eq 0 ]; then
+    return 1
+  fi
 
   # A bounded stream that runs out keeps reporting its last status, which is how a real
   # non-terminal execution behaves while an observer exhausts its poll budget.
@@ -24,7 +35,7 @@ next_status() {
     cursor=$((total - 1))
   fi
 
-  head -n "$((cursor + 1))" "$FAKE_AZ_STREAM" | tail -n 1
+  sed -n "$((cursor + 1))p" "$FAKE_AZ_STREAM"
   printf '%s\n' "$((cursor + 1))" >"$FAKE_AZ_STREAM_CURSOR"
 }
 
@@ -33,7 +44,11 @@ case "$*" in
     printf '{"name":"%s","properties":{"status":"Running"}}\n' "$(execution_name)"
     ;;
   'containerapp job execution show '*)
-    printf '{"name":"%s","properties":{"status":"%s"}}\n' "$(execution_name)" "$(next_status)"
+    exec_status="$(next_status)" || {
+      printf 'The job execution does not exist.\n' >&2
+      exit 1
+    }
+    printf '{"name":"%s","properties":{"status":"%s"}}\n' "$(execution_name)" "$exec_status"
     ;;
   'containerapp show '*)
     printf '{"properties":{"latestRevisionName":"%s"}}\n' "${FAKE_AZ_WORKER_REVISION:-ca-messagebridge-dev-cin-042--baseline}"

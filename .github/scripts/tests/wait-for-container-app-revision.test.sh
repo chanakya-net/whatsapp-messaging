@@ -130,7 +130,7 @@ test_bounded_poll_count() {
     --poll-budget 3 \
     --timeout "$DEFAULT_TIMEOUT" \
     2>&1 >/dev/null || exit_code=$?
-  calls="$(grep -c 'containerapp show' "$FAKE_AZ_CALL_LOG" || echo 0)"
+  calls="$(grep -c 'containerapp revision show' "$FAKE_AZ_CALL_LOG" || echo 0)"
   [ "$calls" -eq 3 ] || fail "Must stop after budget exhausted (expected 3 calls, got $calls)"
 }
 
