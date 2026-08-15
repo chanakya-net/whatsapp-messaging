@@ -173,7 +173,8 @@ public sealed class ProcessingHistoryCleanupTests(IntegrationEnvironmentFixture 
         var now = DateTimeOffset.UtcNow;
         scenario.DbContext.MessageProcessingRecords.AddRange(
             BuildRecord("wamid.completed-old", ProcessingStatus.Completed, now.AddHours(-25), now.AddHours(-25), now.AddHours(-25)),
-            BuildRecord("wamid.rejected-old", ProcessingStatus.Rejected, now.AddHours(-25), now.AddHours(-25), now.AddHours(-25)));
+            BuildRecord("wamid.rejected-old", ProcessingStatus.Rejected, now.AddHours(-25), now.AddHours(-25), now.AddHours(-25)),
+            BuildRecord("wamid.processing-old", ProcessingStatus.Processing, now.AddHours(-25), now.AddHours(-25)));
         await scenario.DbContext.SaveChangesAsync();
 
         var factory = new TestHistoryCleanupDbContextFactory(options);
@@ -185,7 +186,15 @@ public sealed class ProcessingHistoryCleanupTests(IntegrationEnvironmentFixture 
                 CleanupIntervalMilliseconds = 10,
                 DevelopmentRetentionHours = 24,
                 ProductionRetentionHours = 168,
-                EligibleStatusesForCleanup = [ProcessingStatus.Completed, ProcessingStatus.Abandoned],
+                EligibleStatusesForCleanup =
+                [
+                    ProcessingStatus.Received,
+                    ProcessingStatus.Processing,
+                    ProcessingStatus.Completed,
+                    ProcessingStatus.Abandoned,
+                    ProcessingStatus.Failed,
+                    ProcessingStatus.Rejected
+                ],
                 CleanupBatchSize = 10
             }),
             BuildEnvironment("Development"));
@@ -203,6 +212,7 @@ public sealed class ProcessingHistoryCleanupTests(IntegrationEnvironmentFixture 
         await using var verifyContext = new MessageBridgeDbContext(options);
         Assert.False(await ExistsAsync(verifyContext, "wamid.completed-old"));
         Assert.True(await ExistsAsync(verifyContext, "wamid.rejected-old"));
+        Assert.True(await ExistsAsync(verifyContext, "wamid.processing-old"));
     }
 
     private static ProcessingHistoryCleanupService CreateCleanup(

@@ -161,6 +161,24 @@ public sealed class MessageProcessingHistoryOptionsTests
     }
 
     [Fact]
+    public void EligibleStatusesForCleanup_Never_Includes_NonTerminalStatuses()
+    {
+        var options = new MessageProcessingHistoryOptions
+        {
+            EligibleStatusesForCleanup =
+            [
+                ProcessingStatus.Received,
+                ProcessingStatus.Processing,
+                ProcessingStatus.Completed,
+                ProcessingStatus.Abandoned
+            ]
+        };
+
+        options.EligibleStatusesForCleanup.ShouldBe(
+            [ProcessingStatus.Completed, ProcessingStatus.Abandoned]);
+    }
+
+    [Fact]
     public void DevelopmentRetentionHours_Binds_From_Configuration()
     {
         var config = new ConfigurationBuilder()

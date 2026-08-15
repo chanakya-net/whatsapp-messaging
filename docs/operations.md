@@ -175,13 +175,23 @@ export MessageBridge__ProcessingHistory__ProductionRetentionHours=168
 Verify cleanup behavior:
 
 ```sql
--- Count by status (including old records)
+-- Development: inspect records older than the 24-hour cutoff.
 SELECT Status, COUNT(*) as Count
 FROM MessageProcessingRecords
-WHERE ProcessedAt < NOW() - INTERVAL '25 hours'
+WHERE ProcessedAt < NOW() - INTERVAL '24 hours'
 GROUP BY Status;
 
--- Expect: Completed/Abandoned absent or minimal, Failed/Rejected present
+-- Expect: Completed/Abandoned older than 24 hours absent; Failed/Rejected and
+-- Received/Processing records remain.
+
+-- Production: inspect records older than the 168-hour (7-day) cutoff.
+SELECT Status, COUNT(*) as Count
+FROM MessageProcessingRecords
+WHERE ProcessedAt < NOW() - INTERVAL '168 hours'
+GROUP BY Status;
+
+-- Expect: Completed/Abandoned older than 168 hours absent; Failed/Rejected and
+-- Received/Processing records remain. Records aged 24-168 hours are retained.
 ```
 
 ## Idempotency

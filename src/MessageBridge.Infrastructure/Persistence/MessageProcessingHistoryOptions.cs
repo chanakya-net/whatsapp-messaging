@@ -34,6 +34,8 @@ public sealed class MessageProcessingHistoryOptions
     public ProcessingStatus[] EligibleStatusesForCleanup
     {
         get => _eligibleStatusesForCleanup;
-        set => _eligibleStatusesForCleanup = [..value.Where(s => s != ProcessingStatus.Failed && s != ProcessingStatus.Rejected)];
+        set => _eligibleStatusesForCleanup = value is null
+            ? []
+            : [..value.Where(s => s is ProcessingStatus.Completed or ProcessingStatus.Abandoned).Distinct()];
     }
 }
