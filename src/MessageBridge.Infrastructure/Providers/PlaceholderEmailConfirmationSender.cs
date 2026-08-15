@@ -17,7 +17,7 @@ public sealed class PlaceholderEmailConfirmationSender(
         var metadata = options.Value.BuildEmailMetadata(email, tenantId);
         using var _ = logger.BeginScope(metadata);
         logger.LogInformation(
-            "Simulating email confirmation delivery for message {MessageId} through {Provider}.",
+            "Simulated email confirmation delivery acknowledgement for message {MessageId} through {Provider}; no provider delivery was attempted.",
             email.MessageId,
             metadata["provider"]);
         return Task.FromResult<ErrorOr<Success>>(new Success());
