@@ -5,6 +5,7 @@ variables {
     name                         = "ca-messagebridge-prod-cin-042"
     container_app_environment_id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.App/managedEnvironments/cae-messagebridge-prod-cin-042"
     resource_group_name          = "rg-messagebridge-prod-centralindia-042"
+    location                     = "centralindia"
     tags = {
       project     = "messagebridge"
       environment = "prod"
@@ -40,6 +41,23 @@ variables {
   image = {
     repository = "ghcr.io/tarampampam/error-pages"
     digest     = "f23f8042a2804669315fd232281d0ccecf1959332314a46e02ca2482064064a6"
+  }
+  migration_job_name = "mig-messagebridge-prod-cin-042"
+  migrator_identity = {
+    resource_id  = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-migrator-prod-cin-042"
+    principal_id = "00000000-0000-4000-8000-000000000005"
+    client_id    = "00000000-0000-4000-8000-000000000015"
+  }
+  migration_database = {
+    host          = "psql-messagebridge-shared-cin-042.postgres.database.azure.com"
+    port          = 5432
+    name          = "messagebridge_prod"
+    username      = "id-messagebridge-migrator-prod-cin-042"
+    max_pool_size = 2
+  }
+  migration_image = {
+    repository = "ghcr.io/chanakya-net/whatsapp-messaging/migrate"
+    digest     = "4c1d7a1f0f1a4dbb9a1b3f6d5e2c8a7b6d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00"
   }
   runtime_configuration = {
     aspnetcore_environment  = "Production"
@@ -147,6 +165,86 @@ run "wires_matching_secrets_and_runtime_configuration" {
     )
     error_message = "Worker environment must contain only the approved active-environment configuration surface."
   }
+}
+
+run "wires_migrator_only_database_configuration" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for name, value in {
+        AZURE_CLIENT_ID                   = var.migrator_identity.client_id
+        Database__Host                    = "psql-messagebridge-shared-cin-042.postgres.database.azure.com"
+        Database__Port                    = "5432"
+        Database__Database                = "messagebridge_prod"
+        Database__Username                = "id-messagebridge-migrator-prod-cin-042"
+        Database__UseEntraAuth            = "true"
+        Database__MaxPoolSize             = "2"
+        Database__ManagedIdentityClientId = var.migrator_identity.client_id
+        } : one([
+          for setting in azurerm_container_app_job.migration.template[0].container[0].env : setting
+          if setting.name == name
+      ]).value == value
+    ])
+    error_message = "Migration job must receive the complete non-secret Entra database configuration for the migrator identity."
+  }
+
+  assert {
+    condition = (
+      length(azurerm_container_app_job.migration.template[0].container[0].env) == 8 &&
+      length(azurerm_container_app_job.migration.secret) == 0 &&
+      alltrue([
+        for setting in azurerm_container_app_job.migration.template[0].container[0].env :
+        setting.secret_name == null
+      ])
+    )
+    error_message = "Migration job must expose only the eight approved non-secret settings and hold no secrets."
+  }
+
+  assert {
+    condition = alltrue([
+      for forbidden in [
+        "Database__Password",
+        "ConnectionStrings__DefaultConnection",
+        "MESSAGEBRIDGE_CONNECTION_STRING",
+        "RabbitMq__ConnectionString",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "Observability__OtlpEndpoint",
+        "ASPNETCORE_ENVIRONMENT",
+        "ASPNETCORE_HTTP_PORTS",
+        "HTTP_PORT",
+        "MessageBridge__Topology__EnvironmentPrefix",
+      ] :
+      !contains([for setting in azurerm_container_app_job.migration.template[0].container[0].env : setting.name], forbidden)
+    ])
+    error_message = "Migration job must not receive worker secrets, transport, observability, or topology configuration."
+  }
+
+  assert {
+    condition = alltrue([
+      for setting in azurerm_container_app_job.migration.template[0].container[0].env :
+      setting.value != var.runtime_identity.client_id &&
+      setting.value != var.database.username
+    ])
+    error_message = "Migration job configuration must never reuse the worker runtime identity or database principal."
+  }
+}
+
+run "malformed_migration_database_stops" {
+  command = plan
+
+  variables {
+    migration_database = {
+      host          = "Not A Host"
+      port          = 0
+      name          = "Messagebridge Prod"
+      username      = " "
+      max_pool_size = 0
+    }
+  }
+
+  expect_failures = [var.migration_database]
 }
 
 run "mismatched_vault_identity_stops" {

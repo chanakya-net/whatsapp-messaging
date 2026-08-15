@@ -18,6 +18,23 @@ variable "worker_image" {
     error_message = "worker_image must contain an untagged repository and lowercase 64-character sha256 digest."
   }
 }
+
+variable "migration_image" {
+  description = "Immutable dedicated migration image; supplied per deployment and never defaulted to a placeholder."
+  type = object({
+    repository = string
+    digest     = string
+  })
+
+  validation {
+    condition = (
+      var.migration_image.repository == "ghcr.io/chanakya-net/whatsapp-messaging/migrate" &&
+      can(regex("^[0-9a-f]{64}$", var.migration_image.digest))
+    )
+    error_message = "migration_image must be the dedicated untagged migration repository with a lowercase 64-character sha256 digest."
+  }
+}
+
 variable "worker_otlp_endpoint" {
   description = "Non-secret OTLP/HTTP endpoint used by the dev worker."
   type        = string

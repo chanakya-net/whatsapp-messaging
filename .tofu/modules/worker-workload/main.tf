@@ -117,3 +117,58 @@ resource "azurerm_container_app" "worker" {
     }
   }
 }
+
+# The migration job is deliberately independent of azurerm_container_app.worker: it is triggered
+# manually before deployment, never during worker startup, and a failed execution must leave the
+# current worker revision untouched.
+resource "azurerm_container_app_job" "migration" {
+  name                         = var.migration_job_name
+  container_app_environment_id = var.environment.container_app_environment_id
+  resource_group_name          = var.environment.resource_group_name
+  location                     = var.environment.location
+  workload_profile_name        = "Consumption"
+  replica_timeout_in_seconds   = 1800
+  replica_retry_limit          = 0
+  tags                         = var.environment.tags
+
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [var.migrator_identity.resource_id]
+  }
+
+  manual_trigger_config {
+    parallelism              = 1
+    replica_completion_count = 1
+  }
+
+  template {
+    container {
+      name   = "migration"
+      image  = "${var.migration_image.repository}@sha256:${var.migration_image.digest}"
+      cpu    = 0.5
+      memory = "1Gi"
+
+      dynamic "env" {
+        for_each = local.migration_environment
+
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [template[0].container[0].image]
+
+    precondition {
+      condition = (
+        var.migrator_identity.resource_id != var.runtime_identity.resource_id &&
+        var.migrator_identity.principal_id != var.runtime_identity.principal_id &&
+        var.migrator_identity.client_id != var.runtime_identity.client_id
+      )
+      error_message = "The migration job must use a dedicated migrator identity, never the worker runtime identity."
+    }
+  }
+}

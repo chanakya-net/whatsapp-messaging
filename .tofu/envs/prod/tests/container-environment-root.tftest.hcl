@@ -39,6 +39,10 @@ variables {
   tenant_id        = "00000000-0000-4000-8000-000000000001"
   subscription_id  = "00000000-0000-4000-8000-000000000002"
   bootstrap_serial = "042"
+  migration_image = {
+    repository = "ghcr.io/chanakya-net/whatsapp-messaging/migrate"
+    digest     = "4c1d7a1f0f1a4dbb9a1b3f6d5e2c8a7b6d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00"
+  }
   operator_identity = {
     principal_id   = "00000000-0000-4000-8000-000000000004"
     principal_type = "Group"

@@ -16,6 +16,9 @@ locals {
   worker_database_host           = "psql-${local.project}-shared-${local.region_token}-${var.bootstrap_serial}.postgres.database.azure.com"
   worker_database_name           = "messagebridge_dev"
 
+  # Container Apps Job names allow at most 32 characters, so mig is the stable migration token.
+  migration_job_name = "mig-${local.project}-${local.environment}-${local.region_token}-${var.bootstrap_serial}"
+
   mandatory_tags = merge(var.tags, {
     project     = local.project
     environment = local.environment
@@ -27,6 +30,22 @@ locals {
   worker_vault_references = {
     rabbitmq  = module.key_vault.container_app_secret_references["rabbitmq-connection-string"]
     new_relic = module.key_vault.container_app_secret_references["new-relic-otlp-headers"]
+  }
+
+  # The migration job authenticates to the dev database as the dev migrator principal and never
+  # reads a Key Vault secret, so it needs no vault reference of its own.
+  migrator_identity = {
+    resource_id  = azurerm_user_assigned_identity.migrator.id
+    principal_id = azurerm_user_assigned_identity.migrator.principal_id
+    client_id    = azurerm_user_assigned_identity.migrator.client_id
+  }
+
+  migration_database = {
+    host          = local.worker_database_host
+    port          = 5432
+    name          = local.worker_database_name
+    username      = azurerm_user_assigned_identity.migrator.name
+    max_pool_size = 2
   }
 
   worker_runtime_configuration = {

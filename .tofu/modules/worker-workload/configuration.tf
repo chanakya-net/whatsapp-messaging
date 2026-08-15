@@ -48,4 +48,17 @@ locals {
     RabbitMq__ConnectionString = var.vault_references.rabbitmq.name
     OTEL_EXPORTER_OTLP_HEADERS = var.vault_references.new_relic.name
   }
+
+  # The migration job runs the EF bundle only. It receives Entra-authenticated database coordinates
+  # for the migrator identity and nothing from the worker's secret, transport, or telemetry surface.
+  migration_environment = {
+    AZURE_CLIENT_ID                   = var.migrator_identity.client_id
+    Database__Host                    = var.migration_database.host
+    Database__Port                    = tostring(var.migration_database.port)
+    Database__Database                = var.migration_database.name
+    Database__Username                = var.migration_database.username
+    Database__UseEntraAuth            = "true"
+    Database__MaxPoolSize             = tostring(var.migration_database.max_pool_size)
+    Database__ManagedIdentityClientId = var.migrator_identity.client_id
+  }
 }

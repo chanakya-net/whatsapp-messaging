@@ -4,6 +4,7 @@ variable "environment" {
     name                         = string
     container_app_environment_id = string
     resource_group_name          = string
+    location                     = string
     tags                         = map(string)
   })
 
@@ -16,9 +17,10 @@ variable "environment" {
     condition = (
       startswith(var.environment.container_app_environment_id, "/subscriptions/") &&
       strcontains(var.environment.container_app_environment_id, "/providers/Microsoft.App/managedEnvironments/") &&
-      trimspace(var.environment.resource_group_name) != ""
+      trimspace(var.environment.resource_group_name) != "" &&
+      can(regex("^[a-z][a-z0-9]{2,29}$", var.environment.location))
     )
-    error_message = "environment must identify an existing Container Apps environment and resource group."
+    error_message = "environment must identify an existing Container Apps environment, resource group, and Azure region."
   }
 
   validation {
@@ -117,6 +119,74 @@ variable "image" {
       can(regex("^[0-9a-f]{64}$", var.image.digest))
     )
     error_message = "image must contain an untagged repository and a lowercase 64-character sha256 digest."
+  }
+}
+
+variable "migration_job_name" {
+  description = "Name of the manually triggered pre-deployment migration job."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{0,30}[a-z0-9]$", var.migration_job_name)) && !strcontains(var.migration_job_name, "--")
+    error_message = "migration_job_name must be a 2-32 character lowercase Container Apps Job name."
+  }
+}
+
+variable "migrator_identity" {
+  description = "Environment migrator identity attached only to the migration job."
+  type = object({
+    resource_id  = string
+    principal_id = string
+    client_id    = string
+  })
+
+  validation {
+    condition = (
+      startswith(var.migrator_identity.resource_id, "/subscriptions/") &&
+      strcontains(var.migrator_identity.resource_id, "/providers/Microsoft.ManagedIdentity/userAssignedIdentities/") &&
+      can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", var.migrator_identity.principal_id)) &&
+      can(regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$", var.migrator_identity.client_id))
+    )
+    error_message = "migrator_identity must contain a user-assigned identity resource ID and UUID principal/client IDs."
+  }
+}
+
+variable "migration_database" {
+  description = "Non-secret PostgreSQL connection metadata used by the migration job."
+  type = object({
+    host          = string
+    port          = number
+    name          = string
+    username      = string
+    max_pool_size = number
+  })
+
+  validation {
+    condition = (
+      can(regex("^[a-z0-9][a-z0-9.-]+[a-z0-9]$", var.migration_database.host)) &&
+      var.migration_database.port >= 1 && var.migration_database.port <= 65535 &&
+      can(regex("^[a-z][a-z0-9_]{0,62}$", var.migration_database.name)) &&
+      trimspace(var.migration_database.username) != "" &&
+      var.migration_database.max_pool_size >= 1
+    )
+    error_message = "migration_database must contain a valid host, port, name, username, and positive pool size."
+  }
+}
+
+variable "migration_image" {
+  description = "Immutable migration image coordinates dedicated to the migration job."
+  type = object({
+    repository = string
+    digest     = string
+  })
+
+  validation {
+    condition = (
+      can(regex("^[a-z0-9.-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+$", var.migration_image.repository)) &&
+      !strcontains(var.migration_image.repository, "@") &&
+      can(regex("^[0-9a-f]{64}$", var.migration_image.digest))
+    )
+    error_message = "migration_image must contain an untagged repository and a lowercase 64-character sha256 digest."
   }
 }
 

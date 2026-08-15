@@ -25,6 +25,16 @@ mock_provider "azurerm" {
       ]
     }
   }
+
+  mock_resource "azurerm_container_app_job" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.App/jobs/mig-messagebridge-dev-cin-042"
+      outbound_ip_addresses = [
+        "20.192.0.30",
+        "20.192.0.31",
+      ]
+    }
+  }
 }
 
 override_resource {
@@ -54,6 +64,10 @@ variables {
     principal_type = "Group"
   }
   worker_allowed_tenant_ids = ["tenant-b", "tenant-a"]
+  migration_image = {
+    repository = "ghcr.io/chanakya-net/whatsapp-messaging/migrate"
+    digest     = "4c1d7a1f0f1a4dbb9a1b3f6d5e2c8a7b6d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00"
+  }
   tags = {
     owner = "platform"
   }
@@ -124,4 +138,94 @@ run "invalid_worker_otlp_endpoint_stops" {
   }
 
   expect_failures = [var.worker_otlp_endpoint]
+}
+
+run "wires_one_environment_isolated_dev_migration_job" {
+  command = plan
+
+  assert {
+    condition = (
+      local.migration_job_name == "mig-messagebridge-dev-cin-042" &&
+      length(local.migration_job_name) < 32 &&
+      local.migration_job_name != local.worker_name
+    )
+    error_message = "Dev migration job must have a deterministic name distinct from the worker and within the Azure length limit."
+  }
+
+  assert {
+    condition = (
+      local.migration_database.host == local.worker_database_host &&
+      local.migration_database.port == 5432 &&
+      local.migration_database.name == "messagebridge_dev" &&
+      local.migration_database.username == azurerm_user_assigned_identity.migrator.name &&
+      local.migration_database.username != azurerm_user_assigned_identity.runtime.name
+    )
+    error_message = "Dev migration job must target the dev database as the dev migrator principal."
+  }
+
+  assert {
+    condition = (
+      local.migrator_identity.resource_id == azurerm_user_assigned_identity.migrator.id &&
+      local.migrator_identity.principal_id == azurerm_user_assigned_identity.migrator.principal_id &&
+      local.migrator_identity.client_id == azurerm_user_assigned_identity.migrator.client_id &&
+      !strcontains(local.migrator_identity.resource_id, "runtime") &&
+      strcontains(local.migrator_identity.resource_id, "dev")
+    )
+    error_message = "Dev migration job must attach only the dev migrator identity."
+  }
+
+  assert {
+    condition = (
+      var.migration_image.repository == "ghcr.io/chanakya-net/whatsapp-messaging/migrate" &&
+      can(regex("^[0-9a-f]{64}$", var.migration_image.digest)) &&
+      var.migration_image.repository != var.worker_image.repository
+    )
+    error_message = "Dev must consume a caller-supplied immutable digest of the dedicated migration image."
+  }
+
+  assert {
+    condition = (
+      module.worker.migration_job_name == "mig-messagebridge-dev-cin-042" &&
+      output.migration_job_id == module.worker.migration_job_id &&
+      output.migration_job_name == module.worker.migration_job_name &&
+      output.migration_job_outbound_ip_addresses == toset(["20.192.0.30", "20.192.0.31"])
+    )
+    error_message = "Dev root must re-export only safe migration job metadata."
+  }
+
+  assert {
+    condition = (
+      output.worker_latest_revision_name == "ca-messagebridge-dev-cin-042--revision" &&
+      output.worker_outbound_ip_addresses == toset(["20.192.0.20", "20.192.0.21"]) &&
+      output.worker_alertable_resource_ids == toset([module.worker.worker_id]) &&
+      !contains(tolist(output.worker_alertable_resource_ids), module.worker.migration_job_id)
+    )
+    error_message = "Adding the migration job must not change the dev worker revision, egress, or alerting surface."
+  }
+}
+
+run "mutable_dev_migration_image_stops" {
+  command = plan
+
+  variables {
+    migration_image = {
+      repository = "ghcr.io/chanakya-net/whatsapp-messaging/migrate:latest"
+      digest     = "latest"
+    }
+  }
+
+  expect_failures = [var.migration_image]
+}
+
+run "foreign_dev_migration_repository_stops" {
+  command = plan
+
+  variables {
+    migration_image = {
+      repository = "ghcr.io/tarampampam/error-pages"
+      digest     = "4c1d7a1f0f1a4dbb9a1b3f6d5e2c8a7b6d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00"
+    }
+  }
+
+  expect_failures = [var.migration_image]
 }
