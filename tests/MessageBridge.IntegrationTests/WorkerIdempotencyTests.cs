@@ -3,6 +3,7 @@ using Google.Protobuf.WellKnownTypes;
 using MassTransit;
 using MessageBridge.Contracts.V1;
 using MessageBridge.Domain.Processing;
+using MessageBridge.Infrastructure;
 using MessageBridge.Infrastructure.Messaging;
 using MessageBridge.Infrastructure.Persistence;
 using MessageBridge.IntegrationTests.Fixtures;
@@ -97,13 +98,11 @@ public sealed class WorkerIdempotencyTests(IntegrationEnvironmentFixture fixture
         var connectionString = database.DbContext.Database.GetConnectionString()!;
         var environmentPrefix = IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix();
 
-        var settings = new Dictionary<string, string?>
-        {
-            ["ConnectionStrings:DefaultConnection"] = connectionString,
-            ["RabbitMq:ConnectionString"] = fixture.GetRabbitMqConnectionString(),
-            ["MessageBridge:Topology:EnvironmentPrefix"] = environmentPrefix,
-            ["MessageBridge:TransportRetry:ImmediateRetryCount"] = "0",
-        };
+        var settings = IntegrationEnvironmentFixture.CreateDatabaseSettings(connectionString);
+        settings.Add("RabbitMq:ConnectionString", fixture.GetRabbitMqConnectionString());
+        settings.Add("MessageBridge:Topology:EnvironmentPrefix", environmentPrefix);
+        settings.Add("MessageBridge:TransportRetry:ImmediateRetryCount", "0");
+        settings.Add("MessageBridge:ProcessingHistory:RecoveryEnabled", "false");
 
         var builder = Host.CreateApplicationBuilder();
         builder.Configuration.AddInMemoryCollection(settings);
@@ -115,6 +114,7 @@ public sealed class WorkerIdempotencyTests(IntegrationEnvironmentFixture fixture
                 options.StopTimeout = TimeSpan.FromSeconds(30);
             });
         builder.Services.AddSingleton<IMessageBus>(bus.CreateProxy());
+        builder.Services.AddMessageBridgeProcessingStore(builder.Configuration);
         builder.Services.AddMessageBridgeMassTransit(builder.Configuration);
 
         var host = builder.Build();

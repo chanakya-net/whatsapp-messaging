@@ -190,22 +190,16 @@ public sealed class RabbitMqReadinessProbe : IRabbitMqReadinessProbe
 
 public sealed class PostgresReadinessProbe : IPostgresReadinessProbe
 {
-    private readonly string? _connectionString;
+    private readonly NpgsqlDataSource _dataSource;
 
-    public PostgresReadinessProbe(IConfiguration configuration)
+    public PostgresReadinessProbe(NpgsqlDataSource dataSource)
     {
-        _connectionString = configuration.GetConnectionString("DefaultConnection");
+        _dataSource = dataSource;
     }
 
     public async Task<bool> IsReadyAsync(CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_connectionString))
-        {
-            return false;
-        }
-
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         return connection.State == System.Data.ConnectionState.Open;
     }
 }

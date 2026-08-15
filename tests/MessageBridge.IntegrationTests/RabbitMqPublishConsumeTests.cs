@@ -120,15 +120,12 @@ public sealed class RabbitMqPublishConsumeTests(IntegrationEnvironmentFixture fi
         {
             var database = await MigratedDatabaseScenario.CreateAsync(fixture);
             var connectionString = database.DbContext.Database.GetConnectionString()!;
-            var settings = new Dictionary<string, string?>
-            {
-                ["ConnectionStrings:DefaultConnection"] = connectionString,
-                ["MESSAGEBRIDGE_CONNECTION_STRING"] = connectionString,
-                ["RabbitMq:ConnectionString"] = fixture.GetRabbitMqConnectionString(),
-                ["MessageBridge:Topology:EnvironmentPrefix"] =
-                    IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix(),
-                ["MessageBridge:ProcessingHistory:RecoveryEnabled"] = "false"
-            };
+            var settings = IntegrationEnvironmentFixture.CreateDatabaseSettings(connectionString);
+            settings.Add("RabbitMq:ConnectionString", fixture.GetRabbitMqConnectionString());
+            settings.Add(
+                "MessageBridge:Topology:EnvironmentPrefix",
+                IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix());
+            settings.Add("MessageBridge:ProcessingHistory:RecoveryEnabled", "false");
             var whatsAppSender = new TrackingWhatsAppSender();
             var emailSender = new TrackingEmailSender();
             var builder = Host.CreateApplicationBuilder();

@@ -189,6 +189,21 @@ public sealed class IntegrationEnvironmentFixture : IAsyncLifetime
     /// <summary>Raw RabbitMQ connection string, for tests that need to connect to the broker.</summary>
     public string GetRabbitMqConnectionString() => _rabbitMq!.GetConnectionString();
 
+    public static Dictionary<string, string?> CreateDatabaseSettings(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        return new Dictionary<string, string?>
+        {
+            ["Database:Host"] = builder.Host,
+            ["Database:Port"] = builder.Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["Database:Database"] = builder.Database,
+            ["Database:Username"] = builder.Username,
+            ["Database:Password"] = builder.Password,
+            ["Database:UseEntraAuth"] = "false",
+            ["Database:MaxPoolSize"] = "12"
+        };
+    }
+
     /// <summary>Returns the depth of a queue with the exact topology name.</summary>
     public async Task<int> GetQueueDepthAsync(string queueName)
     {
