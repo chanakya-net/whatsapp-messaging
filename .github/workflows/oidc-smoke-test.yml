@@ -1,0 +1,172 @@
+name: Azure OIDC scope smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Identity boundary to verify
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - shared
+          - dev
+          - prod
+
+permissions:
+  contents: read
+
+jobs:
+  shared:
+    name: Shared identity boundaries
+    if: ${{ inputs.target == 'all' || inputs.target == 'shared' }}
+    runs-on: ubuntu-latest
+    environment: shared
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Sign in to Azure with shared identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_SHARED }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Prove shared allow and deny boundaries
+        env:
+          ALLOWED_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP_SHARED }}
+          DENIED_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP_DEV }}
+        run: |
+          set -Eeuo pipefail
+          denial_log=$(mktemp)
+          trap 'rm -f "$denial_log"' EXIT
+
+          if ! az group show --name "$ALLOWED_RESOURCE_GROUP" --only-show-errors --output none >/dev/null 2>&1; then
+            printf '### Shared OIDC smoke\n- allowed_scope: shared (read_failed)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if az group show --name "$DENIED_RESOURCE_GROUP" --only-show-errors --output none >/dev/null 2>"$denial_log"; then
+            printf '### Shared OIDC smoke\n- allowed_scope: shared (read_succeeded)\n- denied_scope: dev (unexpected_success)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if grep -Eq 'ResourceNotFound|ResourceGroupNotFound' "$denial_log"; then
+            printf '### Shared OIDC smoke\n- allowed_scope: shared (read_succeeded)\n- denied_scope: dev (inconclusive_missing_resource)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if grep -Eq 'AuthorizationFailed|AuthorizationDenied|Forbidden|does not have authorization' "$denial_log"; then
+            printf '### Shared OIDC smoke\n- allowed_scope: shared (read_succeeded)\n- denied_scope: dev (authorization_denied)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          printf '### Shared OIDC smoke\n- allowed_scope: shared (read_succeeded)\n- denied_scope: dev (unexpected_failure)\n' >>"$GITHUB_STEP_SUMMARY"
+          exit 1
+
+  dev:
+    name: Development identity boundaries
+    if: ${{ inputs.target == 'all' || inputs.target == 'dev' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Sign in to Azure with development identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEV }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Prove development allow and deny boundaries
+        env:
+          ALLOWED_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP_DEV }}
+          DENIED_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP_PROD }}
+        run: |
+          set -Eeuo pipefail
+          denial_log=$(mktemp)
+          trap 'rm -f "$denial_log"' EXIT
+
+          if ! az group show --name "$ALLOWED_RESOURCE_GROUP" --only-show-errors --output none >/dev/null 2>&1; then
+            printf '### Development OIDC smoke\n- allowed_scope: dev (read_failed)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if az group show --name "$DENIED_RESOURCE_GROUP" --only-show-errors --output none >/dev/null 2>"$denial_log"; then
+            printf '### Development OIDC smoke\n- allowed_scope: dev (read_succeeded)\n- denied_scope: prod (unexpected_success)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if grep -Eq 'ResourceNotFound|ResourceGroupNotFound' "$denial_log"; then
+            printf '### Development OIDC smoke\n- allowed_scope: dev (read_succeeded)\n- denied_scope: prod (inconclusive_missing_resource)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if grep -Eq 'AuthorizationFailed|AuthorizationDenied|Forbidden|does not have authorization' "$denial_log"; then
+            printf '### Development OIDC smoke\n- allowed_scope: dev (read_succeeded)\n- denied_scope: prod (authorization_denied)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          printf '### Development OIDC smoke\n- allowed_scope: dev (read_succeeded)\n- denied_scope: prod (unexpected_failure)\n' >>"$GITHUB_STEP_SUMMARY"
+          exit 1
+
+  prod:
+    name: Production identity boundaries
+    if: ${{ inputs.target == 'all' || inputs.target == 'prod' }}
+    runs-on: ubuntu-latest
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Sign in to Azure with production identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PROD }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Prove production allow and deny boundaries
+        env:
+          ALLOWED_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP_PROD }}
+          DENIED_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP_DEV }}
+        run: |
+          set -Eeuo pipefail
+          denial_log=$(mktemp)
+          trap 'rm -f "$denial_log"' EXIT
+
+          if ! az group show --name "$ALLOWED_RESOURCE_GROUP" --only-show-errors --output none >/dev/null 2>&1; then
+            printf '### Production OIDC smoke\n- allowed_scope: prod (read_failed)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if az group show --name "$DENIED_RESOURCE_GROUP" --only-show-errors --output none >/dev/null 2>"$denial_log"; then
+            printf '### Production OIDC smoke\n- allowed_scope: prod (read_succeeded)\n- denied_scope: dev (unexpected_success)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if grep -Eq 'ResourceNotFound|ResourceGroupNotFound' "$denial_log"; then
+            printf '### Production OIDC smoke\n- allowed_scope: prod (read_succeeded)\n- denied_scope: dev (inconclusive_missing_resource)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if grep -Eq 'AuthorizationFailed|AuthorizationDenied|Forbidden|does not have authorization' "$denial_log"; then
+            printf '### Production OIDC smoke\n- allowed_scope: prod (read_succeeded)\n- denied_scope: dev (authorization_denied)\n' >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          printf '### Production OIDC smoke\n- allowed_scope: prod (read_succeeded)\n- denied_scope: dev (unexpected_failure)\n' >>"$GITHUB_STEP_SUMMARY"
+          exit 1
