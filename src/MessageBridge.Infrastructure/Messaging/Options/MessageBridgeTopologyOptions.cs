@@ -14,6 +14,9 @@ public sealed class MessageBridgeTopologyOptions
     /// </summary>
     public string EnvironmentPrefix { get; set; } = string.Empty;
 
+    /// <summary>Whether exchanges and queues survive broker restarts.</summary>
+    public bool Durable { get; set; } = true;
+
     /// <summary>Computes the durable topic exchange name for a given base name.</summary>
     public string ExchangeName(string baseName) => ApplyPrefix(baseName);
 
