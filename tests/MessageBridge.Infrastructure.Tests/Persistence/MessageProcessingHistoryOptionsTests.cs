@@ -19,7 +19,6 @@ public sealed class MessageProcessingHistoryOptionsTests
         options.RecoveryEnabled.ShouldBeTrue();
         options.StaleThresholdMinutes.ShouldBe(30);
         options.CleanupEnabled.ShouldBeFalse();
-        options.CleanupRetentionHours.ShouldBe(24);
         options.CleanupBatchSize.ShouldBe(500);
         options.CleanupIntervalMilliseconds.ShouldBe(1_000);
     }
@@ -33,7 +32,6 @@ public sealed class MessageProcessingHistoryOptionsTests
                 ["MessageBridge:ProcessingHistory:RecoveryEnabled"] = "false",
                 ["MessageBridge:ProcessingHistory:StaleThresholdMinutes"] = "45",
                 ["MessageBridge:ProcessingHistory:CleanupEnabled"] = "true",
-                ["MessageBridge:ProcessingHistory:CleanupRetentionHours"] = "48",
                 ["MessageBridge:ProcessingHistory:CleanupBatchSize"] = "1000"
             })
             .Build();
@@ -44,7 +42,6 @@ public sealed class MessageProcessingHistoryOptionsTests
         options.RecoveryEnabled.ShouldBeFalse();
         options.StaleThresholdMinutes.ShouldBe(45);
         options.CleanupEnabled.ShouldBeTrue();
-        options.CleanupRetentionHours.ShouldBe(48);
         options.CleanupBatchSize.ShouldBe(1000);
     }
 
@@ -91,17 +88,6 @@ public sealed class MessageProcessingHistoryOptionsTests
     }
 
     [Fact]
-    public void CleanupRetentionHours_Accepts_Wide_Range()
-    {
-        var options = new MessageProcessingHistoryOptions
-        {
-            CleanupRetentionHours = 730
-        };
-
-        options.CleanupRetentionHours.ShouldBe(730);
-    }
-
-    [Fact]
     public void CleanupBatchSize_Accepts_Large_Values()
     {
         var options = new MessageProcessingHistoryOptions
@@ -134,6 +120,23 @@ public sealed class MessageProcessingHistoryOptionsTests
     public void ProductionRetentionHours_Defaults_To_168()
     {
         var options = new MessageProcessingHistoryOptions();
+        options.ProductionRetentionHours.ShouldBe(168);
+    }
+
+    [Fact]
+    public void Legacy_CleanupRetentionHours_Configuration_Key_Is_Ignored()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["MessageBridge:ProcessingHistory:CleanupRetentionHours"] = "48"
+            })
+            .Build();
+
+        var options = new MessageProcessingHistoryOptions();
+        config.GetSection(MessageProcessingHistoryOptions.SectionName).Bind(options);
+
+        options.DevelopmentRetentionHours.ShouldBe(24);
         options.ProductionRetentionHours.ShouldBe(168);
     }
 

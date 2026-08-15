@@ -127,6 +127,8 @@ WHERE PublishedAtUtc IS NOT NULL
 
 Processing history cleanup is environment-aware and preserves failed/rejected records indefinitely.
 
+> **Migration note:** the `CleanupRetentionHours` setting under `MessageBridge:ProcessingHistory` has been removed. It is superseded by `DevelopmentRetentionHours` and `ProductionRetentionHours`. Any existing `MessageBridge__ProcessingHistory__CleanupRetentionHours` environment variable or config key is now ignored; set the environment-specific values below instead.
+
 Configuration via `MessageBridge:ProcessingHistory`:
 
 | Setting | Default (Dev) | Default (Prod) | Description |

@@ -14,9 +14,6 @@ public sealed class MessageProcessingHistoryOptions
 
     public bool CleanupEnabled { get; set; }
 
-    [Range(1, 3_650)]
-    public int CleanupRetentionHours { get; set; } = 24;
-
     [Range(1, 10_000)]
     public int CleanupBatchSize { get; set; } = 500;
 
