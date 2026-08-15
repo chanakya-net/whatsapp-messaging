@@ -41,6 +41,34 @@ services.AddMessageBridgeOutboxPublisher<AppDbContext>(opts =>
 
 If a message still fails after the configured retry attempts, it remains unpublished and will be picked up again on the next poll cycle. There is no `Status` column in the outbox table.
 
+## Rate Limiting
+
+The worker enforces per-tenant, per-channel rate limits on email and WhatsApp message delivery.
+
+Configuration via `MessageBridge:RateLimiting`:
+
+| Setting | Default | Description |
+|---------|---------|---|
+| `WhatsAppPermitsPerWindow` | `60` | Maximum WhatsApp messages per window |
+| `EmailPermitsPerWindow` | `60` | Maximum email messages per window |
+| `WindowSizeSeconds` | `60` | Rate limit window duration in seconds |
+
+Example:
+
+```json
+{
+  "MessageBridge": {
+    "RateLimiting": {
+      "WhatsAppPermitsPerWindow": 60,
+      "EmailPermitsPerWindow": 60,
+      "WindowSizeSeconds": 60
+    }
+  }
+}
+```
+
+**Replicas and Correctness:** The in-memory rate limiter maintains state per replica. Correctness requires **single-replica deployment**: set Container Apps `min_replicas = max_replicas = 1`. Multi-replica deployments will not coordinate rate limits across instances and will exceed the per-tenant, per-channel ceiling. Exceeding the limit returns a transient error; clients should retry with backoff.
+
 ## Outbox Table
 
 The outbox entity is mapped to `MessageBridgeOutboxMessages` with these columns:

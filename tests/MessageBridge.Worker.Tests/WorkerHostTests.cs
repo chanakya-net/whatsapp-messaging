@@ -247,20 +247,13 @@ public sealed class WorkerHostTests
     }
 
     [Fact]
-    public void Host_Fails_To_Start_When_Runtime_Dependencies_Are_Missing()
+    public void Host_Starts_Successfully_With_All_Infrastructure_Registered()
     {
         using var factory = BuildWorkerFactory(ValidRabbitMqSettings());
 
-        var exception = Assert.Throws<InvalidOperationException>(() => factory.CreateClient());
+        var client = factory.CreateClient();
 
-        exception.Message.ShouldContain("Unable to resolve service for type");
-        new[]
-        {
-            nameof(IWhatsAppMessageSender),
-            nameof(IEmailConfirmationSender),
-            nameof(ITenantConfigurationProvider),
-            nameof(IProviderRateLimiter)
-        }.Any(exception.Message.Contains).ShouldBeTrue(exception.Message);
+        client.ShouldNotBeNull();
     }
 
     private static MessageBridgeWorkerFactory BuildWorkerFactory(
