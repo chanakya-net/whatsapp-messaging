@@ -234,9 +234,10 @@ plan_phase() {
 restore_phase() {
   trap cleanup_firewall EXIT HUP INT TERM
   load_targets
+  require_cmd az
+  require_cmd psql
   resolve_operator_ip
   resolve_operator_principal
-  require_cmd az psql
   restore_to_point_in_time
   open_temporary_firewall
   load_operator_auth
@@ -247,9 +248,10 @@ restore_phase() {
 verify_phase() {
   trap cleanup_firewall EXIT HUP INT TERM
   load_targets
+  require_cmd az
+  require_cmd psql
   resolve_operator_ip
   resolve_operator_principal
-  require_cmd az psql
   open_temporary_firewall
   load_operator_auth
   verify_schema_and_data

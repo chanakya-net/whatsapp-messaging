@@ -27,6 +27,7 @@ assert_equals() {
 setup_harness() {
   TEST_DIR=$(mktemp -d)
   FAKE_BIN="$TEST_DIR/bin"
+  BASH_BIN=$(command -v bash)
   CALL_LOG="$TEST_DIR/calls.log"
   STDOUT_FILE="$TEST_DIR/stdout"
   STDERR_FILE="$TEST_DIR/stderr"
@@ -38,6 +39,9 @@ setup_harness() {
   export DB_RESTORE_STATE_DIR="$STATE_DIR"
   export FAKE_ACCESS_TOKEN='synthetic-token-must-never-appear'
   create_fake_commands
+  ln -s "$BASH_BIN" "$FAKE_BIN/bash"
+  ln -s "$(command -v date)" "$FAKE_BIN/date"
+  ln -s "$(command -v dirname)" "$FAKE_BIN/dirname"
 }
 
 create_fake_commands() {
@@ -368,6 +372,24 @@ test_verify_processing_timestamp_query() {
   grep -E 'MAX.*created' "$CALL_LOG" >/dev/null || fail 'must query for MAX timestamp'
 }
 
+test_restore_and_verify_require_psql_before_azure_calls() {
+  local command
+  for command in restore verify; do
+    reset_harness
+    rm -f "$FAKE_BIN/psql"
+    if RESTORED_SERVER='psql-messagebridge-drill-042-20260816T120000Z' \
+      PATH="$FAKE_BIN" \
+      MESSAGEBRIDGE_RESTORE_SERIAL=042 \
+      MESSAGEBRIDGE_RESTORE_POINTTIME='2026-08-16T12:00:00Z' \
+      MESSAGEBRIDGE_OPERATOR_IP=203.0.113.42 \
+      "$BASH_BIN" "$RESTORE_DRILL" "$command" >"$STDOUT_FILE" 2>"$STDERR_FILE"; then
+      fail "$command must reject a missing psql command"
+    fi
+    assert_contains 'required command not found: psql' "$STDERR_FILE" 'missing psql error not reported'
+    [[ ! -s "$CALL_LOG" ]] || fail "$command must check for psql before Azure calls"
+  done
+}
+
 # Run all tests
 setup_harness
 test_input_validation_serial_format
@@ -392,5 +414,6 @@ test_firewall_targets_restored_server_not_source
 test_firewall_opens_after_restore_creates_target
 test_verify_latest_migration_exact
 test_verify_processing_timestamp_query
+test_restore_and_verify_require_psql_before_azure_calls
 
 printf '%s\n' 'All restore-drill tests passed.'
