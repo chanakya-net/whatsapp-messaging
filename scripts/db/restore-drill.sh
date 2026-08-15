@@ -26,6 +26,13 @@ validate_ipv4() {
   ((total > 0))
 }
 
+validate_temporary_server_name() {
+  local server_name=$1
+  local expected_prefix="psql-messagebridge-drill-${RESTORE_SERIAL}-"
+  [[ "$server_name" == "${expected_prefix}"* ]] \
+    || fail "restored server name must follow drill naming contract: expected prefix ${expected_prefix}"
+}
+
 load_targets() {
   RESTORE_SERIAL=${MESSAGEBRIDGE_RESTORE_SERIAL:-}
   [[ "$RESTORE_SERIAL" =~ ^[0-9]{3}$ ]] \
@@ -39,6 +46,7 @@ load_targets() {
   SOURCE_SERVER="psql-messagebridge-shared-cin-${RESTORE_SERIAL}"
   SOURCE_HOST="${SOURCE_SERVER}.postgres.database.azure.com"
   RESTORE_SERVER_NAME="${RESTORED_SERVER:-psql-messagebridge-drill-${RESTORE_SERIAL}-$(date -u +%Y%m%dT%H%M%SZ)}"
+  validate_temporary_server_name "$RESTORE_SERVER_NAME"
   RESTORE_HOST="${RESTORE_SERVER_NAME}.postgres.database.azure.com"
   FIREWALL_RULE="messagebridge-db-restore-drill-${RESTORE_SERIAL}"
   DRILL_DB="messagebridge_prod"
@@ -65,7 +73,7 @@ cleanup_firewall() {
   if [[ "$FIREWALL_CLEANUP_ARMED" == true ]]; then
     if ! az postgres flexible-server firewall-rule delete \
       --resource-group "$RESOURCE_GROUP" \
-      --name "$SOURCE_SERVER" \
+      --name "$RESTORE_SERVER_NAME" \
       --rule-name "$FIREWALL_RULE" \
       --yes --only-show-errors --output none; then
       printf 'ERROR: temporary operator firewall rule cleanup failed\n' >&2
@@ -80,11 +88,21 @@ open_temporary_firewall() {
   FIREWALL_CLEANUP_ARMED=true
   az postgres flexible-server firewall-rule create \
     --resource-group "$RESOURCE_GROUP" \
-    --name "$SOURCE_SERVER" \
+    --name "$RESTORE_SERVER_NAME" \
     --rule-name "$FIREWALL_RULE" \
     --start-ip-address "$OPERATOR_IP" \
     --end-ip-address "$OPERATOR_IP" \
     --only-show-errors --output none
+}
+
+resolve_operator_principal() {
+  OPERATOR_PRINCIPAL=${MESSAGEBRIDGE_OPERATOR_PRINCIPAL:-}
+  if [[ -z "$OPERATOR_PRINCIPAL" ]]; then
+    OPERATOR_PRINCIPAL=$(az account show --query user.name --output tsv) \
+      || fail 'could not resolve the Entra operator principal'
+  fi
+  [[ -n "$OPERATOR_PRINCIPAL" && "$OPERATOR_PRINCIPAL" != *$'\n'* ]] \
+    || fail 'Entra operator principal must be one non-empty value'
 }
 
 load_operator_auth() {
@@ -148,29 +166,29 @@ verify_schema_and_data() {
   local migration_check
   migration_check=$(psql \
     --host="$RESTORE_HOST" \
-    --username="__pgadmin" \
+    --username="$OPERATOR_PRINCIPAL" \
     --dbname="$DRILL_DB" \
     --no-password \
     --tuples-only \
-    --command="SELECT COUNT(*) FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" LIKE '%InitialCreate%';" 2>&1) \
+    --command="SELECT \"MigrationId\" FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" = '20260706100312_InitialCreate';" 2>&1) \
     || fail 'migration history query failed'
 
-  [[ "$migration_check" =~ [1-9] ]] || fail 'InitialCreate migration not found in restored database'
-  printf 'Migration history verified: InitialCreate present.\n'
+  [[ "$migration_check" =~ 20260706100312_InitialCreate ]] || fail 'latest migration (20260706100312_InitialCreate) not found in restored database'
+  printf 'Migration history verified: latest migration (20260706100312_InitialCreate) present.\n'
 
   printf 'Verifying processing data recency...\n'
   local data_check
   data_check=$(psql \
     --host="$RESTORE_HOST" \
-    --username="__pgadmin" \
+    --username="$OPERATOR_PRINCIPAL" \
     --dbname="$DRILL_DB" \
     --no-password \
     --tuples-only \
-    --command="SELECT COUNT(*) FROM \"message_processing_history\";" 2>&1) \
+    --command="SELECT MAX(\"created_at\") FROM \"message_processing_history\";" 2>&1) \
     || fail 'processing history query failed'
 
-  [[ "$data_check" =~ [0-9] ]] || fail 'could not query processing history'
-  printf 'Processing history verified: %s records found.\n' "${data_check// /}"
+  [[ -n "$data_check" ]] || fail 'could not query processing history timestamp'
+  printf 'Processing history verified: latest record timestamp: %s.\n' "${data_check// /}"
 
   printf 'Verification complete.\n'
 }
@@ -202,6 +220,7 @@ restore_phase() {
   trap cleanup_firewall EXIT HUP INT TERM
   load_targets
   resolve_operator_ip
+  resolve_operator_principal
   require_cmd az psql
   open_temporary_firewall
   load_operator_auth
@@ -214,6 +233,7 @@ verify_phase() {
   trap cleanup_firewall EXIT HUP INT TERM
   load_targets
   resolve_operator_ip
+  resolve_operator_principal
   require_cmd az psql
   open_temporary_firewall
   load_operator_auth
@@ -222,11 +242,7 @@ verify_phase() {
 }
 
 destroy_phase() {
-  trap cleanup_firewall EXIT HUP INT TERM
   load_targets
-  resolve_operator_ip
-  require_cmd az
-  open_temporary_firewall
   destroy_temporary_server
   elapsed_time
 }

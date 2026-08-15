@@ -97,6 +97,12 @@ if [[ "${FAKE_PSQL_BLOCK_CALL:-}" == "$count" ]]; then
 fi
 
 case "$*" in
+  *"__EFMigrationsHistory"*"20260706100312_InitialCreate"*)
+    printf '20260706100312_InitialCreate\n'
+    ;;
+  *"message_processing_history"*"MAX"*)
+    printf '2026-08-16T11:30:00+00:00\n'
+    ;;
   *"__EFMigrationsHistory"*)
     printf '(1 row)\n'
     ;;
@@ -115,7 +121,7 @@ FAKE_PSQL
 reset_harness() {
   : >"$CALL_LOG"
   find "$STATE_DIR" -type f -delete
-  unset FAKE_PSQL_FAIL_CALL FAKE_PSQL_BLOCK_CALL FAKE_FIREWALL_CREATE_EXIT FAKE_AZ_DELETE_EXIT FAKE_AZ_RESTORE_EXIT
+  unset FAKE_PSQL_FAIL_CALL FAKE_PSQL_BLOCK_CALL FAKE_FIREWALL_CREATE_EXIT FAKE_AZ_DELETE_EXIT FAKE_AZ_RESTORE_EXIT RESTORED_SERVER
 }
 
 invoke_restore_drill() {
@@ -259,6 +265,40 @@ test_firewall_cleanup_on_error() {
   assert_contains 'firewall-rule delete' "$CALL_LOG" 'firewall cleanup not attempted'
 }
 
+test_reject_production_server_as_restore_target() {
+  reset_harness
+  export RESTORED_SERVER="psql-messagebridge-shared-cin-042"
+  if invoke_restore_drill restore >"$STDOUT_FILE" 2>"$STDERR_FILE"; then
+    fail 'restore must reject production server name'
+  fi
+  grep -Eq 'ERROR|reject|invalid.*name' "$STDERR_FILE" || fail 'rejection not reported'
+}
+
+test_firewall_targets_restored_server_not_source() {
+  reset_harness
+  invoke_restore_drill restore || fail 'restore must succeed'
+
+  if grep 'firewall.*--name.*psql-messagebridge-shared-cin' "$CALL_LOG"; then
+    fail 'firewall must not target source production server'
+  fi
+
+  grep 'firewall.*--name.*psql-messagebridge-drill' "$CALL_LOG" >/dev/null || fail 'firewall must target restored server'
+}
+
+test_verify_latest_migration_exact() {
+  reset_harness
+  invoke_restore_drill verify || fail 'verify must succeed'
+
+  grep -Fq '20260706100312_InitialCreate' "$CALL_LOG" || fail 'must verify exact latest migration'
+}
+
+test_verify_processing_timestamp_query() {
+  reset_harness
+  invoke_restore_drill verify || fail 'verify must succeed'
+
+  grep -E 'MAX.*created' "$CALL_LOG" || fail 'must query for MAX timestamp'
+}
+
 # Run all tests
 setup_harness
 test_input_validation_serial_format
@@ -274,5 +314,9 @@ test_destroy_with_confirmation_deletes_server
 test_destroy_cleanup_fails_reported
 test_elapsed_time_reported
 test_firewall_cleanup_on_error
+test_reject_production_server_as_restore_target
+test_firewall_targets_restored_server_not_source
+test_verify_latest_migration_exact
+test_verify_processing_timestamp_query
 
 printf '%s\n' 'All restore-drill tests passed.'
