@@ -1,13 +1,11 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Runtime.InteropServices;
 using MessageBridge.IntegrationTests.Fixtures;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Shouldly;
 using Xunit;
-using static System.Runtime.InteropServices.RuntimeInformation;
 
 namespace MessageBridge.IntegrationTests.Persistence;
 
@@ -17,14 +15,6 @@ public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
 {
     private const string DockerfilePath = "src/MessageBridge.Worker/Dockerfile.migrate";
     private const string TestImageName = "ghcr.io/chanakya-net/whatsapp-messaging/migrate-contract-test";
-    private const string DotnetSdkAmd64Digest =
-        "5657c5f725f2e8923f31b2eb9d743662f2e0be50a2bee41de685fc9f12ae68ef";
-    private const string DotnetSdkArm64Digest =
-        "a62dc5f34a6f466228bda13acb9329b0abea86f837114dc2e34a7c48561b8dc6";
-    private const string DotnetAspNetAmd64Digest =
-        "282c2e90dd35c6a720b744f4848d3dce9de4bfb404011270cc8ee63f07e56c36";
-    private const string DotnetAspNetArm64Digest =
-        "1971bacaf56d9a7c5cef1fac21fcffe8615d33586738fb4168d0d8a2a2f4e857";
     private const string TableName = "message_processing_history";
     private const string CreatedAtIndexName = "IX_message_processing_history_created_at";
     private const string MessageIdTypeIndexName = "IX_message_processing_history_message_id_message_type";
@@ -32,6 +22,7 @@ public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
 
     private readonly IntegrationEnvironmentFixture _fixture = fixture;
     private static readonly string RepoRoot = LocateRepoRoot();
+    private static readonly string[] MigrationPlatforms = ["linux/amd64", "linux/arm64"];
     private static readonly Dictionary<string, string> BuiltImages = new();
     private static readonly SemaphoreSlim MigrationImageBuildGate = new(1, 1);
 
@@ -75,7 +66,7 @@ public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
 
     public static IEnumerable<object[]> SupportedMigrationPlatforms()
     {
-        yield return [GetSupportedHostPlatform()];
+        return MigrationPlatforms.Select(platform => new object[] { platform });
     }
 
     [Theory]
@@ -98,11 +89,11 @@ public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
         }
     }
 
-    [Fact]
-    public async Task Migration_image_fails_with_invalid_connection_credentials()
+    [Theory]
+    [MemberData(nameof(SupportedMigrationPlatforms))]
+    public async Task Migration_image_fails_with_invalid_connection_credentials(string platform)
     {
         var (connectionString, databaseName) = await _fixture.CreateDatabaseAsync();
-        var platform = GetSupportedHostPlatform();
         var imageTag = await BuildMigrationImageAsync(platform);
 
         var invalidCredentials = new NpgsqlConnectionStringBuilder(connectionString)
@@ -166,14 +157,6 @@ public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
             }
 
             var imageTag = $"{TestImageName}:{platform.Replace('/', '-')}";
-            var (sdkDigest, aspnetDigest) = platform switch
-            {
-                "linux/amd64" => (DotnetSdkAmd64Digest, DotnetAspNetAmd64Digest),
-                "linux/arm64" => (DotnetSdkArm64Digest, DotnetAspNetArm64Digest),
-                _ => throw new PlatformNotSupportedException(
-                    $"Target platform '{platform}' is not supported for migration image build.")
-            };
-
             var result = await RunCommandAsync(
                 "docker",
                 [
@@ -182,12 +165,6 @@ public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
                     "--platform",
                     platform,
                     "--load",
-                    "--build-arg",
-                    $"DOTNET_SDK_IMAGE_DIGEST={sdkDigest}",
-                    "--build-arg",
-                    $"DOTNET_ASPNET_IMAGE_DIGEST={aspnetDigest}",
-                    "--build-arg",
-                    $"TARGET_PLATFORM={platform}",
                     "-f",
                     Path.Combine(RepoRoot, DockerfilePath),
                     "-t",
@@ -256,17 +233,6 @@ public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
         || host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase)
         || host.Equals("::1", StringComparison.Ordinal)
         || host.Equals("[::1]", StringComparison.Ordinal);
-
-    private static string GetSupportedHostPlatform()
-    {
-        return ProcessArchitecture switch
-        {
-            Architecture.X64 => "linux/amd64",
-            Architecture.Arm64 => "linux/arm64",
-            _ => throw new PlatformNotSupportedException(
-                $"Test host architecture '{ProcessArchitecture}' is not supported for migration image verification.")
-        };
-    }
 
     private static async Task<MigrationRunResult> RunCommandAsync(
         string fileName,

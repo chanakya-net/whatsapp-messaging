@@ -4,20 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 DOCKERFILE_PATH="$REPO_ROOT/src/MessageBridge.Worker/Dockerfile.migrate"
 IMAGE_PREFIX="ghcr.io/chanakya-net/whatsapp-messaging/migrate-contract-test"
-HOST_ARCH="$(uname -m)"
-DOTNET_SDK_AMD64_DIGEST=5657c5f725f2e8923f31b2eb9d743662f2e0be50a2bee41de685fc9f12ae68ef
-DOTNET_SDK_ARM64_DIGEST=a62dc5f34a6f466228bda13acb9329b0abea86f837114dc2e34a7c48561b8dc6
-DOTNET_ASPNET_AMD64_DIGEST=282c2e90dd35c6a720b744f4848d3dce9de4bfb404011270cc8ee63f07e56c36
-DOTNET_ASPNET_ARM64_DIGEST=1971bacaf56d9a7c5cef1fac21fcffe8615d33586738fb4168d0d8a2a2f4e857
-
-if [ "$HOST_ARCH" = "x86_64" ] || [ "$HOST_ARCH" = "amd64" ]; then
-  PLATFORMS=(linux/amd64)
-elif [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
-  PLATFORMS=(linux/arm64)
-else
-  printf '%s\n' "Unsupported host architecture: $HOST_ARCH" >&2
-  exit 1
-fi
+PLATFORMS=(linux/amd64 linux/arm64)
 
 if [ ! -f "$DOCKERFILE_PATH" ]; then
   printf '%s\n' "Missing migration Dockerfile: $DOCKERFILE_PATH" >&2
@@ -45,8 +32,17 @@ validate_dockerfile() {
     exit 1
   fi
 
-  if ! grep -q 'ARG TARGET_PLATFORM' "$DOCKERFILE_PATH"; then
-    printf '%s\n' 'Dockerfile.migrate must include TARGET_PLATFORM for architecture-aware builds.' >&2
+  if ! grep -q '^ARG BUILDARCH$' "$DOCKERFILE_PATH" \
+      || ! grep -q '^ARG TARGETARCH$' "$DOCKERFILE_PATH"; then
+    printf '%s\n' 'Dockerfile.migrate must declare Buildx build and target architectures.' >&2
+    exit 1
+  fi
+
+  if ! grep -q 'case "${BUILDARCH}"' "$DOCKERFILE_PATH" \
+      || ! grep -q 'case "${TARGETARCH}"' "$DOCKERFILE_PATH" \
+      || ! grep -q 'FROM --platform=\$BUILDPLATFORM .*sdk:10.0@sha256:' "$DOCKERFILE_PATH" \
+      || ! grep -q 'FROM --platform=\$TARGETPLATFORM .*aspnet:10.0@sha256:' "$DOCKERFILE_PATH"; then
+    printf '%s\n' 'Dockerfile.migrate must build natively and bundle for the target architecture.' >&2
     exit 1
   fi
 
@@ -62,6 +58,18 @@ assert_non_root() {
   user="$(docker inspect "$image" --format '{{.Config.User}}')"
   if [ -z "$user" ] || [ "$user" = "root" ] || [ "$user" = "0" ]; then
     printf '%s\n' "Image $image runs as root." >&2
+    exit 1
+  fi
+}
+
+assert_target_architecture() {
+  local image="$1"
+  local platform="$2"
+  local architecture
+
+  architecture="$(docker inspect "$image" --format '{{.Architecture}}')"
+  if [ "$architecture" != "${platform#linux/}" ]; then
+    printf '%s\n' "Image $image has architecture $architecture, expected $platform." >&2
     exit 1
   fi
 }
@@ -104,36 +112,17 @@ assert_bundle_help() {
 build_and_check_platform() {
   local platform="$1"
   local tag="$2"
-  local sdk_digest
-  local aspnet_digest
-
-  case "$platform" in
-    linux/amd64)
-      sdk_digest="$DOTNET_SDK_AMD64_DIGEST"
-      aspnet_digest="$DOTNET_ASPNET_AMD64_DIGEST"
-      ;;
-    linux/arm64)
-      sdk_digest="$DOTNET_SDK_ARM64_DIGEST"
-      aspnet_digest="$DOTNET_ASPNET_ARM64_DIGEST"
-      ;;
-    *)
-      printf '%s\n' "Unsupported target platform: $platform" >&2
-      exit 1
-      ;;
-  esac
 
   printf '%s\n' "Building migration image for $platform as $tag..."
   docker buildx build \
     --platform "$platform" \
     --load \
-    --build-arg DOTNET_SDK_IMAGE_DIGEST="$sdk_digest" \
-    --build-arg DOTNET_ASPNET_IMAGE_DIGEST="$aspnet_digest" \
-    --build-arg TARGET_PLATFORM="$platform" \
     -f "$DOCKERFILE_PATH" \
     -t "$tag" \
     "$REPO_ROOT"
 
   assert_non_root "$tag"
+  assert_target_architecture "$tag" "$platform"
   assert_entrypoint_and_absence "$tag"
   assert_bundle_help "$tag" "$platform"
 }
