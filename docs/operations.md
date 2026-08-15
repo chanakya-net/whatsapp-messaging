@@ -208,6 +208,12 @@ Operators should expect duplicate delivery under retries and restarts.
 
 The worker exposes structured logs, OpenTelemetry traces, and optional Prometheus metrics.
 
+### Provider delivery status
+
+The WhatsApp and email adapters currently acknowledge requests as `simulated`; they do not contact a provider. Treat `delivery_status=simulated` in logs and metadata as an explicit simulation marker, not proof of delivery. The provider message ID is synthetic, and recipient or credential data must not be added to logs or metadata.
+
+`MessageBridge:Providers:WhatsAppProviderName` and `MessageBridge:Providers:EmailProviderName` are reserved diagnostic labels only. Values supplied through Azure Key Vault or another secrets provider remain inactive placeholders and do not enable delivery. Real provider adapters are out of scope.
+
 ```csharp
 var result = await publisher.PublishWhatsAppMessageAsync(new SendWhatsAppMessageRequest
 {

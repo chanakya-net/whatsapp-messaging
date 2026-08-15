@@ -33,6 +33,7 @@ public sealed class PlaceholderEmailConfirmationSenderTests
         var expectedProvider = options.Value.EmailProviderName;
 
         metadata["provider"].ShouldBe(expectedProvider);
+        metadata["delivery_status"].ShouldBe("simulated");
         metadata["message_id"].ShouldBe("msg-email-001");
         metadata["template_name"].ShouldBe("confirm-email");
         metadata["tenant_id"].ShouldBe("tenant-1");
@@ -41,6 +42,9 @@ public sealed class PlaceholderEmailConfirmationSenderTests
         var firstLog = logger.Messages.ShouldHaveSingleItem();
         firstLog.ShouldNotContain("user@example.com");
         firstLog.ShouldNotContain("token-xyz");
+        firstLog.ShouldContain("simulated");
+        metadata.Values.Any(value => value?.ToString() == "user@example.com").ShouldBeFalse();
+        metadata.Values.Any(value => value?.ToString() == "token-xyz").ShouldBeFalse();
     }
 
     [Fact]

@@ -17,7 +17,7 @@ public sealed class PlaceholderWhatsAppMessageSender(
         var metadata = options.Value.BuildWhatsAppMetadata(message, tenantId);
         using var _ = logger.BeginScope(metadata);
         logger.LogInformation(
-            "Simulating WhatsApp delivery for message {MessageId} through {Provider}.",
+            "Simulated WhatsApp delivery acknowledgement for message {MessageId} through {Provider}; no provider delivery was attempted.",
             message.MessageId,
             metadata[RecipientMetadataKeys.ProviderKey]);
         return Task.FromResult<ErrorOr<Success>>(new Success());

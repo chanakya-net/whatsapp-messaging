@@ -150,6 +150,12 @@ Messages are written to the outbox table atomically with your business transacti
 - **Idempotent** — message IDs and correlation IDs generated automatically
 - **Observable** — structured logging, distributed tracing, health endpoints
 
+### Provider delivery status
+
+The registered WhatsApp and email senders are placeholders. A successful sender result is a `simulated` acknowledgement only; it does not mean a provider accepted or delivered a message. Logs and metadata mark these results with `delivery_status=simulated`, and do not include recipient or credential data.
+
+`MessageBridge:Providers:WhatsAppProviderName` and `MessageBridge:Providers:EmailProviderName` are reserved diagnostic labels. Loading values for them from Azure Key Vault or another secrets provider does not enable delivery. Real provider adapters and provider API integration are out of scope.
+
 ## Important Security Notes
 
 ⚠️ **Credentials & Secrets**

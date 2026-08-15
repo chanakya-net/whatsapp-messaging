@@ -34,6 +34,7 @@ public sealed class PlaceholderWhatsAppMessageSenderTests
         var expectedProvider = options.Value.WhatsAppProviderName;
 
         metadata["provider"].ShouldBe(expectedProvider);
+        metadata["delivery_status"].ShouldBe("simulated");
         metadata["message_id"].ShouldBe("msg-001");
         metadata["template_name"].ShouldBe("welcome");
         metadata["tenant_id"].ShouldBe("tenant-1");
@@ -44,6 +45,8 @@ public sealed class PlaceholderWhatsAppMessageSenderTests
         firstLog.ShouldNotContain("+1 (555) 123-4567");
         firstLog.ShouldNotContain("plan");
         firstLog.ShouldContain("msg-001");
+        firstLog.ShouldContain("simulated");
+        metadata.Values.Any(value => value?.ToString() == "+1 (555) 123-4567").ShouldBeFalse();
     }
 
     [Fact]
