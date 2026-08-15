@@ -1,8 +1,13 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Runtime.InteropServices;
 using MessageBridge.IntegrationTests.Fixtures;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Shouldly;
 using Xunit;
+using static System.Runtime.InteropServices.RuntimeInformation;
 
 namespace MessageBridge.IntegrationTests.Persistence;
 
@@ -10,12 +15,25 @@ namespace MessageBridge.IntegrationTests.Persistence;
 [Collection(IntegrationTestCollection.Name)]
 public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
 {
+    private const string DockerfilePath = "src/MessageBridge.Worker/Dockerfile.migrate";
+    private const string TestImageName = "ghcr.io/chanakya-net/whatsapp-messaging/migrate-contract-test";
+    private const string DotnetSdkAmd64Digest =
+        "5657c5f725f2e8923f31b2eb9d743662f2e0be50a2bee41de685fc9f12ae68ef";
+    private const string DotnetSdkArm64Digest =
+        "a62dc5f34a6f466228bda13acb9329b0abea86f837114dc2e34a7c48561b8dc6";
+    private const string DotnetAspNetAmd64Digest =
+        "282c2e90dd35c6a720b744f4848d3dce9de4bfb404011270cc8ee63f07e56c36";
+    private const string DotnetAspNetArm64Digest =
+        "1971bacaf56d9a7c5cef1fac21fcffe8615d33586738fb4168d0d8a2a2f4e857";
     private const string TableName = "message_processing_history";
     private const string CreatedAtIndexName = "IX_message_processing_history_created_at";
     private const string MessageIdTypeIndexName = "IX_message_processing_history_message_id_message_type";
     private const string StatusIndexName = "IX_message_processing_history_status";
 
     private readonly IntegrationEnvironmentFixture _fixture = fixture;
+    private static readonly string RepoRoot = LocateRepoRoot();
+    private static readonly Dictionary<string, string> BuiltImages = new();
+    private static readonly SemaphoreSlim MigrationImageBuildGate = new(1, 1);
 
     [Fact]
     public async Task Migrations_apply_to_empty_database()
@@ -53,6 +71,248 @@ public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
             await dbContext.DisposeAsync();
             await _fixture.DropDatabaseAsync(databaseName);
         }
+    }
+
+    public static IEnumerable<object[]> SupportedMigrationPlatforms()
+    {
+        yield return [GetSupportedHostPlatform()];
+    }
+
+    [Theory]
+    [MemberData(nameof(SupportedMigrationPlatforms))]
+    public async Task Migration_image_applies_migrations_for_supported_architectures(string platform)
+    {
+        var (connectionString, databaseName) = await _fixture.CreateDatabaseAsync();
+        var imageTag = await BuildMigrationImageAsync(platform);
+
+        try
+        {
+            var runResult = await RunMigrationContainerAsync(platform, imageTag, connectionString);
+            runResult.ExitCode.ShouldBe(0, runResult.StandardError);
+
+            await VerifyMigrationSchemaAsync(connectionString);
+        }
+        finally
+        {
+            await _fixture.DropDatabaseAsync(databaseName);
+        }
+    }
+
+    [Fact]
+    public async Task Migration_image_fails_with_invalid_connection_credentials()
+    {
+        var (connectionString, databaseName) = await _fixture.CreateDatabaseAsync();
+        var platform = GetSupportedHostPlatform();
+        var imageTag = await BuildMigrationImageAsync(platform);
+
+        var invalidCredentials = new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            Password = "wrong-password",
+        }.ConnectionString;
+
+        try
+        {
+            var runResult = await RunMigrationContainerAsync(platform, imageTag, invalidCredentials);
+            runResult.ExitCode.ShouldNotBe(0, runResult.StandardError);
+        }
+        finally
+        {
+            await _fixture.DropDatabaseAsync(databaseName);
+        }
+    }
+
+    private static async Task VerifyMigrationSchemaAsync(string connectionString)
+    {
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        var columns = await GetColumnsAsync(connection);
+        columns.ShouldContainKeyAndValue("id", "uuid");
+        columns.ShouldContainKeyAndValue("message_id", "text");
+        columns.ShouldContainKeyAndValue("message_type", "text");
+        columns.ShouldContainKeyAndValue("status", "text");
+        columns.ShouldContainKeyAndValue("payload_hash", "text");
+        columns.ShouldContainKeyAndValue("provider", "text");
+        columns.ShouldContainKeyAndValue("provider_metadata", "jsonb");
+        columns.ShouldContainKeyAndValue("failure_reason", "text");
+        columns.ShouldContainKeyAndValue("attempt_count", "integer");
+        columns.ShouldContainKeyAndValue("created_at", "timestamp with time zone");
+        columns.ShouldContainKeyAndValue("updated_at", "timestamp with time zone");
+        columns.ShouldContainKeyAndValue("processed_at", "timestamp with time zone");
+
+        var indexNames = await GetIndexNamesAsync(connection);
+        indexNames.ShouldContain(StatusIndexName);
+        indexNames.ShouldContain(CreatedAtIndexName);
+
+        var hasUniqueMessageIdTypeConstraint = await HasUniqueIndexAsync(
+            connection,
+            MessageIdTypeIndexName);
+        hasUniqueMessageIdTypeConstraint.ShouldBeTrue();
+    }
+
+    private static async Task<string> BuildMigrationImageAsync(string platform)
+    {
+        if (BuiltImages.TryGetValue(platform, out var existing))
+        {
+            return existing;
+        }
+
+        await MigrationImageBuildGate.WaitAsync();
+        try
+        {
+            if (BuiltImages.TryGetValue(platform, out existing))
+            {
+                return existing;
+            }
+
+            var imageTag = $"{TestImageName}:{platform.Replace('/', '-')}";
+            var (sdkDigest, aspnetDigest) = platform switch
+            {
+                "linux/amd64" => (DotnetSdkAmd64Digest, DotnetAspNetAmd64Digest),
+                "linux/arm64" => (DotnetSdkArm64Digest, DotnetAspNetArm64Digest),
+                _ => throw new PlatformNotSupportedException(
+                    $"Target platform '{platform}' is not supported for migration image build.")
+            };
+
+            var result = await RunCommandAsync(
+                "docker",
+                [
+                    "buildx",
+                    "build",
+                    "--platform",
+                    platform,
+                    "--load",
+                    "--build-arg",
+                    $"DOTNET_SDK_IMAGE_DIGEST={sdkDigest}",
+                    "--build-arg",
+                    $"DOTNET_ASPNET_IMAGE_DIGEST={aspnetDigest}",
+                    "--build-arg",
+                    $"TARGET_PLATFORM={platform}",
+                    "-f",
+                    Path.Combine(RepoRoot, DockerfilePath),
+                    "-t",
+                    imageTag,
+                    RepoRoot,
+                ]);
+
+            result.ExitCode.ShouldBe(0, result.StandardError);
+            BuiltImages[platform] = imageTag;
+            return imageTag;
+        }
+        finally
+        {
+            MigrationImageBuildGate.Release();
+        }
+    }
+
+    private static async Task<MigrationRunResult> RunMigrationContainerAsync(
+        string platform,
+        string imageTag,
+        string connectionString)
+    {
+        var parsedConnection = new NpgsqlConnectionStringBuilder(connectionString);
+        var databaseHost = GetMigrationContainerHost(parsedConnection.Host ?? "localhost");
+        var values = new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+            ["Database__Host"] = databaseHost,
+            ["Database__Port"] = parsedConnection.Port.ToString(CultureInfo.InvariantCulture),
+            ["Database__Database"] = parsedConnection.Database,
+            ["Database__Username"] = parsedConnection.Username,
+            ["Database__Password"] = parsedConnection.Password,
+            ["Database__UseEntraAuth"] = "false",
+            ["Database__MaxPoolSize"] = "4",
+        };
+
+        var args = new List<string>
+        {
+            "run",
+            "--rm",
+            "--platform",
+            platform,
+            "--name",
+            $"migration-it-{Guid.NewGuid():N}"
+        };
+
+        if (databaseHost == "host.docker.internal")
+        {
+            args.AddRange(["--add-host", "host.docker.internal:host-gateway"]);
+        }
+
+        foreach (var (name, value) in values)
+        {
+            args.AddRange(["--env", $"{name}={value}"]);
+        }
+
+        args.Add(imageTag);
+
+        return await RunCommandAsync("docker", args);
+    }
+
+    private static string GetMigrationContainerHost(string host)
+        => IsLoopbackHost(host) ? "host.docker.internal" : host;
+
+    private static bool IsLoopbackHost(string host)
+        => host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+        || host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase)
+        || host.Equals("::1", StringComparison.Ordinal)
+        || host.Equals("[::1]", StringComparison.Ordinal);
+
+    private static string GetSupportedHostPlatform()
+    {
+        return ProcessArchitecture switch
+        {
+            Architecture.X64 => "linux/amd64",
+            Architecture.Arm64 => "linux/arm64",
+            _ => throw new PlatformNotSupportedException(
+                $"Test host architecture '{ProcessArchitecture}' is not supported for migration image verification.")
+        };
+    }
+
+    private static async Task<MigrationRunResult> RunCommandAsync(
+        string fileName,
+        IReadOnlyList<string> arguments)
+    {
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo(fileName)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            },
+        };
+
+        foreach (var arg in arguments)
+        {
+            process.StartInfo.ArgumentList.Add(arg);
+        }
+
+        process.Start();
+
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+
+        await process.WaitForExitAsync();
+        var output = await outputTask;
+        var error = await errorTask;
+
+        return new MigrationRunResult(process.ExitCode, output, error);
+    }
+
+    private static string LocateRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "MessageBridge.sln")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new DirectoryNotFoundException("Could not locate repository root from test binary path.");
     }
 
     private static async Task<Dictionary<string, string>> GetColumnsAsync(NpgsqlConnection connection)
@@ -105,4 +365,9 @@ public sealed class MigrationTests(IntegrationEnvironmentFixture fixture)
 
         return await command.ExecuteScalarAsync() is true;
     }
+
+    private sealed record MigrationRunResult(
+        int ExitCode,
+        string StandardOutput,
+        string StandardError);
 }

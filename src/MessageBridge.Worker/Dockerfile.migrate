@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1.7
+
+ARG TARGET_PLATFORM
+ARG DOTNET_SDK_IMAGE_DIGEST=5657c5f725f2e8923f31b2eb9d743662f2e0be50a2bee41de685fc9f12ae68ef
+ARG DOTNET_ASPNET_IMAGE_DIGEST=1971bacaf56d9a7c5cef1fac21fcffe8615d33586738fb4168d0d8a2a2f4e857
+
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0@sha256:${DOTNET_SDK_IMAGE_DIGEST} AS build
+ARG TARGET_PLATFORM
+WORKDIR /src
+
+COPY . .
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl unzip \
+    && case "${TARGET_PLATFORM}" in \
+        linux/amd64) protoc_arch=x86_64 ;; \
+        linux/arm64) protoc_arch=aarch_64 ;; \
+        *) echo "Unsupported TARGET_PLATFORM=$TARGET_PLATFORM" >&2 && exit 1 ;; \
+        esac \
+    && curl -fLsSo /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v28.0/protoc-28.0-linux-${protoc_arch}.zip" \
+    && unzip -q /tmp/protoc.zip -d /tmp/protoc \
+    && rm -rf /var/lib/apt/lists/* /tmp/protoc.zip \
+    && chmod +x /tmp/protoc/bin/protoc
+RUN rm -f global.json && DOTNET_NOLOGO=1 dotnet tool restore
+RUN case "${TARGET_PLATFORM}" in \
+    linux/amd64) migration_runtime=linux-x64 ;; \
+    linux/arm64) migration_runtime=linux-arm64 ;; \
+    *) echo "Unsupported TARGET_PLATFORM=$TARGET_PLATFORM" >&2 && exit 1 ;; \
+    esac \
+    && export PROTOC=/tmp/protoc/bin/protoc \
+    && Database__Host=localhost \
+    Database__Port=5432 \
+    Database__Database=messagebridge_dev \
+    Database__Username=dev \
+    Database__Password=dev \
+    Database__UseEntraAuth=false \
+    Database__MaxPoolSize=12 \
+    && \
+    DOTNET_NOLOGO=1 dotnet restore src/MessageBridge.Infrastructure/MessageBridge.Infrastructure.csproj --runtime "$migration_runtime" \
+    && \
+    DOTNET_NOLOGO=1 dotnet tool run dotnet-ef migrations bundle \
+      --project src/MessageBridge.Infrastructure/MessageBridge.Infrastructure.csproj \
+      --startup-project src/MessageBridge.Infrastructure/MessageBridge.Infrastructure.csproj \
+      --context MessageBridgeDbContext \
+      --self-contained \
+      --runtime "$migration_runtime" \
+      --configuration Release \
+      --output /out/migrate \
+      --force
+
+
+ARG TARGET_PLATFORM
+FROM --platform=$TARGET_PLATFORM mcr.microsoft.com/dotnet/aspnet:10.0@sha256:${DOTNET_ASPNET_IMAGE_DIGEST} AS runtime
+WORKDIR /app
+
+COPY --from=build /out/migrate /app/migrate
+RUN chmod +x /app/migrate
+USER 1000
+ENTRYPOINT ["/app/migrate"]
