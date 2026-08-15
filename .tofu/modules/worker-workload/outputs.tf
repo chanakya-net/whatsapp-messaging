@@ -38,6 +38,16 @@ output "migration_job_outbound_ip_addresses" {
   value       = toset(azurerm_container_app_job.migration.outbound_ip_addresses)
 }
 
+output "smoke_job_id" {
+  description = "Resource ID of the manually triggered smoke test job."
+  value       = azurerm_container_app_job.smoke.id
+}
+
+output "smoke_job_name" {
+  description = "Name of the manually triggered smoke test job."
+  value       = azurerm_container_app_job.smoke.name
+}
+
 output "alertable_resource_ids" {
   description = "Worker IDs eligible for downstream environment alerting."
   value       = toset([azurerm_container_app.worker.id])

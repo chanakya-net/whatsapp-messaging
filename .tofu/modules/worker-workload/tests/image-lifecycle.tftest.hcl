@@ -44,6 +44,8 @@ variables {
     digest     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   }
   migration_job_name = "mig-messagebridge-prod-cin-042"
+  smoke_job_name     = "smoke-messagebridge-prod-cin-042"
+  worker_fqdn        = "ca-messagebridge-prod-cin-042.cae-messagebridge-prod-cin-042.internal"
   migrator_identity = {
     resource_id  = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-migrator-prod-cin-042"
     principal_id = "00000000-0000-4000-8000-000000000005"

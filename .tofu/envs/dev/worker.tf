@@ -30,4 +30,8 @@ module "worker" {
   migrator_identity  = local.migrator_identity
   migration_database = local.migration_database
   migration_image    = var.migration_image
+
+  # Smoke job calls worker health endpoints through internal routing with no secrets.
+  smoke_job_name = local.smoke_job_name
+  worker_fqdn    = local.worker_fqdn
 }
