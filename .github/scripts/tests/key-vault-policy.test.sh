@@ -255,15 +255,20 @@ run_static_policy() {
   assert_absent 'resource[[:space:]]+"azurerm_key_vault_access_policy"|access_policy[[:space:]]*\{' 'Legacy Key Vault access policies are forbidden.' "${tf_files[@]}"
   assert_absent '/secrets/[a-z0-9-]+/[a-z0-9-]+' 'Versioned secret references are forbidden.' "${tf_files[@]}"
   assert_absent 'variable[[:space:]]+"[^"]*(password|credential|token|secret[_-]?value|connection[_-]?string|api[_-]?key|otlp[_-]?headers)[^"]*"' 'Secret-bearing OpenTofu inputs are forbidden.' "${tf_files[@]}"
-  assert_absent 'resource[[:space:]]+"azurerm_user_assigned_identity"' 'This slice must not duplicate runtime identities.' "${tf_files[@]}"
-  assert_absent '(migrator|apply_identity|workflow_identity)' 'Migrator and apply identities must have no vault role seam.' "${tf_files[@]}"
+  # Environment roots own exactly one runtime and one migrator workload identity; the reusable
+  # vault module still receives runtime metadata as an input and creates no identity itself.
+  assert_absent 'resource[[:space:]]+"azurerm_user_assigned_identity"' 'The vault module must not create identities.' "$module_dir"/*.tf
+  assert_count 2 '^resource "azurerm_user_assigned_identity"' "$dev_dir/identities.tf" 'Dev must own exactly the runtime and migrator identities.'
+  assert_count 2 '^resource "azurerm_user_assigned_identity"' "$prod_dir/identities.tf" 'Prod must own exactly the runtime and migrator identities.'
+  assert_absent '(migrator|apply_identity|workflow_identity)' 'Migrator and apply identities must have no vault role seam.' "$module_dir"/*.tf "$dev_dir/key-vault.tf" "$prod_dir/key-vault.tf"
+  assert_absent '(apply_identity|workflow_identity)' 'Apply and workflow identities must have no environment seam.' "${tf_files[@]}"
 
   assert_count 1 '^module "key_vault"' "$dev_dir/key-vault.tf" 'Dev must provision exactly one vault module.'
   assert_count 1 '^module "key_vault"' "$prod_dir/key-vault.tf" 'Prod must provision exactly one vault module.'
   assert_present 'environment[[:space:]]*=[[:space:]]*"dev"' "$dev_dir/locals.tf" 'Dev environment isolation is required.'
   assert_present 'environment[[:space:]]*=[[:space:]]*"prod"' "$prod_dir/locals.tf" 'Prod environment isolation is required.'
-  assert_present 'runtime_identity[[:space:]]*=[[:space:]]*var\.runtime_identity' "$dev_dir/key-vault.tf" 'Dev vault must use dependency-owned runtime identity metadata.'
-  assert_present 'runtime_identity[[:space:]]*=[[:space:]]*var\.runtime_identity' "$prod_dir/key-vault.tf" 'Prod vault must use dependency-owned runtime identity metadata.'
+  assert_present 'azurerm_user_assigned_identity\.runtime\.id' "$dev_dir/key-vault.tf" 'Dev vault must use the root-owned dev runtime identity.'
+  assert_present 'azurerm_user_assigned_identity\.runtime\.id' "$prod_dir/key-vault.tf" 'Prod vault must use the root-owned prod runtime identity.'
 }
 
 run_policy_tests() {

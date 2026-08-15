@@ -39,14 +39,6 @@ variable "repository" {
   }
 }
 
-variable "runtime_identity" {
-  description = "Dependency-owned prod runtime identity metadata; this root creates no identity."
-  type = object({
-    principal_id = string
-    resource_id  = string
-  })
-}
-
 variable "operator_identity" {
   description = "Non-secret metadata for the prod secret operator."
   type = object({
