@@ -74,25 +74,95 @@ assert_target_architecture() {
   fi
 }
 
+contains_disallowed_environment() {
+  local environment="$1"
+  local setting key
+
+  while IFS= read -r setting; do
+    [ -z "$setting" ] && continue
+    key="${setting%%=*}"
+
+    case "$key" in
+      RabbitMq__*|MESSAGEBRIDGE_CONNECTION_STRING|MESSAGEBRIDGE_ConnectionString|ConnectionStrings__*)
+        return 0
+        ;;
+    esac
+
+    if printf '%s\n' "$key" | grep -Eiq '(password|secret|token)'; then
+      return 0
+    fi
+  done <<< "$environment"
+
+  return 1
+}
+
+validate_runtime_metadata() {
+  local entrypoint="$1"
+  local cmdline="$2"
+  local environment="$3"
+
+  if [ "$entrypoint" != '["/app/migrate"]' ]; then
+    printf '%s\n' 'Entrypoint must equal ["/app/migrate"].' >&2
+    return 1
+  fi
+
+  if [ "$cmdline" != 'null' ] && [ "$cmdline" != '[]' ]; then
+    printf '%s\n' 'Cmd must be null or empty.' >&2
+    return 1
+  fi
+
+  if contains_disallowed_environment "$environment"; then
+    printf '%s\n' 'Environment contains worker or secret metadata.' >&2
+    return 1
+  fi
+}
+
+assert_runtime_metadata_contract_probes() {
+  if ! declare -F validate_runtime_metadata >/dev/null; then
+    printf '%s\n' 'Missing runtime metadata validator.' >&2
+    exit 1
+  fi
+
+  if ! validate_runtime_metadata '["/app/migrate"]' '[]' 'DOTNET_RUNNING_IN_CONTAINER=true'; then
+    printf '%s\n' 'Runtime metadata validation rejected the valid bundle-only contract.' >&2
+    exit 1
+  fi
+
+  if validate_runtime_metadata '["/app/migrate","unexpected"]' 'null' '' 2>/dev/null; then
+    printf '%s\n' 'Runtime metadata validation accepted an extra Entrypoint argument.' >&2
+    exit 1
+  fi
+
+  if validate_runtime_metadata '["/app/migrate"]' '["unexpected"]' '' 2>/dev/null; then
+    printf '%s\n' 'Runtime metadata validation accepted a non-empty Cmd.' >&2
+    exit 1
+  fi
+
+  if validate_runtime_metadata '["/app/migrate"]' 'null' 'Database__Password=embedded-value' 2>/dev/null; then
+    printf '%s\n' 'Runtime metadata validation accepted Database__Password.' >&2
+    exit 1
+  fi
+
+  if validate_runtime_metadata '["/app/migrate"]' '[]' 'MigrationApiToken=embedded-value' 2>/dev/null; then
+    printf '%s\n' 'Runtime metadata validation accepted a token-style environment key.' >&2
+    exit 1
+  fi
+
+  if validate_runtime_metadata '["/app/migrate"]' 'null' 'ClientSecret=embedded-value' 2>/dev/null; then
+    printf '%s\n' 'Runtime metadata validation accepted a secret-style environment key.' >&2
+    exit 1
+  fi
+}
+
 assert_entrypoint_and_absence() {
   local image="$1"
-  local entrypoint cmdline
+  local entrypoint cmdline environment
   entrypoint="$(docker inspect "$image" --format '{{json .Config.Entrypoint}}')"
   cmdline="$(docker inspect "$image" --format '{{json .Config.Cmd}}')"
+  environment="$(docker inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}')"
 
-  if ! echo "$entrypoint" | grep -q '"/app/migrate"'; then
-    printf '%s\n' "Image $image must execute only the migration bundle." >&2
-    exit 1
-  fi
-
-  if echo "$entrypoint $cmdline" | grep -q 'MessageBridge.Worker'; then
-    printf '%s\n' "Image $image must not include worker command paths." >&2
-    exit 1
-  fi
-
-  if docker inspect "$image" --format '{{range .Config.Env}}{{println .}}{{end}}' | \
-      grep -Eq 'RabbitMq__|MESSAGEBRIDGE_CONNECTION_STRING|MESSAGEBRIDGE_ConnectionString|ConnectionStrings__'; then
-    printf '%s\n' "Image $image contains disallowed worker/secret env metadata." >&2
+  if ! validate_runtime_metadata "$entrypoint" "$cmdline" "$environment"; then
+    printf '%s\n' "Image $image has invalid runtime metadata." >&2
     exit 1
   fi
 }
@@ -137,6 +207,7 @@ cleanup() {
 trap cleanup EXIT
 
 RUN_ID="build-$(date +%s)-${RANDOM:-0}"
+assert_runtime_metadata_contract_probes
 validate_dockerfile
 
 for platform in "${PLATFORMS[@]}"; do
