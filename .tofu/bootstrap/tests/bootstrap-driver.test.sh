@@ -29,12 +29,13 @@ assert_count() {
 make_fixture() {
   FIXTURE_DIR=$(mktemp -d)
   BIN_DIR="$FIXTURE_DIR/bin"
+  BOOTSTRAP_CONFIG_DIR="$FIXTURE_DIR/bootstrap"
   CALL_LOG="$FIXTURE_DIR/calls.log"
   STUB_STATE_DIR="$FIXTURE_DIR/state"
   OUTPUT_JSON="$FIXTURE_DIR/outputs.json"
-  mkdir -p "$BIN_DIR" "$STUB_STATE_DIR" "$FIXTURE_DIR/runtime"
+  mkdir -p "$BIN_DIR" "$BOOTSTRAP_CONFIG_DIR" "$STUB_STATE_DIR" "$FIXTURE_DIR/runtime"
   : >"$CALL_LOG"
-  export FIXTURE_DIR BIN_DIR CALL_LOG STUB_STATE_DIR OUTPUT_JSON
+  export FIXTURE_DIR BIN_DIR BOOTSTRAP_CONFIG_DIR CALL_LOG STUB_STATE_DIR OUTPUT_JSON
 }
 
 write_tofu_stub() {
@@ -43,7 +44,36 @@ write_tofu_stub() {
 set -Eeuo pipefail
 printf 'tofu %s\n' "$*" >>"$CALL_LOG"
 args=" $* "
-if [[ "$args" == *" plan "* ]]; then
+for arg in "$@"; do
+  [[ "$arg" != -chdir=* ]] || config_dir=${arg#-chdir=}
+done
+backend_configured() {
+  grep -Eq 'backend "[^"]+"' "$config_dir"/*.tf 2>/dev/null
+}
+if [[ "$args" == *" init "* ]]; then
+  if [[ "$args" == *" -migrate-state "* && "$args" == *" -reconfigure "* ]]; then
+    exit 36
+  fi
+  if [[ "$args" == *" -backend=false "* ]]; then
+    printf 'disabled\n' >"$STUB_STATE_DIR/backend-mode"
+  elif [[ "$args" == *" -migrate-state "* ]]; then
+    [[ $(cat "$STUB_STATE_DIR/backend-mode" 2>/dev/null) == local ]] || exit 37
+    backend_configured || exit 38
+    [[ ! -f "$STUB_STATE_DIR/fail-migration" ]] || exit 39
+    printf 'remote\n' >"$STUB_STATE_DIR/backend-mode"
+    touch "$STUB_STATE_DIR/remote-ready"
+  elif backend_configured; then
+    printf 'remote\n' >"$STUB_STATE_DIR/backend-mode"
+  else
+    printf 'local\n' >"$STUB_STATE_DIR/backend-mode"
+  fi
+elif [[ "$args" == *" plan "* ]]; then
+  backend_mode=$(cat "$STUB_STATE_DIR/backend-mode" 2>/dev/null || true)
+  if backend_configured; then
+    [[ "$backend_mode" == remote ]] || exit 40
+  else
+    [[ "$backend_mode" == local ]] || exit 41
+  fi
   for arg in "$@"; do
     if [[ "$arg" == -out=* ]]; then
       : >"${arg#-out=}"
@@ -52,9 +82,6 @@ if [[ "$args" == *" plan "* ]]; then
 elif [[ "$args" == *" apply "* ]]; then
   touch "$STUB_STATE_DIR/remote-ready"
   printf '{"version":4}\n' >"$BOOTSTRAP_RUNTIME_DIR/terraform.tfstate"
-elif [[ "$args" == *" init "* && "$args" == *" -migrate-state "* ]]; then
-  [[ ! -f "$STUB_STATE_DIR/fail-migration" ]] || exit 37
-  touch "$STUB_STATE_DIR/remote-ready"
 elif [[ "$args" == *" state pull "* ]]; then
   printf '{"version":4}\n'
 elif [[ "$args" == *" output -json "* ]]; then
@@ -141,6 +168,7 @@ JSON
 
 run_bootstrap() {
   PATH="$BIN_DIR:$PATH" \
+    BOOTSTRAP_DIR_OVERRIDE="$BOOTSTRAP_CONFIG_DIR" \
     BOOTSTRAP_RUNTIME_DIR="$FIXTURE_DIR/runtime" \
     MESSAGEBRIDGE_BOOTSTRAP_SERIAL=042 \
     STUB_STATE_DIR="$STUB_STATE_DIR" CALL_LOG="$CALL_LOG" OUTPUT_JSON="$OUTPUT_JSON" \
@@ -157,14 +185,18 @@ prepare_fixture() {
 
 saved_plan_happy_path() {
   run_bootstrap plan
-  assert_contains "$CALL_LOG" "init -backend=false"
+  assert_contains "$CALL_LOG" "init -reconfigure -input=false"
+  assert_not_contains "$CALL_LOG" "-backend=false"
+  [[ ! -e "$BOOTSTRAP_CONFIG_DIR/backend_override.tf" ]] || fail "local plan configured a remote backend"
   assert_contains "$CALL_LOG" "plan -input=false -out=$FIXTURE_DIR/runtime/bootstrap.plan"
   assert_contains "$CALL_LOG" "show $FIXTURE_DIR/runtime/bootstrap.plan"
   assert_not_contains "$CALL_LOG" " apply "
 
   printf 'apply messagebridge 042\n' | run_bootstrap apply
   assert_contains "$CALL_LOG" "apply -input=false $FIXTURE_DIR/runtime/bootstrap.plan"
-  assert_contains "$CALL_LOG" "init -input=false -migrate-state -force-copy -reconfigure"
+  assert_contains "$CALL_LOG" "init -input=false -migrate-state -force-copy"
+  assert_not_contains "$CALL_LOG" "-migrate-state -force-copy -reconfigure"
+  assert_contains "$BOOTSTRAP_CONFIG_DIR/backend_override.tf" 'backend "azurerm" {}'
   assert_contains "$CALL_LOG" "state pull"
 
   : >"$CALL_LOG"

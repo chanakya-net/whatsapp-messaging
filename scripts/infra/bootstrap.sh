@@ -3,8 +3,9 @@ set -Eeuo pipefail
 
 readonly EXPECTED_REPOSITORY="chanakya-net/whatsapp-messaging"
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-BOOTSTRAP_DIR="$REPO_ROOT/.tofu/bootstrap"
+BOOTSTRAP_DIR="${BOOTSTRAP_DIR_OVERRIDE:-$REPO_ROOT/.tofu/bootstrap}"
 BOOTSTRAP_RUNTIME_DIR="${BOOTSTRAP_RUNTIME_DIR:-$BOOTSTRAP_DIR}"
+BACKEND_OVERRIDE_FILE="$BOOTSTRAP_DIR/backend_override.tf"
 PLAN_FILE="$BOOTSTRAP_RUNTIME_DIR/bootstrap.plan"
 MIGRATION_MARKER="$BOOTSTRAP_RUNTIME_DIR/.bootstrap-migration-required"
 
@@ -62,10 +63,16 @@ remote_backend_exists() {
 }
 
 init_local_backend() {
-  tofu -chdir="$BOOTSTRAP_DIR" init -backend=false -reconfigure -input=false
+  rm -f "$BACKEND_OVERRIDE_FILE"
+  tofu -chdir="$BOOTSTRAP_DIR" init -reconfigure -input=false
+}
+
+write_remote_backend_override() {
+  printf 'terraform {\n  backend "azurerm" {}\n}\n' >"$BACKEND_OVERRIDE_FILE"
 }
 
 init_remote_backend() {
+  write_remote_backend_override
   tofu -chdir="$BOOTSTRAP_DIR" init -input=false -reconfigure \
     -backend-config="resource_group_name=$STATE_RESOURCE_GROUP" \
     -backend-config="storage_account_name=$STATE_ACCOUNT" \
@@ -103,7 +110,8 @@ plan_bootstrap() {
 
 migrate_local_state() {
   : >"$MIGRATION_MARKER"
-  if ! tofu -chdir="$BOOTSTRAP_DIR" init -input=false -migrate-state -force-copy -reconfigure \
+  write_remote_backend_override
+  if ! tofu -chdir="$BOOTSTRAP_DIR" init -input=false -migrate-state -force-copy \
     -backend-config="resource_group_name=$STATE_RESOURCE_GROUP" \
     -backend-config="storage_account_name=$STATE_ACCOUNT" \
     -backend-config="container_name=bootstrap" \
@@ -208,14 +216,13 @@ configure_github() {
 
 verify_bootstrap() {
   require_cmd tofu
-  require_cmd rg
   tofu -chdir="$BOOTSTRAP_DIR" fmt -check
   tofu -chdir="$BOOTSTRAP_DIR" init -backend=false -input=false
   tofu -chdir="$BOOTSTRAP_DIR" validate
   tofu -chdir="$BOOTSTRAP_DIR" test
   bash "$BOOTSTRAP_DIR/tests/bootstrap-driver.test.sh"
   bash "$BOOTSTRAP_DIR/tests/oidc-smoke-workflow.test.sh"
-  if rg -n --glob '*.tf' '(client_secret|application_password|storage_account_key|connection_string)' "$BOOTSTRAP_DIR"; then
+  if grep -REn --include='*.tf' '(client_secret|application_password|storage_account_key|connection_string)' "$BOOTSTRAP_DIR"; then
     fail "secret-bearing OpenTofu field detected"
   fi
 }
