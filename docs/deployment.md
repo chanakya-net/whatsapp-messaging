@@ -39,6 +39,16 @@ EXPOSE 8080
 ENTRYPOINT ["dotnet", "MessageBridge.Worker.dll"]
 ```
 
+### Migration image (manual only)
+
+The migration image `ghcr.io/chanakya-net/whatsapp-messaging/migrate` is intended to be
+invoked only by the manual Azure Container Apps migration job.
+
+- It is a dedicated container that executes the EF Core migration bundle for
+  `MessageBridgeDbContext`.
+- Worker startup must not call `Database.Migrate*` or reference this migration image.
+- The migration image should never be used as the worker container image or run as part of normal worker lifecycle.
+
 ### Image Size Optimization
 
 - Use base image: `mcr.microsoft.com/dotnet/aspnet:10` (not SDK)
@@ -337,20 +347,25 @@ For extra security, pin the CloudAMQP certificate:
 
 ### Migrations
 
-Apply EF Core migrations on startup (or as a separate pre-deployment step):
+Apply EF Core migrations as a dedicated pre-deployment action.
+Worker startup must never call `Database.Migrate*`.
 
-```csharp
-// In Program.cs (Startup)
-using (var scope = app.Services.CreateScope())
-{
-    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    await db.Database.MigrateAsync();
-}
+The migration path is:
 
-app.Run();
+1. Build and publish the dedicated migration container image:
+   `ghcr.io/chanakya-net/whatsapp-messaging/migrate`
+2. Run the container in a manual Azure Container Apps migration job.
+3. Only start the worker Deployment after migration completes successfully.
+
+During migration, pass non-secret `Database__*` settings (for example `Database__Host`, `Database__Database`, `Database__Username`, `Database__Password`) through job environment and secrets.
+
+This image contains only the generated migration bundle and does not launch `MessageBridge.Worker`.
+
+```bash
+dotnet ef database update --project src/MessageBridge.Infrastructure --startup-project src/MessageBridge.Worker --connection "Host=prod-postgres;Database=messagebridge;Username=app;Password=...;"
 ```
 
-Or run migrations separately:
+For the current deployment process, avoid keeping schema drift at startup; migrations are handled only by the migration job.
 
 ```bash
 dotnet ef database update --project src/MessageBridge.Infrastructure --startup-project src/MessageBridge.Worker --connection "Host=prod-postgres;Database=messagebridge;Username=app;Password=...;"
