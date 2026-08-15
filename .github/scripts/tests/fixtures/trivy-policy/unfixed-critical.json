@@ -1,0 +1,19 @@
+{
+  "SchemaVersion": 2,
+  "Results": [
+    {
+      "Target": "fixture-image",
+      "Class": "os-pkgs",
+      "Type": "debian",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-UNFIXED-CRITICAL",
+          "PkgName": "fixture-package",
+          "InstalledVersion": "1.0.0",
+          "FixedVersion": "",
+          "Severity": "CRITICAL"
+        }
+      ]
+    }
+  ]
+}

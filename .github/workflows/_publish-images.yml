@@ -1,0 +1,219 @@
+name: Publish container images
+
+on:
+  workflow_call:
+    outputs:
+      worker-digest:
+        description: Verified worker image sha256 digest without the algorithm prefix.
+        value: ${{ jobs.verify.outputs.worker-digest }}
+      migrate-digest:
+        description: Verified migration image sha256 digest without the algorithm prefix.
+        value: ${{ jobs.verify.outputs.migrate-digest }}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan-images:
+    name: Scan ${{ matrix.image }} image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: worker
+            dockerfile: src/MessageBridge.Worker/Dockerfile
+          - image: migrate
+            dockerfile: src/MessageBridge.Worker/Dockerfile.migrate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Build local scan image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          tags: messagebridge-${{ matrix.image }}:publish-scan
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image }}
+      - name: Prepare scan report directory
+        run: mkdir -p artifacts/trivy
+      - name: Record vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: messagebridge-${{ matrix.image }}:publish-scan
+          format: table
+          output: artifacts/trivy/${{ matrix.image }}.txt
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0"
+      - name: Block fixable HIGH and CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: messagebridge-${{ matrix.image }}:publish-scan
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Summarize vulnerability report
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.image }} image vulnerability report"
+            echo '```text'
+            cat "artifacts/trivy/${{ matrix.image }}.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload vulnerability report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.image }}-publish-trivy-report
+          path: artifacts/trivy/${{ matrix.image }}.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish-worker:
+    name: Publish worker image
+    needs: scan-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.resolve.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push worker image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: src/MessageBridge.Worker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/chanakya-net/whatsapp-messaging/worker:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          push: true
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+      - name: Resolve and verify worker digest
+        id: resolve
+        env:
+          IMAGE_TAG: ghcr.io/chanakya-net/whatsapp-messaging/worker:${{ github.sha }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          build_digest="$BUILD_DIGEST"
+          [[ "$build_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          resolved_digest="$(docker buildx imagetools inspect "$IMAGE_TAG" \
+            --format '{{json .Manifest}}' | jq -er '.digest')"
+          [ "$resolved_digest" = "$build_digest" ] || {
+            echo "Tag resolved to $resolved_digest, expected $build_digest." >&2
+            exit 1
+          }
+          echo "digest=${build_digest#sha256:}" >> "$GITHUB_OUTPUT"
+
+  publish-migrate:
+    name: Publish migration image
+    needs: scan-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.resolve.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push migration image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: src/MessageBridge.Worker/Dockerfile.migrate
+          platforms: linux/amd64,linux/arm64
+          tags: ghcr.io/chanakya-net/whatsapp-messaging/migrate:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          push: true
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=migrate
+          cache-to: type=gha,mode=max,scope=migrate
+      - name: Resolve and verify migration digest
+        id: resolve
+        env:
+          IMAGE_TAG: ghcr.io/chanakya-net/whatsapp-messaging/migrate:${{ github.sha }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          build_digest="$BUILD_DIGEST"
+          [[ "$build_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          resolved_digest="$(docker buildx imagetools inspect "$IMAGE_TAG" \
+            --format '{{json .Manifest}}' | jq -er '.digest')"
+          [ "$resolved_digest" = "$build_digest" ] || {
+            echo "Tag resolved to $resolved_digest, expected $build_digest." >&2
+            exit 1
+          }
+          echo "digest=${build_digest#sha256:}" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify public immutable images
+    needs: [publish-worker, publish-migrate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      worker-digest: ${{ needs.publish-worker.outputs.digest }}
+      migrate-digest: ${{ needs.publish-migrate.outputs.digest }}
+    steps:
+      - name: Checkout verification script
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Verify anonymous worker pull
+        env:
+          WORKER_DIGEST: ${{ needs.publish-worker.outputs.digest }}
+        run: >-
+          bash .github/scripts/verify-anonymous-image.sh
+          ghcr.io/chanakya-net/whatsapp-messaging/worker "$WORKER_DIGEST"
+      - name: Verify anonymous migration pull
+        env:
+          MIGRATE_DIGEST: ${{ needs.publish-migrate.outputs.digest }}
+        run: >-
+          bash .github/scripts/verify-anonymous-image.sh
+          ghcr.io/chanakya-net/whatsapp-messaging/migrate "$MIGRATE_DIGEST"

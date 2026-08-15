@@ -103,6 +103,8 @@ jobs:
     name: Integration tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      DOTNET_ENVIRONMENT: Test
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -220,3 +222,160 @@ jobs:
           dotnet pack src/MessageBridge.Contracts/MessageBridge.Contracts.csproj -c "$BUILD_CONFIGURATION" --no-restore -o artifacts/packages
           dotnet pack src/MessageBridge.Publisher/MessageBridge.Publisher.csproj -c "$BUILD_CONFIGURATION" --no-restore -o artifacts/packages
           dotnet pack src/MessageBridge.Publisher.EntityFrameworkCore/MessageBridge.Publisher.EntityFrameworkCore.csproj -c "$BUILD_CONFIGURATION" --no-restore -o artifacts/packages
+
+  workflow-contracts:
+    name: Workflow contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Validate image delivery contracts
+        run: |
+          bash .github/scripts/tests/validation-image-jobs-contract.test.sh
+          bash .github/scripts/tests/publish-images-workflow-contract.test.sh
+          bash .github/scripts/tests/verify-anonymous-image.test.sh
+          bash .github/scripts/tests/trivy-policy.test.sh
+          bash .github/scripts/tests/publish-packages-independence.test.sh
+
+  worker-image:
+    name: Worker image contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Run worker image contract
+        run: bash .github/scripts/tests/worker-image-contract.test.sh
+      - name: Build worker image for supported platforms
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: src/MessageBridge.Worker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+      - name: Build local worker scan image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: src/MessageBridge.Worker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: messagebridge-worker:validation
+          push: false
+          cache-from: type=gha,scope=worker
+      - name: Prepare worker scan report directory
+        run: mkdir -p artifacts/trivy
+      - name: Record worker vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: messagebridge-worker:validation
+          format: table
+          output: artifacts/trivy/worker.txt
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0"
+      - name: Block fixable worker vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: messagebridge-worker:validation
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Summarize worker vulnerabilities
+        if: always()
+        run: |
+          {
+            echo '### Worker image vulnerability report'
+            echo '```text'
+            cat artifacts/trivy/worker.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload worker vulnerability report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: worker-trivy-report
+          path: artifacts/trivy/worker.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+  migration-image:
+    name: Migration image contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Run migration image contract
+        run: bash .github/scripts/tests/migration-image-contract.test.sh
+      - name: Build migration image for supported platforms
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: src/MessageBridge.Worker/Dockerfile.migrate
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha,scope=migrate
+          cache-to: type=gha,mode=max,scope=migrate
+      - name: Build local migration scan image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: src/MessageBridge.Worker/Dockerfile.migrate
+          platforms: linux/amd64
+          load: true
+          tags: messagebridge-migrate:validation
+          push: false
+          cache-from: type=gha,scope=migrate
+      - name: Prepare migration scan report directory
+        run: mkdir -p artifacts/trivy
+      - name: Record migrate vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: messagebridge-migrate:validation
+          format: table
+          output: artifacts/trivy/migrate.txt
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "0"
+      - name: Block fixable migrate vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: messagebridge-migrate:validation
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Summarize migrate vulnerabilities
+        if: always()
+        run: |
+          {
+            echo '### Migration image vulnerability report'
+            echo '```text'
+            cat artifacts/trivy/migrate.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload migrate vulnerability report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: migrate-trivy-report
+          path: artifacts/trivy/migrate.txt
+          if-no-files-found: warn
+          retention-days: 14

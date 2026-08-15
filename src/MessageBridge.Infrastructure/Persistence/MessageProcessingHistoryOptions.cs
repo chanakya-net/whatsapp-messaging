@@ -33,6 +33,6 @@ public sealed class MessageProcessingHistoryOptions
         get => _eligibleStatusesForCleanup;
         set => _eligibleStatusesForCleanup = value is null
             ? []
-            : [..value.Where(s => s is ProcessingStatus.Completed or ProcessingStatus.Abandoned).Distinct()];
+            : [.. value.Where(s => s is ProcessingStatus.Completed or ProcessingStatus.Abandoned).Distinct()];
     }
 }
