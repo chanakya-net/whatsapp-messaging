@@ -92,7 +92,9 @@ Use broker tooling to inspect any dead-letter queues configured by your environm
 
 ## Cleanup and Retention
 
-Cleanup is controlled by these outbox options:
+### Outbox Cleanup
+
+Outbox cleanup is controlled by these options:
 
 - `CleanupEnabled`
 - `CleanupRetentionHours`
@@ -113,12 +115,85 @@ services.AddMessageBridgeOutboxCleanup<AppDbContext>(opts =>
 
 Cleanup removes rows whose `PublishedAtUtc` value is older than the configured retention window.
 
-### Manual Cleanup
+#### Manual Cleanup
 
 ```sql
 DELETE FROM MessageBridgeOutboxMessages
 WHERE PublishedAtUtc IS NOT NULL
   AND PublishedAtUtc < NOW() - INTERVAL '24 hours';
+```
+
+### Processing History Retention
+
+Processing history cleanup is environment-aware and preserves failed/rejected records indefinitely.
+
+> **Migration note:** the `CleanupRetentionHours` setting under `MessageBridge:ProcessingHistory` has been removed. It is superseded by `DevelopmentRetentionHours` and `ProductionRetentionHours`. Any existing `MessageBridge__ProcessingHistory__CleanupRetentionHours` environment variable or config key is now ignored; set the environment-specific values below instead.
+
+Configuration via `MessageBridge:ProcessingHistory`:
+
+| Setting | Default (Dev) | Default (Prod) | Description |
+|---------|---|---|---|
+| `CleanupEnabled` | `false` | `false` | Enable/disable processing history cleanup |
+| `DevelopmentRetentionHours` | `24` | `24` | Completed/Abandoned retention in development (≥1, ≤3650) |
+| `ProductionRetentionHours` | `168` | `168` | Completed/Abandoned retention in production, 7 days (≥1, ≤3650) |
+| `CleanupBatchSize` | `500` | `500` | Records per cleanup run (≥1, ≤10,000) |
+| `CleanupIntervalMilliseconds` | `1000` | `1000` | Cleanup run interval in ms (≥1, ≤3,600,000) |
+
+Behavior:
+
+- **Development** environment: removes Completed/Abandoned records older than 24 hours
+- **Production** environment: removes Completed/Abandoned records older than 168 hours (7 days)
+- **Failed** and **Rejected** records: preserved indefinitely (never removed)
+- **Processing/Received/other statuses**: preserved indefinitely
+
+Example configuration:
+
+```json
+{
+  "MessageBridge": {
+    "ProcessingHistory": {
+      "CleanupEnabled": true,
+      "DevelopmentRetentionHours": 24,
+      "ProductionRetentionHours": 168,
+      "CleanupBatchSize": 500,
+      "CleanupIntervalMilliseconds": 1000
+    }
+  }
+}
+```
+
+Enable via environment variables:
+
+```bash
+# Development
+export MessageBridge__ProcessingHistory__CleanupEnabled=true
+export MessageBridge__ProcessingHistory__DevelopmentRetentionHours=24
+
+# Production
+export MessageBridge__ProcessingHistory__CleanupEnabled=true
+export MessageBridge__ProcessingHistory__ProductionRetentionHours=168
+```
+
+Verify cleanup behavior:
+
+```sql
+-- Development: inspect records older than the 24-hour cutoff.
+SELECT Status, COUNT(*) as Count
+FROM MessageProcessingRecords
+WHERE ProcessedAt < NOW() - INTERVAL '24 hours'
+GROUP BY Status;
+
+-- Expect: Completed/Abandoned older than 24 hours absent; Failed/Rejected and
+-- Received/Processing records remain.
+
+-- Production: inspect records older than the 168-hour (7-day) cutoff.
+SELECT Status, COUNT(*) as Count
+FROM MessageProcessingRecords
+WHERE ProcessedAt < NOW() - INTERVAL '168 hours'
+GROUP BY Status;
+
+-- Expect: Completed/Abandoned older than 168 hours absent; Failed/Rejected and
+-- Received/Processing records remain. Records aged 24-168 hours are retained.
 ```
 
 ## Idempotency

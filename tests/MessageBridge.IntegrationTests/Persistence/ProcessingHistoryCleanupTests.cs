@@ -2,7 +2,10 @@ using MessageBridge.Domain.Processing;
 using MessageBridge.Infrastructure.Persistence;
 using MessageBridge.IntegrationTests.Fixtures;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Primitives;
 using System.Text.Json;
 
 namespace MessageBridge.IntegrationTests.Persistence;
@@ -80,18 +83,153 @@ public sealed class ProcessingHistoryCleanupTests(IntegrationEnvironmentFixture 
         Assert.True(await ExistsAsync(verifyContext, "wamid.should-keep"));
     }
 
+    [Fact]
+    public async Task Cleanup_UsesDevRetentionHours_InDevelopmentEnvironment()
+    {
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var options = BuildOptions(scenario.DbContext);
+        var now = DateTimeOffset.UtcNow;
+        scenario.DbContext.MessageProcessingRecords.AddRange(
+            BuildRecord("wamid.dev-25hr-old", ProcessingStatus.Completed, now.AddHours(-25), now.AddHours(-25), now.AddHours(-25)),
+            BuildRecord("wamid.dev-23hr-old", ProcessingStatus.Completed, now.AddHours(-23), now.AddHours(-23), now.AddHours(-23)),
+            BuildRecord("wamid.dev-23hr-abandoned", ProcessingStatus.Abandoned, now.AddHours(-23), now.AddHours(-23), now.AddHours(-23)));
+        await scenario.DbContext.SaveChangesAsync();
+
+        var factory = new TestHistoryCleanupDbContextFactory(options);
+        var cleanup = new ProcessingHistoryCleanupService(
+            factory,
+            Options.Create(new MessageProcessingHistoryOptions
+            {
+                CleanupEnabled = true,
+                CleanupIntervalMilliseconds = 10,
+                DevelopmentRetentionHours = 24,
+                ProductionRetentionHours = 168,
+                CleanupBatchSize = 10
+            }),
+            BuildEnvironment("Development"));
+
+        try
+        {
+            await cleanup.StartAsync(default);
+            await WaitUntilRecordRemovedAsync(factory, "wamid.dev-25hr-old");
+        }
+        finally
+        {
+            await cleanup.StopAsync(default);
+        }
+
+        await using var verifyContext = new MessageBridgeDbContext(options);
+        Assert.False(await ExistsAsync(verifyContext, "wamid.dev-25hr-old"));
+        Assert.True(await ExistsAsync(verifyContext, "wamid.dev-23hr-old"));
+        Assert.True(await ExistsAsync(verifyContext, "wamid.dev-23hr-abandoned"));
+    }
+
+    [Fact]
+    public async Task Cleanup_UsesProdRetentionHours_InProductionEnvironment()
+    {
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var options = BuildOptions(scenario.DbContext);
+        var now = DateTimeOffset.UtcNow;
+        scenario.DbContext.MessageProcessingRecords.AddRange(
+            BuildRecord("wamid.prod-169hr-old", ProcessingStatus.Completed, now.AddHours(-169), now.AddHours(-169), now.AddHours(-169)),
+            BuildRecord("wamid.prod-167hr-old", ProcessingStatus.Completed, now.AddHours(-167), now.AddHours(-167), now.AddHours(-167)),
+            BuildRecord("wamid.prod-167hr-abandoned", ProcessingStatus.Abandoned, now.AddHours(-167), now.AddHours(-167), now.AddHours(-167)));
+        await scenario.DbContext.SaveChangesAsync();
+
+        var factory = new TestHistoryCleanupDbContextFactory(options);
+        var cleanup = new ProcessingHistoryCleanupService(
+            factory,
+            Options.Create(new MessageProcessingHistoryOptions
+            {
+                CleanupEnabled = true,
+                CleanupIntervalMilliseconds = 10,
+                DevelopmentRetentionHours = 24,
+                ProductionRetentionHours = 168,
+                CleanupBatchSize = 10
+            }),
+            BuildEnvironment("Production"));
+
+        try
+        {
+            await cleanup.StartAsync(default);
+            await WaitUntilRecordRemovedAsync(factory, "wamid.prod-169hr-old");
+        }
+        finally
+        {
+            await cleanup.StopAsync(default);
+        }
+
+        await using var verifyContext = new MessageBridgeDbContext(options);
+        Assert.False(await ExistsAsync(verifyContext, "wamid.prod-169hr-old"));
+        Assert.True(await ExistsAsync(verifyContext, "wamid.prod-167hr-old"));
+        Assert.True(await ExistsAsync(verifyContext, "wamid.prod-167hr-abandoned"));
+    }
+
+    [Fact]
+    public async Task Cleanup_PreservesRejectedRecords_WithEligibleStatusFilter()
+    {
+        await using var scenario = await MigratedDatabaseScenario.CreateAsync(_fixture);
+        var options = BuildOptions(scenario.DbContext);
+        var now = DateTimeOffset.UtcNow;
+        scenario.DbContext.MessageProcessingRecords.AddRange(
+            BuildRecord("wamid.completed-old", ProcessingStatus.Completed, now.AddHours(-25), now.AddHours(-25), now.AddHours(-25)),
+            BuildRecord("wamid.rejected-old", ProcessingStatus.Rejected, now.AddHours(-25), now.AddHours(-25), now.AddHours(-25)),
+            BuildRecord("wamid.processing-old", ProcessingStatus.Processing, now.AddHours(-25), now.AddHours(-25)));
+        await scenario.DbContext.SaveChangesAsync();
+
+        var factory = new TestHistoryCleanupDbContextFactory(options);
+        var cleanup = new ProcessingHistoryCleanupService(
+            factory,
+            Options.Create(new MessageProcessingHistoryOptions
+            {
+                CleanupEnabled = true,
+                CleanupIntervalMilliseconds = 10,
+                DevelopmentRetentionHours = 24,
+                ProductionRetentionHours = 168,
+                EligibleStatusesForCleanup =
+                [
+                    ProcessingStatus.Received,
+                    ProcessingStatus.Processing,
+                    ProcessingStatus.Completed,
+                    ProcessingStatus.Abandoned,
+                    ProcessingStatus.Failed,
+                    ProcessingStatus.Rejected
+                ],
+                CleanupBatchSize = 10
+            }),
+            BuildEnvironment("Development"));
+
+        try
+        {
+            await cleanup.StartAsync(default);
+            await WaitUntilRecordRemovedAsync(factory, "wamid.completed-old");
+        }
+        finally
+        {
+            await cleanup.StopAsync(default);
+        }
+
+        await using var verifyContext = new MessageBridgeDbContext(options);
+        Assert.False(await ExistsAsync(verifyContext, "wamid.completed-old"));
+        Assert.True(await ExistsAsync(verifyContext, "wamid.rejected-old"));
+        Assert.True(await ExistsAsync(verifyContext, "wamid.processing-old"));
+    }
+
     private static ProcessingHistoryCleanupService CreateCleanup(
         IDbContextFactory<MessageBridgeDbContext> factory,
-        bool enabled) =>
+        bool enabled,
+        string environment = "Development") =>
         new(
             factory,
             Options.Create(new MessageProcessingHistoryOptions
             {
                 CleanupEnabled = enabled,
                 CleanupIntervalMilliseconds = 10,
-                CleanupRetentionHours = 1,
+                DevelopmentRetentionHours = 1,
+                ProductionRetentionHours = 1,
                 CleanupBatchSize = 10
-            }));
+            }),
+            BuildEnvironment(environment));
 
     private static async Task<bool> ExistsAsync(MessageBridgeDbContext context, string messageId) =>
         await context.MessageProcessingRecords.AsNoTracking().AnyAsync(item => item.MessageId == messageId);
@@ -134,6 +272,35 @@ public sealed class ProcessingHistoryCleanupTests(IntegrationEnvironmentFixture 
             },
             $"Record '{messageId}' was not removed in time.");
     }
+
+    private static IHostEnvironment BuildEnvironment(string environmentName) =>
+        new TestHostEnvironment(environmentName);
+}
+
+internal sealed class TestHostEnvironment(string environmentName) : IHostEnvironment
+{
+    public string EnvironmentName { get; set; } = environmentName;
+    public string ApplicationName { get; set; } = "test";
+    public string ContentRootPath { get; set; } = "/test";
+    public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
+}
+
+internal sealed class NullFileProvider : IFileProvider
+{
+    public IDirectoryContents GetDirectoryContents(string subpath) => NotFoundDirectoryContents.Singleton;
+    public IFileInfo GetFileInfo(string subpath) => new NotFoundFileInfo(subpath);
+    public IChangeToken Watch(string filter) => NullChangeToken.Singleton;
+}
+
+internal sealed class NotFoundFileInfo(string name) : IFileInfo
+{
+    public bool Exists => false;
+    public long Length => -1;
+    public string PhysicalPath => null!;
+    public string Name => name;
+    public DateTimeOffset LastModified => DateTimeOffset.MinValue;
+    public bool IsDirectory => false;
+    public Stream CreateReadStream() => Stream.Null;
 }
 
 internal sealed class TestHistoryCleanupDbContextFactory(
