@@ -27,16 +27,23 @@ Production deployment of MessageBridge: container configuration, CloudAMQP TLS, 
 
 ### Building
 
-```bash
-# From repository root
-dotnet publish src/MessageBridge.Worker -c Release -o ./publish
+The worker image repository is `ghcr.io/chanakya-net/whatsapp-messaging/worker`.
+Deploy only an immutable digest, never a mutable tag. The runtime listens on port 8080,
+serves `/health/live` and `/health/ready`, and always runs as the non-root `APP_UID` user.
 
-# Multi-stage Dockerfile
-FROM mcr.microsoft.com/dotnet/aspnet:10 AS runtime
-WORKDIR /app
-COPY publish .
-EXPOSE 8080
-ENTRYPOINT ["dotnet", "MessageBridge.Worker.dll"]
+```bash
+# Build and load the host architecture for local testing.
+docker build -f src/MessageBridge.Worker/Dockerfile -t messagebridge:local .
+
+# Build both supported architectures and publish an immutable manifest.
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --file src/MessageBridge.Worker/Dockerfile \
+  --tag ghcr.io/chanakya-net/whatsapp-messaging/worker:<release-tag> \
+  --push .
+
+# Resolve the published digest, then deploy this exact reference.
+WORKER_IMAGE='ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:<published-64-character-digest>'
 ```
 
 ### Migration image (manual only)
@@ -51,7 +58,7 @@ invoked only by the manual Azure Container Apps migration job.
 
 ### Image Size Optimization
 
-- Use base image: `mcr.microsoft.com/dotnet/aspnet:10` (not SDK)
+- Use the digest-pinned ASP.NET runtime image (not the SDK)
 - Trim unused assemblies: `<PublishTrimmed>true</PublishTrimmed>` in `.csproj`
 - Result: ~150–200 MB per image
 
@@ -59,7 +66,7 @@ invoked only by the manual Azure Container Apps migration job.
 
 ```bash
 # Build image
-docker build -t messagebridge:latest .
+docker build -f src/MessageBridge.Worker/Dockerfile -t messagebridge:local .
 
 # Run container with configuration via environment / JSON
 docker run \
@@ -75,7 +82,7 @@ docker run \
   -e "RabbitMq__UseSsl=true" \
   -e "Observability__ServiceName=MessageBridge.Worker" \
   -e "Observability__MetricsEndpointEnabled=true" \
-  messagebridge:latest
+  messagebridge:local
 ```
 
 ## Environment Configuration
@@ -163,7 +170,7 @@ version: "3.8"
 
 services:
   worker:
-    image: messagebridge:latest
+    image: ${WORKER_IMAGE}
     ports:
       - "8080:8080"
     environment:
@@ -258,7 +265,7 @@ spec:
     spec:
       containers:
         - name: worker
-          image: messagebridge:latest
+          image: ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:<published-64-character-digest>
           envFrom:
             - secretRef:
                 name: messagebridge-secrets
@@ -407,7 +414,7 @@ spec:
         runAsUser: 1000
       containers:
         - name: worker
-          image: messagebridge:latest
+          image: ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:<published-64-character-digest>
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -670,7 +677,7 @@ The following decisions require manual intervention and cannot be automated:
 1. Check logs: `kubectl logs deployment/messagebridge-worker`
 2. Check events: `kubectl describe pod <pod-name>`
 3. Verify secrets exist: `kubectl get secrets | grep messagebridge`
-4. Test image locally: `docker run messagebridge:latest /bin/sh`
+4. Test the local image: `docker run --rm messagebridge:local`
 
 ### OutOfMemory errors
 
