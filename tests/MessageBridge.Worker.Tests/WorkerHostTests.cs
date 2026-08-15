@@ -215,6 +215,25 @@ public sealed class WorkerHostTests
     }
 
     [Fact]
+    public async Task Host_Boots_With_Empty_Tenant_Allowlist_And_Rejects_Tenant_Work()
+    {
+        await using var factory = BuildWorkerFactory(
+            ValidRabbitMqSettings(),
+            services => AddTestRuntimeServicesWithoutTenantProvider(services));
+        using var client = factory.CreateClient();
+
+        (await client.GetAsync("/health/live")).StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await client.GetAsync("/health/ready")).StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        using var scope = factory.Services.CreateScope();
+        var tenantConfigProvider = scope.ServiceProvider.GetRequiredService<ITenantConfigurationProvider>();
+
+        var result = await tenantConfigProvider.GetTenantConfigAsync("any-tenant");
+
+        result.IsError.ShouldBeTrue();
+    }
+
+    [Fact]
     public void Host_Fails_To_Start_With_Invalid_RabbitMq_Options()
     {
         using var factory = BuildWorkerFactory(
@@ -260,11 +279,16 @@ public sealed class WorkerHostTests
 
     private static void AddTestRuntimeServices(IServiceCollection services)
     {
+        AddTestRuntimeServicesWithoutTenantProvider(services);
+        services.AddSingleton<ITenantConfigurationProvider, ReadyTenantConfigurationProvider>();
+    }
+
+    private static void AddTestRuntimeServicesWithoutTenantProvider(IServiceCollection services)
+    {
         services.AddSingleton<IWhatsAppMessageSender, ReadyWhatsAppMessageSender>();
         services.AddSingleton<IEmailConfirmationSender, ReadyEmailConfirmationSender>();
         services.AddSingleton<HandlerProcessingStore, ReadyMessageProcessingStore>();
         services.AddSingleton<LifecycleProcessingStore, ReadyLifecycleProcessingStore>();
-        services.AddSingleton<ITenantConfigurationProvider, ReadyTenantConfigurationProvider>();
         services.AddSingleton<IProviderRateLimiter, ReadyProviderRateLimiter>();
         services.AddSingleton<IRabbitMqReadinessProbe, ReadyRabbitMqProbe>();
         services.AddSingleton<IPostgresReadinessProbe, ReadyPostgresProbe>();

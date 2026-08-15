@@ -1,10 +1,12 @@
 using ErrorOr;
 using MessageBridge.Application.Persistence;
 using LegacyMessageProcessingStore = MessageBridge.Application.Abstractions.IMessageProcessingStore;
+using ITenantConfigurationProvider = MessageBridge.Application.Abstractions.ITenantConfigurationProvider;
 using MessageBridge.Infrastructure.Messaging;
 using MessageBridge.Infrastructure.Messaging.Processing;
 using MessageBridge.Infrastructure.Persistence;
 using MessageBridge.Infrastructure.Providers;
+using MessageBridge.Infrastructure.Tenancy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -23,6 +25,20 @@ public static class DependencyInjection
         services.AddMessageBridgeMassTransit(configuration);
         services.AddMessageBridgeProcessingStore(configuration);
         services.AddMessageBridgeProviders(configuration);
+        services.AddMessageBridgeTenancy(configuration);
+        return services;
+    }
+
+    private static IServiceCollection AddMessageBridgeTenancy(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddOptions<TenantOptions>()
+            .Bind(configuration.GetSection(TenantOptions.SectionName))
+            .ValidateOnStart();
+        services.AddSingleton<IValidateOptions<TenantOptions>, TenantOptionsValidator>();
+        services.AddSingleton<ITenantConfigurationProvider, ConfigurationTenantConfigurationProvider>();
+
         return services;
     }
 
