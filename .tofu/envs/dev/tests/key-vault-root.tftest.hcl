@@ -5,6 +5,12 @@ mock_provider "azurerm" {
       vault_uri = "https://kv-msgbr-dev-cin-042.vault.azure.net/"
     }
   }
+
+  mock_resource "azurerm_container_app_environment" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.App/managedEnvironments/cae-messagebridge-dev-cin-042"
+    }
+  }
 }
 
 override_resource {
