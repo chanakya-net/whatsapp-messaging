@@ -7,14 +7,28 @@ mock_provider "azurerm" {
   }
 }
 
+override_resource {
+  target = azurerm_user_assigned_identity.runtime
+  values = {
+    id           = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-runtime-dev-cin-042"
+    principal_id = "00000000-0000-4000-8000-000000000003"
+    client_id    = "00000000-0000-4000-8000-000000000013"
+  }
+}
+
+override_resource {
+  target = azurerm_user_assigned_identity.migrator
+  values = {
+    id           = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-migrator-dev-cin-042"
+    principal_id = "00000000-0000-4000-8000-000000000005"
+    client_id    = "00000000-0000-4000-8000-000000000015"
+  }
+}
+
 variables {
   tenant_id        = "00000000-0000-4000-8000-000000000001"
   subscription_id  = "00000000-0000-4000-8000-000000000002"
   bootstrap_serial = "042"
-  runtime_identity = {
-    principal_id = "00000000-0000-4000-8000-000000000003"
-    resource_id  = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-worker-dev-cin-042"
-  }
   operator_identity = {
     principal_id   = "00000000-0000-4000-8000-000000000004"
     principal_type = "Group"
@@ -43,7 +57,7 @@ run "wires_isolated_dev_vault_contract" {
     condition = alltrue([
       for name, reference in output.container_app_secret_references :
       reference.name == name &&
-      reference.identity == var.runtime_identity.resource_id &&
+      reference.identity == azurerm_user_assigned_identity.runtime.id &&
       reference.key_vault_secret_id == "https://kv-msgbr-dev-cin-042.vault.azure.net/secrets/${name}"
     ])
     error_message = "Dev references must be versionless and use only the supplied runtime identity."
