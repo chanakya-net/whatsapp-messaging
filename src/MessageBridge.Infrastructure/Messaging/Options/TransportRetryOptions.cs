@@ -13,4 +13,9 @@ public sealed class TransportRetryOptions
     public int ImmediateRetryCount { get; set; } = 3;
 
     public TimeSpan[] DelayedRedeliveryIntervals { get; set; } = [];
+
+    public TimeSpan[] EffectiveDelayedRedeliveryIntervals =>
+        DelayedRedeliveryIntervals.Length > 0
+            ? DelayedRedeliveryIntervals
+            : DefaultDelayedRedeliveryIntervals;
 }
