@@ -1,3 +1,4 @@
+using MessageBridge.Domain.Processing;
 using MessageBridge.Infrastructure.Persistence;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -120,5 +121,74 @@ public sealed class MessageProcessingHistoryOptionsTests
         };
 
         options.CleanupIntervalMilliseconds.ShouldBe(3_600_000);
+    }
+
+    [Fact]
+    public void DevelopmentRetentionHours_Defaults_To_24()
+    {
+        var options = new MessageProcessingHistoryOptions();
+        options.DevelopmentRetentionHours.ShouldBe(24);
+    }
+
+    [Fact]
+    public void ProductionRetentionHours_Defaults_To_168()
+    {
+        var options = new MessageProcessingHistoryOptions();
+        options.ProductionRetentionHours.ShouldBe(168);
+    }
+
+    [Fact]
+    public void EligibleStatusesForCleanup_Defaults_To_CompletedAndAbandoned()
+    {
+        var options = new MessageProcessingHistoryOptions();
+        options.EligibleStatusesForCleanup.ShouldNotBeNull();
+        options.EligibleStatusesForCleanup.ShouldContain(ProcessingStatus.Completed);
+        options.EligibleStatusesForCleanup.ShouldContain(ProcessingStatus.Abandoned);
+        options.EligibleStatusesForCleanup.Length.ShouldBe(2);
+    }
+
+    [Fact]
+    public void EligibleStatusesForCleanup_Never_Includes_FailedOrRejected()
+    {
+        var options = new MessageProcessingHistoryOptions
+        {
+            EligibleStatusesForCleanup = [ProcessingStatus.Failed, ProcessingStatus.Rejected]
+        };
+
+        options.EligibleStatusesForCleanup.ShouldNotContain(ProcessingStatus.Failed);
+        options.EligibleStatusesForCleanup.ShouldNotContain(ProcessingStatus.Rejected);
+        options.EligibleStatusesForCleanup.Length.ShouldBe(0);
+    }
+
+    [Fact]
+    public void DevelopmentRetentionHours_Binds_From_Configuration()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["MessageBridge:ProcessingHistory:DevelopmentRetentionHours"] = "48"
+            })
+            .Build();
+
+        var options = new MessageProcessingHistoryOptions();
+        config.GetSection(MessageProcessingHistoryOptions.SectionName).Bind(options);
+
+        options.DevelopmentRetentionHours.ShouldBe(48);
+    }
+
+    [Fact]
+    public void ProductionRetentionHours_Binds_From_Configuration()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["MessageBridge:ProcessingHistory:ProductionRetentionHours"] = "240"
+            })
+            .Build();
+
+        var options = new MessageProcessingHistoryOptions();
+        config.GetSection(MessageProcessingHistoryOptions.SectionName).Bind(options);
+
+        options.ProductionRetentionHours.ShouldBe(240);
     }
 }

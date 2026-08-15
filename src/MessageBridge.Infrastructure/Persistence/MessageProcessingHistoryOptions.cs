@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using MessageBridge.Domain.Processing;
 
 namespace MessageBridge.Infrastructure.Persistence;
 
@@ -21,4 +22,18 @@ public sealed class MessageProcessingHistoryOptions
 
     [Range(1, 3_600_000)]
     public int CleanupIntervalMilliseconds { get; set; } = 1_000;
+
+    [Range(1, 3_650)]
+    public int DevelopmentRetentionHours { get; set; } = 24;
+
+    [Range(1, 3_650)]
+    public int ProductionRetentionHours { get; set; } = 168;
+
+    private ProcessingStatus[] _eligibleStatusesForCleanup = [ProcessingStatus.Completed, ProcessingStatus.Abandoned];
+
+    public ProcessingStatus[] EligibleStatusesForCleanup
+    {
+        get => _eligibleStatusesForCleanup;
+        set => _eligibleStatusesForCleanup = [..value.Where(s => s != ProcessingStatus.Failed && s != ProcessingStatus.Rejected)];
+    }
 }

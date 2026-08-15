@@ -7,19 +7,19 @@ namespace MessageBridge.Infrastructure.Persistence;
 
 public sealed class ProcessingHistoryCleanupService : BackgroundService
 {
-    private static readonly ProcessingStatus[] TerminalStatuses =
-        [ProcessingStatus.Completed, ProcessingStatus.Abandoned];
-
     private readonly MessageProcessingHistoryOptions _options;
     private readonly IDbContextFactory<MessageBridgeDbContext> _contextFactory;
+    private readonly IHostEnvironment _environment;
     private readonly TimeSpan _interval;
 
     public ProcessingHistoryCleanupService(
         IDbContextFactory<MessageBridgeDbContext> contextFactory,
-        IOptions<MessageProcessingHistoryOptions> options)
+        IOptions<MessageProcessingHistoryOptions> options,
+        IHostEnvironment environment)
     {
         _contextFactory = contextFactory;
         _options = options.Value;
+        _environment = environment;
         _interval = TimeSpan.FromMilliseconds(_options.CleanupIntervalMilliseconds);
     }
 
@@ -40,10 +40,13 @@ public sealed class ProcessingHistoryCleanupService : BackgroundService
         }
 
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
-        var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromHours(_options.CleanupRetentionHours);
+        var retentionHours = _environment.IsProduction()
+            ? _options.ProductionRetentionHours
+            : _options.DevelopmentRetentionHours;
+        var cutoff = DateTimeOffset.UtcNow - TimeSpan.FromHours(retentionHours);
         var stale = await context.Set<MessageProcessingRecord>()
             .Where(record =>
-                TerminalStatuses.Contains(record.Status) &&
+                _options.EligibleStatusesForCleanup.Contains(record.Status) &&
                 record.ProcessedAt != null &&
                 record.ProcessedAt < cutoff)
             .OrderBy(record => record.ProcessedAt)
