@@ -19,8 +19,9 @@ Fixtures: [`.github/scripts/tests/restore-drill.test.sh`](../../.github/scripts/
   lifetime of a phase and are unset on exit. Tokens and passwords are never
   printed to stdout/stderr and never appear in command argv (`psql` reads
   the password from the environment, not a flag).
-- A temporary operator-IP firewall rule is opened before each phase and
-  removed on exit (success, failure, or signal) via a `trap`.
+- After the restored server reaches `Ready`, the driver opens a temporary
+  operator-IP firewall rule for verification and removes it on exit
+  (success, failure, or signal) via a `trap`.
 
 ## Prerequisites
 
@@ -68,8 +69,8 @@ Plan phase: no mutations will be made.
 Expected `restore` output ends with:
 
 ```text
-Migration history verified: InitialCreate present.
-Processing history verified: <N> records found.
+Migration history verified: latest migration (20260706100312_InitialCreate) present.
+Processing history verified: latest record timestamp: 2026-08-16T11:30:00Z.
 Verification complete.
 Elapsed time: 00h 0Xm 0Ys
 ```
@@ -88,9 +89,10 @@ bash scripts/db/restore-drill.sh verify
 Each phase prints `Elapsed time: HHh MMm SSs` measured from the start of
 that invocation. For the quarterly record, capture:
 
-- **RPO evidence**: the gap between `MESSAGEBRIDGE_RESTORE_POINTTIME` and
-  the most recent record timestamp confirmed by `verify` (`message_processing_history`
-  row count/recency). Compare against the 15-minute RPO objective.
+- **RPO evidence**: record `MESSAGEBRIDGE_RESTORE_POINTTIME` alongside the
+  `Processing history verified: latest record timestamp: <timestamp>.` line
+  emitted by `verify`. Calculate the gap between those timestamps and compare
+  it against the 15-minute RPO objective.
 - **RTO evidence**: the elapsed time printed by `restore` (firewall open
   through verification complete). Compare against the four-hour RTO
   objective.
@@ -125,8 +127,8 @@ delete`.
 | `point-in-time restore failed` | The Azure restore call itself failed (quota, permissions, invalid restore point). | Check the Azure CLI error, confirm the restore point is within the source server's retention window, retry. |
 | `Server did not reach Ready state after 60 attempts` | The new server is stuck provisioning. | Check the Azure portal/CLI for the temporary server's status; if stuck, delete it manually and retry. |
 | `migration history query failed` / `InitialCreate migration not found` | The restored schema does not match the expected EF Core migration baseline. | Treat as a **restore integrity failure** — see Recovery boundaries below. Do not assume the drill "passed." |
-| `processing history query failed` | Could not read the processing table (connectivity, schema drift). | Re-run `verify`; if it persists, escalate — the restored data may not be trustworthy. |
-| `temporary operator firewall rule cleanup failed` | Cleanup of the temporary firewall rule did not succeed. | Manually remove the rule (`FIREWALL_RULE` name printed in the error) via `az postgres flexible-server firewall-rule delete` to avoid leaving source-server firewall drift. |
+| `processing history query failed` / `processing history timestamp is missing or invalid` | The processing table could not be read or has no valid newest-record timestamp. | Re-run `verify`; if it persists, escalate — the restored data may not be trustworthy. |
+| `temporary operator firewall rule cleanup failed` | Cleanup of the temporary server's firewall rule did not succeed. | Manually remove the rule from the restored server via `az postgres flexible-server firewall-rule delete` to avoid leaving temporary access open. |
 | `temporary server deletion failed` | `destroy` could not delete the temporary server. | Retry `destroy`; if it persists, delete the server manually via the Azure CLI/portal to avoid ongoing cost. |
 
 ## Escalation

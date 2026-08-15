@@ -46,8 +46,21 @@ create_fake_commands() {
 printf 'az|%s\n' "$*" >>"$DB_RESTORE_CALL_LOG"
 case "${1:-} ${2:-} ${3:-}" in
   'postgres flexible-server restore')
+    [[ " $* " == *' --name '* ]] || exit 96
+    [[ " $* " == *' --restore-time '* ]] || exit 96
+    [[ " $* " == *' --yes '* ]] || exit 96
+    [[ " $* " != *' --server-name '* ]] || exit 96
+    [[ " $* " != *' --restore-point-in-time '* ]] || exit 96
     [[ "${FAKE_AZ_RESTORE_EXIT:-0}" == 0 ]] || exit "${FAKE_AZ_RESTORE_EXIT}"
-    printf 'psql-messagebridge-drill-042-20260816T120000Z\n'
+    for ((index = 1; index <= $#; index++)); do
+      [[ "${!index}" == '--name' ]] || continue
+      next_index=$((index + 1))
+      restore_target=${!next_index}
+      break
+    done
+    [[ -n "${restore_target:-}" ]] || exit 96
+    printf '%s' "$restore_target" >"$DB_RESTORE_STATE_DIR/restore-target"
+    printf '%s\n' "$restore_target"
     ;;
   'postgres flexible-server show')
     printf 'Ready\n'
@@ -63,7 +76,17 @@ case "${1:-} ${2:-} ${3:-}" in
     ;;
   'postgres flexible-server firewall-rule')
     case "$*" in
-      *' create '*) exit "${FAKE_FIREWALL_CREATE_EXIT:-0}" ;;
+      *' create '*)
+        for ((index = 1; index <= $#; index++)); do
+          [[ "${!index}" == '--name' ]] || continue
+          next_index=$((index + 1))
+          firewall_target=${!next_index}
+          break
+        done
+        [[ -f "$DB_RESTORE_STATE_DIR/restore-target" ]] || exit 95
+        [[ "${firewall_target:-}" == "$(<"$DB_RESTORE_STATE_DIR/restore-target")" ]] || exit 95
+        exit "${FAKE_FIREWALL_CREATE_EXIT:-0}"
+        ;;
       *' delete '*) exit "${FAKE_FIREWALL_DELETE_EXIT:-0}" ;;
       *) exit 98 ;;
     esac
@@ -100,8 +123,12 @@ case "$*" in
   *"__EFMigrationsHistory"*"20260706100312_InitialCreate"*)
     printf '20260706100312_InitialCreate\n'
     ;;
-  *"message_processing_history"*"MAX"*)
-    printf '2026-08-16T11:30:00+00:00\n'
+  *"MAX"*"message_processing_history"*)
+    if [[ -n "${FAKE_PSQL_TIMESTAMP_OUTPUT+x}" ]]; then
+      printf '%s' "$FAKE_PSQL_TIMESTAMP_OUTPUT"
+    else
+      printf '2026-08-16T11:30:00Z\n'
+    fi
     ;;
   *"__EFMigrationsHistory"*)
     printf '(1 row)\n'
@@ -121,12 +148,17 @@ FAKE_PSQL
 reset_harness() {
   : >"$CALL_LOG"
   find "$STATE_DIR" -type f -delete
-  unset FAKE_PSQL_FAIL_CALL FAKE_PSQL_BLOCK_CALL FAKE_FIREWALL_CREATE_EXIT FAKE_AZ_DELETE_EXIT FAKE_AZ_RESTORE_EXIT RESTORED_SERVER
+  unset FAKE_PSQL_FAIL_CALL FAKE_PSQL_BLOCK_CALL FAKE_FIREWALL_CREATE_EXIT FAKE_AZ_DELETE_EXIT FAKE_AZ_RESTORE_EXIT FAKE_PSQL_TIMESTAMP_OUTPUT RESTORED_SERVER
 }
 
 invoke_restore_drill() {
-  local command=$1
+  local command=$1 restored_server=${RESTORED_SERVER:-}
   shift || true
+  if [[ "$command" == verify && -z "$restored_server" ]]; then
+    restored_server='psql-messagebridge-drill-042-20260816T120000Z'
+    printf '%s' "$restored_server" >"$STATE_DIR/restore-target"
+  fi
+  RESTORED_SERVER="$restored_server" \
   PATH="$FAKE_BIN:$PATH" \
     MESSAGEBRIDGE_RESTORE_SERIAL=042 \
     MESSAGEBRIDGE_RESTORE_POINTTIME="2026-08-16T12:00:00Z" \
@@ -145,7 +177,6 @@ assert_token_not_in_argv() {
     fail 'access token must not appear in psql argv'
   fi
 }
-
 test_input_validation_serial_format() {
   reset_harness
   if MESSAGEBRIDGE_RESTORE_SERIAL=12 \
@@ -155,7 +186,6 @@ test_input_validation_serial_format() {
   fi
   grep -Eq 'SERIAL|three digits' "$STDERR_FILE" || fail 'error message missing'
 }
-
 test_input_validation_pointtime_format() {
   reset_harness
   if MESSAGEBRIDGE_RESTORE_POINTTIME=invalid \
@@ -166,7 +196,6 @@ test_input_validation_pointtime_format() {
   fi
   grep -Eq 'POINTTIME|timestamp|ISO' "$STDERR_FILE" || fail 'error message missing'
 }
-
 test_plan_displays_targets_without_mutation() {
   reset_harness
   invoke_restore_drill plan || fail 'plan must succeed'
@@ -180,7 +209,6 @@ test_plan_displays_targets_without_mutation() {
   fi
   assert_token_hidden
 }
-
 test_restore_phase_creates_restored_server() {
   reset_harness
   invoke_restore_drill restore || fail 'restore must succeed'
@@ -189,7 +217,16 @@ test_restore_phase_creates_restored_server() {
   assert_contains 'psql-messagebridge-drill-042' "$CALL_LOG" 'restored server not created'
   assert_token_hidden
 }
+test_restore_uses_supported_azure_cli_arguments() {
+  reset_harness
+  invoke_restore_drill restore || fail 'restore must accept the Azure CLI restore contract'
 
+  assert_contains '--name psql-messagebridge-drill-042-' "$CALL_LOG" 'restore must name the target server'
+  assert_contains '--restore-time 2026-08-16T12:00:00Z' "$CALL_LOG" 'restore must set the restore time'
+  assert_contains '--yes' "$CALL_LOG" 'restore must be non-interactive'
+  assert_not_contains '--server-name' "$CALL_LOG" 'restore must not use obsolete --server-name'
+  assert_not_contains '--restore-point-in-time' "$CALL_LOG" 'restore must not use obsolete --restore-point-in-time'
+}
 test_restore_failure_reported() {
   reset_harness
   export FAKE_AZ_RESTORE_EXIT=1
@@ -198,7 +235,6 @@ test_restore_failure_reported() {
   fi
   grep -Eq 'ERROR|error|failed' "$STDERR_FILE" || fail 'error not reported'
 }
-
 test_verify_phase_checks_migration() {
   reset_harness
   invoke_restore_drill verify || fail 'verify must succeed'
@@ -207,15 +243,30 @@ test_verify_phase_checks_migration() {
   assert_contains 'Migration history verified' "$STDOUT_FILE" 'migration verification message missing'
   assert_token_hidden
 }
-
 test_verify_phase_checks_processing_data() {
   reset_harness
   invoke_restore_drill verify || fail 'verify must succeed'
 
   assert_contains 'message_processing_history' "$CALL_LOG" 'processing data check missing'
+  assert_contains 'Processing history verified: latest record timestamp: 2026-08-16T11:30:00Z.' "$STDOUT_FILE" 'processing timestamp evidence missing'
   assert_token_hidden
 }
-
+test_verify_rejects_missing_processing_timestamp() {
+  reset_harness
+  export FAKE_PSQL_TIMESTAMP_OUTPUT=$' \n\t\r\n'
+  if invoke_restore_drill verify; then
+    fail 'verify must reject a blank processing timestamp'
+  fi
+  grep -Eq 'timestamp.*missing|missing.*timestamp|timestamp.*invalid' "$STDERR_FILE" || fail 'missing timestamp error not reported'
+}
+test_verify_rejects_malformed_processing_timestamp() {
+  reset_harness
+  export FAKE_PSQL_TIMESTAMP_OUTPUT='not-a-timestamp\n'
+  if invoke_restore_drill verify; then
+    fail 'verify must reject a malformed processing timestamp'
+  fi
+  grep -Eq 'timestamp.*missing|missing.*timestamp|timestamp.*invalid' "$STDERR_FILE" || fail 'malformed timestamp error not reported'
+}
 test_verify_failure_when_migration_check_fails() {
   reset_harness
   export FAKE_PSQL_FAIL_CALL=1
@@ -223,7 +274,6 @@ test_verify_failure_when_migration_check_fails() {
     fail 'verify should fail when migration check fails'
   fi
 }
-
 test_destroy_requires_confirmation() {
   reset_harness
   echo "no" | invoke_restore_drill destroy || fail_code=$?
@@ -231,7 +281,6 @@ test_destroy_requires_confirmation() {
     fail 'destroy must not proceed without explicit confirmation'
   fi
 }
-
 test_destroy_with_confirmation_deletes_server() {
   reset_harness
   echo "yes" | invoke_restore_drill destroy || fail 'destroy must succeed with confirmation'
@@ -239,7 +288,6 @@ test_destroy_with_confirmation_deletes_server() {
   assert_contains 'delete' "$CALL_LOG" 'delete command not invoked'
   assert_token_hidden
 }
-
 test_destroy_cleanup_fails_reported() {
   reset_harness
   export FAKE_AZ_DELETE_EXIT=7
@@ -249,13 +297,11 @@ test_destroy_cleanup_fails_reported() {
   fi
   grep -Eq 'ERROR|error|failed' "$STDERR_FILE" || fail 'error not reported'
 }
-
 test_elapsed_time_reported() {
   reset_harness
   invoke_restore_drill restore || true
   assert_contains 'Elapsed time' "$STDOUT_FILE" 'elapsed time not reported'
 }
-
 test_firewall_cleanup_on_error() {
   reset_harness
   export FAKE_PSQL_FAIL_CALL=1
@@ -264,7 +310,6 @@ test_firewall_cleanup_on_error() {
   fi
   assert_contains 'firewall-rule delete' "$CALL_LOG" 'firewall cleanup not attempted'
 }
-
 test_reject_production_server_as_restore_target() {
   reset_harness
   export RESTORED_SERVER="psql-messagebridge-shared-cin-042"
@@ -273,7 +318,23 @@ test_reject_production_server_as_restore_target() {
   fi
   grep -Eq 'ERROR|reject|invalid.*name' "$STDERR_FILE" || fail 'rejection not reported'
 }
-
+test_rejects_malformed_temporary_server_before_destroy() {
+  local malformed_name
+  for malformed_name in \
+    'psql-messagebridge-drill-042' \
+    'psql-messagebridge-drill-042-not-a-timestamp' \
+    'psql-messagebridge-drill-042-20260816T120000Z-extra' \
+    'psql-messagebridge-drill-043-20260816T120000Z'; do
+    reset_harness
+    export RESTORED_SERVER="$malformed_name"
+    if echo 'yes' | invoke_restore_drill destroy; then
+      fail "destroy must reject malformed temporary server: $malformed_name"
+    fi
+    if grep -Fq 'postgres flexible-server delete' "$CALL_LOG"; then
+      fail "destroy must not delete malformed temporary server: $malformed_name"
+    fi
+  done
+}
 test_firewall_targets_restored_server_not_source() {
   reset_harness
   invoke_restore_drill restore || fail 'restore must succeed'
@@ -284,19 +345,27 @@ test_firewall_targets_restored_server_not_source() {
 
   grep 'firewall.*--name.*psql-messagebridge-drill' "$CALL_LOG" >/dev/null || fail 'firewall must target restored server'
 }
+test_firewall_opens_after_restore_creates_target() {
+  local restore_line firewall_line
+  reset_harness
+  invoke_restore_drill restore || fail 'restore must create target before opening firewall'
 
+  restore_line=$(grep -n 'postgres flexible-server restore' "$CALL_LOG" | head -1 | cut -d: -f1)
+  firewall_line=$(grep -n 'firewall-rule create' "$CALL_LOG" | head -1 | cut -d: -f1)
+  [[ -n "$restore_line" && -n "$firewall_line" && "$restore_line" -lt "$firewall_line" ]] \
+    || fail 'firewall must be opened only after restore creates the target'
+}
 test_verify_latest_migration_exact() {
   reset_harness
   invoke_restore_drill verify || fail 'verify must succeed'
 
   grep -Fq '20260706100312_InitialCreate' "$CALL_LOG" || fail 'must verify exact latest migration'
 }
-
 test_verify_processing_timestamp_query() {
   reset_harness
   invoke_restore_drill verify || fail 'verify must succeed'
 
-  grep -E 'MAX.*created' "$CALL_LOG" || fail 'must query for MAX timestamp'
+  grep -E 'MAX.*created' "$CALL_LOG" >/dev/null || fail 'must query for MAX timestamp'
 }
 
 # Run all tests
@@ -305,9 +374,12 @@ test_input_validation_serial_format
 test_input_validation_pointtime_format
 test_plan_displays_targets_without_mutation
 test_restore_phase_creates_restored_server
+test_restore_uses_supported_azure_cli_arguments
 test_restore_failure_reported
 test_verify_phase_checks_migration
 test_verify_phase_checks_processing_data
+test_verify_rejects_missing_processing_timestamp
+test_verify_rejects_malformed_processing_timestamp
 test_verify_failure_when_migration_check_fails
 test_destroy_requires_confirmation
 test_destroy_with_confirmation_deletes_server
@@ -315,7 +387,9 @@ test_destroy_cleanup_fails_reported
 test_elapsed_time_reported
 test_firewall_cleanup_on_error
 test_reject_production_server_as_restore_target
+test_rejects_malformed_temporary_server_before_destroy
 test_firewall_targets_restored_server_not_source
+test_firewall_opens_after_restore_creates_target
 test_verify_latest_migration_exact
 test_verify_processing_timestamp_query
 

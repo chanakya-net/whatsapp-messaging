@@ -28,9 +28,9 @@ validate_ipv4() {
 
 validate_temporary_server_name() {
   local server_name=$1
-  local expected_prefix="psql-messagebridge-drill-${RESTORE_SERIAL}-"
-  [[ "$server_name" == "${expected_prefix}"* ]] \
-    || fail "restored server name must follow drill naming contract: expected prefix ${expected_prefix}"
+  local name_pattern="^psql-messagebridge-drill-${RESTORE_SERIAL}-[0-9]{8}T[0-9]{6}Z$"
+  [[ "$server_name" =~ $name_pattern ]] \
+    || fail 'restored server name must match psql-messagebridge-drill-<serial>-<UTC timestamp>'
 }
 
 load_targets() {
@@ -85,7 +85,6 @@ cleanup_firewall() {
 }
 
 open_temporary_firewall() {
-  FIREWALL_CLEANUP_ARMED=true
   az postgres flexible-server firewall-rule create \
     --resource-group "$RESOURCE_GROUP" \
     --name "$RESTORE_SERVER_NAME" \
@@ -93,6 +92,7 @@ open_temporary_firewall() {
     --start-ip-address "$OPERATOR_IP" \
     --end-ip-address "$OPERATOR_IP" \
     --only-show-errors --output none
+  FIREWALL_CLEANUP_ARMED=true
 }
 
 resolve_operator_principal() {
@@ -125,19 +125,29 @@ elapsed_time() {
   printf 'Elapsed time: %02dh %02dm %02ds\n' "$current_hours" "$current_minutes" "$current_seconds"
 }
 
+validate_processing_timestamp() {
+  local timestamp=$1
+  [[ "$timestamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+    || fail 'processing history timestamp is missing or invalid'
+}
+
 restore_to_point_in_time() {
   printf 'Restoring to point-in-time: %s\n' "$RESTORE_POINTTIME"
   local restore_output
   restore_output=$(az postgres flexible-server restore \
     --resource-group "$RESOURCE_GROUP" \
     --source-server "$SOURCE_SERVER" \
-    --server-name "$RESTORE_SERVER_NAME" \
-    --restore-point-in-time "$RESTORE_POINTTIME" \
+    --name "$RESTORE_SERVER_NAME" \
+    --restore-time "$RESTORE_POINTTIME" \
+    --yes \
     --query 'name' \
     --output tsv) \
     || fail 'point-in-time restore failed'
 
+  validate_temporary_server_name "$restore_output"
   RESTORED_SERVER="$restore_output"
+  RESTORE_SERVER_NAME="$RESTORED_SERVER"
+  RESTORE_HOST="${RESTORE_SERVER_NAME}.postgres.database.azure.com"
   printf 'Restored server: %s\n' "$RESTORED_SERVER"
 
   local server_state=''
@@ -170,6 +180,8 @@ verify_schema_and_data() {
     --dbname="$DRILL_DB" \
     --no-password \
     --tuples-only \
+    --no-align \
+    --quiet \
     --command="SELECT \"MigrationId\" FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" = '20260706100312_InitialCreate';" 2>&1) \
     || fail 'migration history query failed'
 
@@ -184,11 +196,14 @@ verify_schema_and_data() {
     --dbname="$DRILL_DB" \
     --no-password \
     --tuples-only \
-    --command="SELECT MAX(\"created_at\") FROM \"message_processing_history\";" 2>&1) \
+    --no-align \
+    --quiet \
+    --command="SELECT to_char(MAX(\"created_at\") AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM \"message_processing_history\";" 2>&1) \
     || fail 'processing history query failed'
 
-  [[ -n "$data_check" ]] || fail 'could not query processing history timestamp'
-  printf 'Processing history verified: latest record timestamp: %s.\n' "${data_check// /}"
+  data_check=$(tr -d '[:space:]' <<<"$data_check")
+  validate_processing_timestamp "$data_check"
+  printf 'Processing history verified: latest record timestamp: %s.\n' "$data_check"
 
   printf 'Verification complete.\n'
 }
@@ -222,9 +237,9 @@ restore_phase() {
   resolve_operator_ip
   resolve_operator_principal
   require_cmd az psql
+  restore_to_point_in_time
   open_temporary_firewall
   load_operator_auth
-  restore_to_point_in_time
   verify_schema_and_data
   elapsed_time
 }
