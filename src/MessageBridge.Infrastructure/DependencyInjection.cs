@@ -2,10 +2,12 @@ using ErrorOr;
 using MessageBridge.Application.Persistence;
 using LegacyMessageProcessingStore = MessageBridge.Application.Abstractions.IMessageProcessingStore;
 using ITenantConfigurationProvider = MessageBridge.Application.Abstractions.ITenantConfigurationProvider;
+using IProviderRateLimiter = MessageBridge.Application.Abstractions.IProviderRateLimiter;
 using MessageBridge.Infrastructure.Messaging;
 using MessageBridge.Infrastructure.Messaging.Processing;
 using MessageBridge.Infrastructure.Persistence;
 using MessageBridge.Infrastructure.Providers;
+using MessageBridge.Infrastructure.RateLimiting;
 using MessageBridge.Infrastructure.Tenancy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -26,6 +28,7 @@ public static class DependencyInjection
         services.AddMessageBridgeProcessingStore(configuration);
         services.AddMessageBridgeProviders(configuration);
         services.AddMessageBridgeTenancy(configuration);
+        services.AddMessageBridgeRateLimiting(configuration);
         return services;
     }
 
@@ -53,6 +56,20 @@ public static class DependencyInjection
         services.AddSingleton<IValidateOptions<ProviderOptions>, ProviderOptionsValidator>();
         services.AddSingleton<IWhatsAppMessageSender, PlaceholderWhatsAppMessageSender>();
         services.AddSingleton<IEmailConfirmationSender, PlaceholderEmailConfirmationSender>();
+
+        return services;
+    }
+
+    private static IServiceCollection AddMessageBridgeRateLimiting(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddOptions<ProviderRateLimitOptions>()
+            .Bind(configuration.GetSection(ProviderRateLimitOptions.SectionName))
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+        services.AddSingleton<IValidateOptions<ProviderRateLimitOptions>, ProviderRateLimitOptionsValidator>();
+        services.AddSingleton<IProviderRateLimiter, MessageBridge.Infrastructure.RateLimiting.InMemoryProviderRateLimiter>();
 
         return services;
     }
