@@ -93,6 +93,12 @@ upsert_contract() {
     'existing marker must update its comment'
   assert_absent "$FIXTURE_DIR/gh.log" '--method POST' 'existing marker must not create a duplicate'
 
+  : >"$FIXTURE_DIR/gh.log"
+  run_upsert shared "$shared" "$FIXTURES/foreign-author-comments.json"
+  assert_contains "$FIXTURE_DIR/gh.log" '--method POST repos/chanakya-net/whatsapp-messaging/issues/69/comments' \
+    'foreign marker must create a trusted bot comment'
+  assert_absent "$FIXTURE_DIR/gh.log" '--method PATCH' 'foreign marker must never be adopted'
+
   if run_upsert shared "$shared" "$FIXTURES/duplicate-comments.json"; then
     fail 'duplicate layer markers unexpectedly accepted'
   fi

@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 MAX_BYTES=60000
 MAX_CHANGES=100
+TRUSTED_COMMENT_AUTHOR='github-actions[bot]'
 
 fail() {
   printf 'infra plan comment: %s\n' "$1" >&2
@@ -134,7 +135,7 @@ upsert_comment() {
   command -v gh >/dev/null || fail 'gh unavailable'
   command -v jq >/dev/null || fail 'jq unavailable'
 
-  local marker comments marker_count matches count comment_id
+  local marker comments trusted_comments marker_count matches count comment_id
   marker="<!-- messagebridge-infra-plan:$layer -->"
   validate_summary "$layer" "$summary_file" "$marker"
   if ! comments="$(gh api --paginate --slurp \
@@ -143,12 +144,15 @@ upsert_comment() {
   fi
   jq -e 'type == "array" and all(.[]; type == "array")' <<<"$comments" >/dev/null ||
     fail 'invalid GitHub comments response'
-  marker_count="$(jq --arg marker "$marker" '[.[][] |
+  trusted_comments="$(jq --arg author "$TRUSTED_COMMENT_AUTHOR" '[.[][] |
+    select((.user? | type == "object") and
+      .user.login == $author and .user.type == "Bot")]' <<<"$comments")"
+  marker_count="$(jq --arg marker "$marker" '[.[] |
     (.body? // "") | if type == "string" then (split($marker) | length - 1) else 0 end] |
-    add // 0' <<<"$comments")"
+    add // 0' <<<"$trusted_comments")"
   ((marker_count <= 1)) || fail 'multiple layer markers found'
-  matches="$(jq --arg marker "$marker" '[.[][] |
-    select((.body? | type == "string") and (.body | contains($marker)))]' <<<"$comments")"
+  matches="$(jq --arg marker "$marker" '[.[] |
+    select((.body? | type == "string") and (.body | contains($marker)))]' <<<"$trusted_comments")"
   count="$(jq 'length' <<<"$matches")"
   ((count <= 1)) || fail 'multiple layer comments found'
 
