@@ -29,9 +29,9 @@ if rg -n '"(JobExecutions|Status|OOMKilled|OutOfMemory)"' "$CATALOG_FILE"; then
   exit 1
 fi
 
-ACTION_GROUP_FILES="$(rg -l 'resource[[:space:]]+"azurerm_monitor_action_group"' "$ENVIRONMENT_DIR"/*.tf | wc -l | tr -d '[:space:]')"
-if [[ "$ACTION_GROUP_FILES" != "1" ]]; then
-  printf 'FAIL: Dev must define one Action Group; found %s files.\n' "$ACTION_GROUP_FILES" >&2
+ACTION_GROUP_COUNT="$(rg -c --no-filename 'resource[[:space:]]+"azurerm_monitor_action_group"' "$ENVIRONMENT_DIR"/*.tf | awk '{ total += $1 } END { print total + 0 }')"
+if [[ "$ACTION_GROUP_COUNT" != "1" ]]; then
+  printf 'FAIL: Dev must define one Action Group; found %s declarations.\n' "$ACTION_GROUP_COUNT" >&2
   exit 1
 fi
 

@@ -250,13 +250,15 @@ These alerts use Azure Monitor platform metrics only. They do not create a Log A
 | PostgreSQL `cpu_credits_remaining < 30` | The Burstable B1ms server is close to losing burst capacity. | Reduce load and confirm credits recover; review whether sustained load requires a non-burstable SKU. |
 | PostgreSQL `active_connections > 40` | Connections are nearing the B1ms limit of about 50. | Find leaking or idle clients, check the worker pool size, and terminate only confirmed stale sessions. |
 | PostgreSQL `storage_percent > 80` | Fixed 32 GiB storage is nearing capacity; auto-grow is disabled. | Identify fast-growing tables/indexes, remove only reviewed disposable data, and plan a storage increase before 100%. |
-| PostgreSQL `is_db_alive < 1` using `Maximum` | No alive sample appeared in the 15-minute window. | Check Azure resource health and server state, then test TLS connectivity from the affected environment. |
-| Worker `Replicas < 1` | The private worker, fixed at one replica, has no running capacity. | Inspect revision state and system logs, then restart or roll back the unhealthy revision. Do not increase replica count. |
+| PostgreSQL `is_db_alive < 1` using `Maximum` | The server reported a not-alive sample (`is_db_alive = 0`) during the 15-minute window. | Check Azure Resource Health and server state, then test TLS connectivity from the affected environment. |
+| Worker `Replicas < 1` | The private worker, fixed at one replica, reported no running capacity. | Check Azure Resource Health, then inspect revision state and system logs. Restart or roll back the unhealthy revision; do not increase replica count. |
 | Worker `RestartCount > 3` | The native cumulative replica restart counter indicates repeated restarts. | Inspect the current revision and restart timestamps; compare against deployment time before deciding whether this is a new crash loop. |
 | Worker `WorkingSetBytes > 966367642` | Average working set exceeded about 90% of the 1 GiB limit. This is an OOM-risk proxy, not proof of an OOM kill. | Check memory trend and recent payload/workload changes; use live system logs to attribute an OOM because Azure exposes no native Container App OOM metric. |
 | Job `Executions >= 1`, dimension `state=Failed` | A migration or smoke job execution failed. | List job execution history, identify the failed execution, and inspect its safe console output. Forward-fix migrations; never assume application delivery rolls them back. |
 
 The native metric catalog is intentionally narrow: PostgreSQL server saturation/availability, worker capacity/restart/memory risk, and failed Container Apps jobs. Verify a disputed platform signal with `az monitor metrics list-definitions` against the resource before changing the catalog.
+
+Static metric alerts need a reported value to evaluate. If PostgreSQL or the worker emits no metric samples at all—for example because it was stopped, deleted, or affected by a regional outage—neither `is_db_alive` nor `Replicas` will page. Use Azure Resource Health as the fallback signal for total metric silence.
 
 New Relic owns application-level error rate, latency, retry, readiness, trace, log, and application metric alerts. Azure-native alerts must not duplicate those signals. In particular, readiness failures, outbox backlog, publish failures, provider failures, and endpoint latency remain New Relic responsibilities.
 

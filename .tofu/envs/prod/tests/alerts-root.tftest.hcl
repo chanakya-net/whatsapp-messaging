@@ -1,4 +1,10 @@
 mock_provider "azurerm" {
+  mock_resource "azurerm_monitor_action_group" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.Insights/actionGroups/ag-messagebridge-prod-cin-042"
+    }
+  }
+
   mock_resource "azurerm_key_vault" {
     defaults = {
       id        = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.KeyVault/vaults/kv-msgbr-prod-cin-042"
@@ -23,12 +29,6 @@ mock_provider "azurerm" {
     }
   }
 
-  mock_resource "azurerm_container_app_job" {
-    defaults = {
-      id                    = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.App/jobs/job-messagebridge-prod-cin-042"
-      outbound_ip_addresses = ["20.193.0.30"]
-    }
-  }
 }
 
 override_resource {
@@ -46,6 +46,22 @@ override_resource {
     id           = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-migrator-prod-cin-042"
     principal_id = "00000000-0000-4000-8000-000000000005"
     client_id    = "00000000-0000-4000-8000-000000000015"
+  }
+}
+
+override_resource {
+  target = module.worker.azurerm_container_app_job.migration
+  values = {
+    id                    = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.App/jobs/mig-messagebridge-prod-cin-042"
+    outbound_ip_addresses = ["20.193.0.30"]
+  }
+}
+
+override_resource {
+  target = module.worker.azurerm_container_app_job.smoke
+  values = {
+    id                    = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.App/jobs/smoke-messagebridge-prod-cin-042"
+    outbound_ip_addresses = ["20.193.0.40"]
   }
 }
 
@@ -88,11 +104,12 @@ run "wires_one_email_action_group_and_environment_alerts" {
 
   assert {
     condition = (
+      module.metric_alerts.alert_definitions["container_app.worker.Replicas"].scope_id == one(module.worker.alertable_resource_ids) &&
       module.metric_alerts.alert_definitions["job.migration.Executions"].scope_id == module.worker.migration_job_id &&
       module.metric_alerts.alert_definitions["job.migration.Executions"].severity == 1 &&
       module.metric_alerts.alert_definitions["job.smoke.Executions"].scope_id == module.worker.smoke_job_id &&
       module.metric_alerts.alert_definitions["job.smoke.Executions"].severity == 2
     )
-    error_message = "Prod job alerts must retain job ownership and reviewed severities."
+    error_message = "Prod worker and job alerts must retain resource ownership and reviewed severities."
   }
 }

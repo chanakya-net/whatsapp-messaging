@@ -1,4 +1,10 @@
 mock_provider "azurerm" {
+  mock_resource "azurerm_monitor_action_group" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.Insights/actionGroups/ag-messagebridge-dev-cin-042"
+    }
+  }
+
   mock_resource "azurerm_key_vault" {
     defaults = {
       id        = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.KeyVault/vaults/kv-msgbr-dev-cin-042"

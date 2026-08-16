@@ -15,7 +15,7 @@ module "metric_alerts" {
   source = "../../modules/metric-alerts"
 
   resource_group_name = local.resource_group_name
-  action_group_id     = "/subscriptions/${var.subscription_id}/resourceGroups/${local.resource_group_name}/providers/Microsoft.Insights/actionGroups/${azurerm_monitor_action_group.alerts.name}"
+  action_group_id     = azurerm_monitor_action_group.alerts.id
   postgres_scopes = {
     primary = {
       resource_id = one(module.database.alertable_resource_ids)
