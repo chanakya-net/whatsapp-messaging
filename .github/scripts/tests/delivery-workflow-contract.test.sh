@@ -295,8 +295,10 @@ test_skip_combined_dependency_and_safe_summary() {
   assert_contains "$summary" 'DEV_RELEASE_JOB_RESULT:.*needs\.dev-release\.result' 'Summary must include development release status.'
   assert_contains "$summary" 'PROD_RELEASE_JOB_RESULT:.*needs\.prod-release\.result' 'Summary must include production release status.'
   assert_contains "$summary" 'PROD_APPROVAL_ENVIRONMENT: prod' 'Summary must identify protected production approval environment.'
-  assert_contains "$summary" 'DEV_WORKER_DIGEST:.*needs\.dev-release\.outputs\.worker-digest' 'Summary must include tested worker digest.'
-  assert_contains "$summary" 'DEV_MIGRATION_DIGEST:.*needs\.dev-release\.outputs\.migrate-digest' 'Summary must include tested migration digest.'
+  assert_contains "$summary" 'DEV_WORKER_DIGEST:.*needs\.application-ready\.outputs\.worker-digest' \
+    'Summary must retain the attempted worker digest when development release fails.'
+  assert_contains "$summary" 'DEV_MIGRATION_DIGEST:.*needs\.application-ready\.outputs\.migrate-digest' \
+    'Summary must retain the attempted migration digest when development release fails.'
   assert_contains "$summary" 'PROD_WORKER_DIGEST:.*needs\.prod-release\.outputs\.worker-digest' 'Summary must include promoted worker digest.'
   assert_contains "$summary" 'PROD_MIGRATION_DIGEST:.*needs\.prod-release\.outputs\.migrate-digest' 'Summary must include promoted migration digest.'
   assert_contains "$summary" 'PROD_MIGRATION_RESULT:.*needs\.prod-release\.outputs\.migration-result' 'Summary must include production migration result.'

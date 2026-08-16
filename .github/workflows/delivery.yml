@@ -712,6 +712,7 @@ jobs:
     outputs:
       worker-digest: ${{ steps.handoff.outputs.worker-digest }}
       migrate-digest: ${{ steps.handoff.outputs.migrate-digest }}
+      handoff-artifact: ${{ steps.handoff.outputs.artifact-name }}
       migration-result: ${{ steps.release.outputs.migration-result }}
       prior-digest: ${{ steps.release.outputs.prior-digest }}
       revision-result: ${{ steps.release.outputs.revision-result }}
@@ -868,6 +869,8 @@ jobs:
         shell: bash
         env:
           COMMIT_SHA: ${{ github.sha }}
+          HANDOFF_RUN_ID: ${{ github.run_id }}
+          HANDOFF_RUN_ATTEMPT: ${{ github.run_attempt }}
           MIGRATION_RESULT: ${{ steps.release.outputs.migration-result }}
           REVISION_RESULT: ${{ steps.release.outputs.revision-result }}
           SMOKE_RESULT: ${{ steps.release.outputs.smoke-result }}
@@ -898,10 +901,12 @@ jobs:
             (.results == {migration: "success", revision: "success", smoke: "success", rollback: "skipped"})
           ' "$handoff_dir/handoff.json" >/dev/null
           printf 'worker-digest=%s\nmigrate-digest=%s\n' "$WORKER_DIGEST" "$MIGRATE_DIGEST" >>"$GITHUB_OUTPUT"
+          printf 'artifact-name=dev-promotion-%s-%s\n' \
+            "$HANDOFF_RUN_ID" "$HANDOFF_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
       - name: Upload immutable development promotion handoff
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: dev-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.handoff.outputs.artifact-name }}
           path: ${{ runner.temp }}/dev-promotion/handoff.json
           if-no-files-found: error
           retention-days: 1
@@ -944,7 +949,7 @@ jobs:
       - name: Download immutable development promotion handoff
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: dev-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ needs.dev-release.outputs.handoff-artifact }}
           path: ${{ runner.temp }}/prod-promotion
       - name: Validate exact development promotion handoff
         id: handoff
@@ -1140,8 +1145,8 @@ jobs:
           INFRASTRUCTURE_RESULT: ${{ needs.infrastructure-complete.result }}
           APPLICATION_RESULT: ${{ needs.application-ready.result }}
           DEV_RELEASE_JOB_RESULT: ${{ needs.dev-release.result }}
-          DEV_WORKER_DIGEST: ${{ needs.dev-release.outputs.worker-digest }}
-          DEV_MIGRATION_DIGEST: ${{ needs.dev-release.outputs.migrate-digest }}
+          DEV_WORKER_DIGEST: ${{ needs.application-ready.outputs.worker-digest }}
+          DEV_MIGRATION_DIGEST: ${{ needs.application-ready.outputs.migrate-digest }}
           DEV_MIGRATION_RESULT: ${{ needs.dev-release.outputs.migration-result }}
           DEV_HEALTH_RESULT: ${{ needs.dev-release.outputs.revision-result }}
           DEV_SMOKE_RESULT: ${{ needs.dev-release.outputs.smoke-result }}
@@ -1178,6 +1183,7 @@ jobs:
             printf -- '- dev_migration/health/smoke/rollback: `%s/%s/%s/%s`\n' \
               "${DEV_MIGRATION_RESULT:-skipped}" "${DEV_HEALTH_RESULT:-skipped}" \
               "${DEV_SMOKE_RESULT:-skipped}" "${DEV_ROLLBACK_RESULT:-skipped}"
+            # Production digests come from the revalidated development handoff; this publishes that guarantee.
             identical=unavailable
             if [[ -n "$PROD_WORKER_DIGEST" && -n "$PROD_MIGRATION_DIGEST" ]]; then
               if [[ "$DEV_WORKER_DIGEST" == "$PROD_WORKER_DIGEST" && \

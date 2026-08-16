@@ -7,10 +7,16 @@ test_development_promotion_handoff() {
     'Development release must expose only successfully tested worker digest.'
   assert_contains "$block" '^      migrate-digest:.*steps\.handoff\.outputs\.migrate-digest' \
     'Development release must expose only successfully tested migration digest.'
+  assert_contains "$block" '^      handoff-artifact:.*steps\.handoff\.outputs\.artifact-name' \
+    'Development release must expose the artifact name created by its successful attempt.'
   assert_contains "$block" 'uses: actions/upload-artifact@[0-9a-f]{40}' \
     'Development release must upload its promotion handoff with a pinned action.'
-  assert_contains "$block" 'dev-promotion-.*github\.run_id.*github\.run_attempt' \
-    'Promotion artifact name must be unique to the workflow attempt.'
+  assert_contains "$handoff" 'artifact-name=dev-promotion-%s-%s' \
+    'Promotion handoff must record the artifact name created by its workflow attempt.'
+  assert_contains "$handoff" 'HANDOFF_RUN_ID.*HANDOFF_RUN_ATTEMPT' \
+    'Promotion artifact name must include its workflow run and producing attempt.'
+  assert_contains "$block" 'name:.*steps\.handoff\.outputs\.artifact-name' \
+    'Promotion upload must use the artifact name exposed by the handoff step.'
   assert_contains "$block" 'retention-days: 1' 'Promotion handoff must expire after one day.'
   assert_contains "$block" 'overwrite: false' 'Promotion handoff must forbid artifact replacement.'
   assert_contains "$handoff" 'environment.*dev' 'Promotion handoff must identify development.'
@@ -44,7 +50,10 @@ assert_prod_gate_contract() {
   assert_contains "$block" '^      id-token: write$' 'Production OIDC must remain job-scoped.'
   assert_absent "$block" 'packages: write|actions: write|pull-requests: write' 'Production permissions are too broad.'
   assert_contains "$block" 'uses: actions/download-artifact@[0-9a-f]{40}' 'Promotion must download immutable handoff with pinned action.'
-  assert_contains "$block" 'name: dev-promotion-.*github\.run_id.*github\.run_attempt' 'Promotion must consume this attempt handoff.'
+  assert_contains "$block" 'name:.*needs\.dev-release\.outputs\.handoff-artifact' \
+    'Promotion must consume the handoff from the development attempt that produced it.'
+  assert_absent "$block" 'name: dev-promotion-.*github\.run_attempt' \
+    'Promotion download must not derive its artifact from a later partial-rerun attempt.'
   assert_contains "$block" 'client-id:.*AZURE_CLIENT_ID_PROD' 'Production promotion must use production deployment identity.'
   assert_absent "$block" 'AZURE_CLIENT_ID_(DEV|SHARED|PLAN)' 'Production promotion must not receive another identity.'
   assert_contains "$block" 'TOFU_STATE_CONTAINER_PROD' 'Production promotion must use production state container.'
@@ -74,7 +83,8 @@ run_promotion_handoff_cases() {
     expected="$(jq -r '.passes' <<<"$case_json")"
     if HANDOFF_FILE="$manifest" EXPECTED_COMMIT="$(printf 'd%.0s' {1..40})" \
       EXPECTED_WORKER_DIGEST="$(printf 'a%.0s' {1..64})" EXPECTED_MIGRATE_DIGEST="$(printf 'b%.0s' {1..64})" \
-      GITHUB_OUTPUT="$test_dir/$name.out" bash -Eeuo pipefail -c "$validate" >/dev/null 2>&1; then
+      HANDOFF_RUN_ID=123 HANDOFF_RUN_ATTEMPT=4 GITHUB_OUTPUT="$test_dir/$name.out" \
+      bash -Eeuo pipefail -c "$validate" >/dev/null 2>&1; then
       actual=true
     else
       actual=false
