@@ -61,6 +61,10 @@ assert_existing_jobs_preserved() {
   integration_block="$(job_block integration-tests)"
   assert_contains "$integration_block" '^      DOTNET_ENVIRONMENT: Test$' \
     'Integration validation must identify its non-production Testcontainers environment.'
+  assert_contains "$integration_block" 'uses: docker/setup-qemu-action@[0-9a-f]{40}' \
+    'Integration validation must register QEMU for cross-platform migration image tests.'
+  assert_contains "$integration_block" 'uses: docker/setup-buildx-action@[0-9a-f]{40}' \
+    'Integration validation must configure Buildx for cross-platform migration image tests.'
 }
 
 assert_image_job() {

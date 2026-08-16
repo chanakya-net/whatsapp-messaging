@@ -40,7 +40,7 @@ jobs:
       - name: Set up OpenTofu
         uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
         with:
-          tofu_version: 1.9.1
+          tofu_version: 1.12.5
           tofu_wrapper: false
 
       - name: Check OpenTofu formatting
@@ -119,7 +119,7 @@ jobs:
       - name: Set up OpenTofu
         uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
         with:
-          tofu_version: 1.9.1
+          tofu_version: 1.12.5
           tofu_wrapper: false
 
       - name: Validate and prepare non-secret plan inputs

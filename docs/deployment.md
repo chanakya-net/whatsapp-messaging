@@ -5,6 +5,11 @@ GitHub Actions `delivery.yml` for application delivery. Do not use local Docker
 publication, direct Container Apps updates, or direct migration-job starts for
 an environment release.
 
+The worker image repository is `ghcr.io/chanakya-net/whatsapp-messaging/worker`.
+Delivery publishes and deploys it only by immutable digest. The image supports
+`linux/amd64` and `linux/arm64`, runs as a non-root user, and serves liveness at
+`/health/live` and readiness at `/health/ready`.
+
 ## Safe configuration model
 
 - OpenTofu owns Container Apps, PostgreSQL, Key Vault, identities, and alerting.

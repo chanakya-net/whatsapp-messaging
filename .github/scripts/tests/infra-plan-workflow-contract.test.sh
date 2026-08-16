@@ -74,6 +74,8 @@ offline_pr_contract() {
     fail 'offline job permissions must grant contents read only'
   assert_absent "$offline" 'id-token:|pull-requests:|secrets\.|AZURE_|azure/login|tofu plan' \
     'offline job must not use OIDC, writes, Azure, secrets, or remote planning'
+  assert_contains "$offline" 'tofu_version: 1\.12\.5' \
+    'offline checks must use the OpenTofu version validated by lifecycle tests'
   assert_contains "$offline" 'tofu fmt -check -recursive \.tofu' 'offline job must check formatting'
   assert_contains "$offline" 'find \.tofu -name versions\.tf' 'offline job must discover every OpenTofu root'
   assert_contains "$offline" 'init -backend=false -input=false' 'offline init must disable backends'
@@ -108,6 +110,8 @@ trusted_plan_contract() {
     fail 'plan job permissions must grant contents read and OIDC only'
   assert_absent "$plan" 'pull-requests: write|secrets\.|continue-on-error|always\(\)' \
     'plan job must not receive PR writes, secrets, or failure masking'
+  assert_contains "$plan" 'tofu_version: 1\.12\.5' \
+    'trusted plans must use the same OpenTofu version as offline checks'
   assert_contains "$plan" 'AZURE_CLIENT_ID_PLAN' 'plan job must use bootstrap plan identity'
   assert_contains "$plan" 'Azure/login@[0-9a-f]{40}' 'plan job must use pinned Azure login'
   assert_contains "$plan" 'matrix:' 'plan job must use a layer matrix'
