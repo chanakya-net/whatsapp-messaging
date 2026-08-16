@@ -1,0 +1,7 @@
+{
+  "repository": "chanakya-net/whatsapp-messaging",
+  "pull_request": {
+    "head": { "repo": { "full_name": "chanakya-net/whatsapp-messaging" } },
+    "base": { "repo": { "full_name": "chanakya-net/whatsapp-messaging" } }
+  }
+}

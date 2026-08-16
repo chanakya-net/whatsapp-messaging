@@ -180,7 +180,7 @@ resource "azurerm_container_app_job" "smoke" {
   name                         = var.smoke_job_name
   container_app_environment_id = var.environment.container_app_environment_id
   resource_group_name          = var.environment.resource_group_name
-  location                      = var.environment.location
+  location                     = var.environment.location
   workload_profile_name        = "Consumption"
   replica_timeout_in_seconds   = 60
   replica_retry_limit          = 0
@@ -227,7 +227,7 @@ resource "azurerm_container_app_job" "smoke" {
     ignore_changes = [template[0].container[0].image]
 
     precondition {
-      condition = var.smoke_job_name != ""
+      condition     = var.smoke_job_name != ""
       error_message = "The smoke job name must not be empty."
     }
   }
