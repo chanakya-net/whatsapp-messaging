@@ -12,6 +12,7 @@ variables {
   tenant_id        = "00000000-0000-4000-8000-000000000001"
   subscription_id  = "00000000-0000-4000-8000-000000000002"
   bootstrap_serial = "042"
+  alert_email      = "platform-alerts@example.com"
   repository       = "chanakya-net/whatsapp-messaging"
   entra_administrator = {
     object_id      = "00000000-0000-4000-8000-000000000003"
