@@ -60,10 +60,10 @@ resource "azurerm_postgresql_flexible_server_database" "this" {
 }
 
 resource "azurerm_postgresql_flexible_server_firewall_rule" "this" {
-  for_each = var.firewall_rules
+  for_each = var.reviewed_egress_ranges
 
   name             = each.key
   server_id        = azurerm_postgresql_flexible_server.this.id
-  start_ip_address = each.value.start_ip_address
-  end_ip_address   = each.value.end_ip_address
+  start_ip_address = trimsuffix(each.value, "/32")
+  end_ip_address   = trimsuffix(each.value, "/32")
 }

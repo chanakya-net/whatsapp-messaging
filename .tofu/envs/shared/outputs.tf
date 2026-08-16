@@ -18,6 +18,11 @@ output "database_names" {
   value       = module.database.database_names
 }
 
+output "postgres_firewall_ranges" {
+  description = "Managed PostgreSQL firewall ranges supplied by delivery reconciliation."
+  value       = module.database.postgres_firewall_ranges
+}
+
 output "alertable_resource_ids" {
   description = "Shared resource IDs eligible for platform alerting."
   value       = module.database.alertable_resource_ids

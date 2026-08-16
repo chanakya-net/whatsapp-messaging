@@ -30,6 +30,9 @@ variables {
       collation = "en_US.utf8"
     }
   }
+  reviewed_egress_ranges = {
+    ip-203-0-113-10 = "203.0.113.10/32"
+  }
 }
 
 run "creates_databases_and_entra_administrator" {
@@ -51,8 +54,8 @@ run "creates_databases_and_entra_administrator" {
   }
 
   assert {
-    condition     = length(azurerm_postgresql_flexible_server_firewall_rule.this) == 0
-    error_message = "Firewall rules must default to empty."
+    condition     = output.postgres_firewall_ranges == var.reviewed_egress_ranges
+    error_message = "Managed firewall outputs must reflect the required reviewed range map."
   }
 
   assert {
@@ -66,21 +69,28 @@ run "creates_databases_and_entra_administrator" {
   }
 }
 
-run "creates_only_explicit_firewall_rules" {
+run "creates_exact_reviewed_firewall_set" {
   command = plan
 
   variables {
-    firewall_rules = {
-      office = {
-        start_ip_address = "203.0.113.10"
-        end_ip_address   = "203.0.113.10"
-      }
+    reviewed_egress_ranges = {
+      ip-20-192-0-20 = "20.192.0.20/32"
+      ip-20-192-0-30 = "20.192.0.30/32"
+      ip-20-193-0-20 = "20.193.0.20/32"
     }
   }
 
   assert {
-    condition     = toset(keys(azurerm_postgresql_flexible_server_firewall_rule.this)) == toset(["office"])
-    error_message = "Only explicitly supplied firewall rules may be created."
+    condition = (
+      toset(keys(azurerm_postgresql_flexible_server_firewall_rule.this)) == toset(keys(var.reviewed_egress_ranges)) &&
+      alltrue([
+        for key, rule in azurerm_postgresql_flexible_server_firewall_rule.this :
+        rule.start_ip_address == trimsuffix(var.reviewed_egress_ranges[key], "/32") &&
+        rule.end_ip_address == trimsuffix(var.reviewed_egress_ranges[key], "/32")
+      ]) &&
+      output.postgres_firewall_ranges == var.reviewed_egress_ranges
+    )
+    error_message = "Every reviewed /32 must create one independent exact-address firewall resource."
   }
 }
 
@@ -88,13 +98,59 @@ run "rejects_broad_azure_services_firewall_rule" {
   command = plan
 
   variables {
-    firewall_rules = {
-      allow_azure_services = {
-        start_ip_address = "0.0.0.0"
-        end_ip_address   = "0.0.0.0"
-      }
+    reviewed_egress_ranges = {
+      ip-0-0-0-0 = "0.0.0.0/32"
     }
   }
 
-  expect_failures = [var.firewall_rules]
+  expect_failures = [var.reviewed_egress_ranges]
+}
+
+run "rejects_empty_reviewed_firewall_set" {
+  command = plan
+
+  variables {
+    reviewed_egress_ranges = {}
+  }
+
+  expect_failures = [var.reviewed_egress_ranges]
+}
+
+run "rejects_invalid_or_non_32_ranges" {
+  command = plan
+
+  variables {
+    reviewed_egress_ranges = {
+      ip-203-0-113-999 = "203.0.113.999/32"
+      ip-203-0-113-0   = "203.0.113.0/24"
+      ip-v6            = "2001:db8::1/128"
+    }
+  }
+
+  expect_failures = [var.reviewed_egress_ranges]
+}
+
+run "rejects_duplicate_ranges" {
+  command = plan
+
+  variables {
+    reviewed_egress_ranges = {
+      ip-203-0-113-10 = "203.0.113.10/32"
+      duplicate       = "203.0.113.10/32"
+    }
+  }
+
+  expect_failures = [var.reviewed_egress_ranges]
+}
+
+run "rejects_non_cidr_derived_keys" {
+  command = plan
+
+  variables {
+    reviewed_egress_ranges = {
+      arbitrary = "203.0.113.10/32"
+    }
+  }
+
+  expect_failures = [var.reviewed_egress_ranges]
 }

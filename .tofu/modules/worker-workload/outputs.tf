@@ -48,6 +48,26 @@ output "smoke_job_name" {
   value       = azurerm_container_app_job.smoke.name
 }
 
+output "smoke_job_outbound_ip_addresses" {
+  description = "Smoke job outbound addresses for downstream database firewall reconciliation."
+  value       = toset(azurerm_container_app_job.smoke.outbound_ip_addresses)
+}
+
+output "postgres_egress_ranges" {
+  description = "Canonical PostgreSQL /32 egress ranges grouped by workload source."
+  value = {
+    worker = toset([
+      for address in azurerm_container_app.worker.outbound_ip_addresses : "${address}/32"
+    ])
+    migration = toset([
+      for address in azurerm_container_app_job.migration.outbound_ip_addresses : "${address}/32"
+    ])
+    smoke = toset([
+      for address in azurerm_container_app_job.smoke.outbound_ip_addresses : "${address}/32"
+    ])
+  }
+}
+
 output "alertable_resource_ids" {
   description = "Worker IDs eligible for downstream environment alerting."
   value       = toset([azurerm_container_app.worker.id])

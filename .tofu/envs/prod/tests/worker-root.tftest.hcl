@@ -55,6 +55,20 @@ override_resource {
   }
 }
 
+override_resource {
+  target = module.worker.azurerm_container_app_job.migration
+  values = {
+    outbound_ip_addresses = ["20.193.0.30", "20.193.0.31"]
+  }
+}
+
+override_resource {
+  target = module.worker.azurerm_container_app_job.smoke
+  values = {
+    outbound_ip_addresses = ["20.193.0.40", "20.193.0.20"]
+  }
+}
+
 variables {
   tenant_id        = "00000000-0000-4000-8000-000000000001"
   subscription_id  = "00000000-0000-4000-8000-000000000002"
@@ -70,6 +84,31 @@ variables {
   }
   tags = {
     owner = "platform"
+  }
+}
+
+run "exports_complete_reviewed_postgres_egress" {
+  command = plan
+
+  assert {
+    condition = output.reviewed_postgres_egress == {
+      environment = "prod"
+      sources = {
+        container_environment = toset(["20.193.0.10/32"])
+        worker                = toset(["20.193.0.20/32", "20.193.0.21/32"])
+        migration             = toset(["20.193.0.30/32", "20.193.0.31/32"])
+        smoke                 = toset(["20.193.0.20/32", "20.193.0.40/32"])
+      }
+      ranges = toset([
+        "20.193.0.10/32",
+        "20.193.0.20/32",
+        "20.193.0.21/32",
+        "20.193.0.30/32",
+        "20.193.0.31/32",
+        "20.193.0.40/32",
+      ])
+    }
+    error_message = "Prod must publish its complete labelled, deduplicated PostgreSQL egress union."
   }
 }
 
