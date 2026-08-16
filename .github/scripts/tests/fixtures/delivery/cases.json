@@ -55,6 +55,14 @@
       "expected": {"application": "true", "infrastructure": "true", "shared": "true", "dev": "true", "prod": "true", "layers": "application,shared,dev,prod"}
     }
   ],
+  "classification_failures": [
+    {
+      "name": "git-diff-failure",
+      "event": "push",
+      "paths": [],
+      "git_failure": true
+    }
+  ],
   "readiness": [
     {"name": "application-only", "application": true, "infrastructure": false, "images": "success", "infrastructure_result": "success", "ready": true},
     {"name": "infrastructure-only", "application": false, "infrastructure": true, "images": "skipped", "infrastructure_result": "success", "ready": false},

@@ -71,6 +71,7 @@ test_classification_and_skeleton() {
   cat >"$test_dir/bin/git" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+jq -e '.git_failure != true' <<<"${DELIVERY_CASE:?}" >/dev/null || exit 42
 jq -j '.paths[] | ., "\u0000"' <<<"${DELIVERY_CASE:?}"
 EOF
   chmod +x "$test_dir/bin/git"
@@ -81,7 +82,7 @@ EOF
     event="$(jq -r '.event' <<<"$case_json")"
     output_file="$test_dir/$name.out"
     : >"$output_file"
-    PATH="$test_dir/bin:$PATH" DELIVERY_CASE="$case_json" EVENT_NAME="$event" \
+    RUNNER_TEMP="$test_dir" PATH="$test_dir/bin:$PATH" DELIVERY_CASE="$case_json" EVENT_NAME="$event" \
       BEFORE_SHA=1111111111111111111111111111111111111111 \
       AFTER_SHA=2222222222222222222222222222222222222222 \
       GITHUB_OUTPUT="$output_file" bash -Eeuo pipefail -c "$classifier"
@@ -91,6 +92,19 @@ EOF
       [ "$actual" = "$expected" ] || fail "$name $key: expected $expected, got $actual"
     done
   done < <(jq -c '.classification[]' "$FIXTURES")
+
+  while IFS= read -r case_json; do
+    local name output_file
+    name="$(jq -r '.name' <<<"$case_json")"
+    output_file="$test_dir/$name.out"
+    : >"$output_file"
+    if RUNNER_TEMP="$test_dir" PATH="$test_dir/bin:$PATH" DELIVERY_CASE="$case_json" EVENT_NAME=push \
+      BEFORE_SHA=1111111111111111111111111111111111111111 \
+      AFTER_SHA=2222222222222222222222222222222222222222 \
+      GITHUB_OUTPUT="$output_file" bash -Eeuo pipefail -c "$classifier"; then
+      fail "$name must fail closed when git cannot classify changed paths"
+    fi
+  done < <(jq -c '.classification_failures[]' "$FIXTURES")
 }
 
 test_shared_retained_gate() {

@@ -46,10 +46,12 @@ jobs:
           if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
             application=true infrastructure=true shared=true dev=true prod=true
           else
+            changed_paths_file="$(mktemp "$RUNNER_TEMP/changed-paths.XXXXXX")"
+            trap 'rm -f -- "$changed_paths_file"' EXIT
             if [[ "$BEFORE_SHA" =~ ^0{40}$ ]]; then
-              changed_paths=(git ls-tree -r --name-only -z "$AFTER_SHA")
+              git ls-tree -r --name-only -z "$AFTER_SHA" >"$changed_paths_file"
             else
-              changed_paths=(git diff --name-only -z "$BEFORE_SHA" "$AFTER_SHA")
+              git diff --name-only -z "$BEFORE_SHA" "$AFTER_SHA" >"$changed_paths_file"
             fi
             while IFS= read -r -d '' path; do
               case "$path" in
@@ -72,7 +74,7 @@ jobs:
                 src/*|tests/*|eng/*|Directory.*|global.json|MessageBridge*.sln*|.config/*|.github/workflows/_validation.yml|.github/workflows/_publish-images.yml)
                   application=true ;;
               esac
-            done < <("${changed_paths[@]}")
+            done <"$changed_paths_file"
           fi
           layers=()
           [[ "$application" == true ]] && layers+=(application)
