@@ -69,7 +69,7 @@ jobs:
                   infrastructure=true; shared=true; dev=true; prod=true ;;
                 .github/scripts/reconcile-postgres-egress.sh|.github/scripts/tests/reconcile-postgres-egress.test.sh|.github/scripts/tests/fixtures/postgres-egress/*)
                   infrastructure=true; shared=true; dev=true; prod=true ;;
-                .github/workflows/delivery.yml|.github/scripts/tests/delivery-workflow-contract.test.sh|.github/scripts/tests/fixtures/delivery/*)
+                .github/workflows/delivery.yml|.github/scripts/tests/delivery-workflow-contract.test.sh|.github/scripts/tests/delivery-release-contract.inc.sh|.github/scripts/tests/fixtures/delivery/*)
                   application=true; infrastructure=true; shared=true; dev=true; prod=true ;;
                 src/*|tests/*|eng/*|Directory.*|global.json|MessageBridge*.sln*|.config/*|.github/workflows/_validation.yml|.github/workflows/_publish-images.yml)
                   application=true ;;
@@ -699,9 +699,171 @@ jobs:
             exit 1
           fi
 
+  dev-release:
+    name: Release verified application to development
+    needs: [changes, validation, application-ready, infrastructure-complete]
+    if: ${{ needs.validation.result == 'success' && needs.application-ready.result == 'success' && needs.application-ready.outputs.ready == 'true' && needs.infrastructure-complete.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      migration-result: ${{ steps.release.outputs.migration-result }}
+      prior-digest: ${{ steps.release.outputs.prior-digest }}
+      revision-result: ${{ steps.release.outputs.revision-result }}
+      smoke-result: ${{ steps.release.outputs.smoke-result }}
+      rollback-result: ${{ steps.release.outputs.rollback-result }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEV }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_DEV: ${{ vars.TOFU_STATE_CONTAINER_DEV }}
+      TOFU_STATE_KEY_DEV: ${{ vars.TOFU_STATE_KEY_DEV }}
+      WORKER_DIGEST: ${{ needs.application-ready.outputs.worker-digest }}
+      MIGRATE_DIGEST: ${{ needs.application-ready.outputs.migrate-digest }}
+      IMAGE_ROOT: ghcr.io/chanakya-net/whatsapp-messaging
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+      - name: Sign in with development deploy identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEV }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Resolve development runtime names
+        id: runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/dev-release.XXXXXX")"
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          root=.tofu/envs/dev
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_DEV" == dev && "$TOFU_STATE_KEY_DEV" == messagebridge/dev.tfstate ]] || exit 1
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_DEV" \
+            -backend-config="key=$TOFU_STATE_KEY_DEV" -backend-config="use_azuread_auth=true" \
+            >"$runtime_dir/init.log" 2>&1; then
+            printf 'Development release OpenTofu initialization failed.\n' >&2; exit 1
+          fi
+          if ! tofu -chdir="$root" output -json >"$runtime_dir/outputs.json" 2>"$runtime_dir/output.log"; then
+            printf 'Development runtime names unavailable.\n' >&2; exit 1
+          fi
+          jq -e '
+            [.migration_job_name.value, .smoke_job_name.value, .worker_name.value] |
+            all(.[]; type == "string" and test("^[a-z][a-z0-9-]{0,30}[a-z0-9]$"))
+          ' "$runtime_dir/outputs.json" >/dev/null || exit 1
+          {
+            jq -r '"migration-job-name=" + .migration_job_name.value' "$runtime_dir/outputs.json"
+            jq -r '"smoke-job-name=" + .smoke_job_name.value' "$runtime_dir/outputs.json"
+            jq -r '"worker-name=" + .worker_name.value' "$runtime_dir/outputs.json"
+            printf 'resource-group=rg-messagebridge-dev-centralindia-%s\n' "$serial"
+          } >>"$GITHUB_OUTPUT"
+      - name: Migrate, deploy, smoke, and roll back development
+        id: release
+        shell: bash
+        env:
+          MIGRATION_JOB_NAME: ${{ steps.runtime.outputs.migration-job-name }}
+          SMOKE_JOB_NAME: ${{ steps.runtime.outputs.smoke-job-name }}
+          WORKER_NAME: ${{ steps.runtime.outputs.worker-name }}
+          RESOURCE_GROUP: ${{ steps.runtime.outputs.resource-group }}
+        run: |
+          set -Eeuo pipefail
+          record() { printf '%s=%s\n' "$1" "$2" >>"$GITHUB_OUTPUT"; }
+          record migration-result pending
+          record prior-digest unavailable
+          record revision-result skipped
+          record smoke-result skipped
+          record rollback-result skipped
+
+          valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}[a-z0-9]$ ]]; }
+          valid_name "$MIGRATION_JOB_NAME" && valid_name "$SMOKE_JOB_NAME" && valid_name "$WORKER_NAME" || exit 1
+          [[ "$RESOURCE_GROUP" =~ ^rg-messagebridge-dev-centralindia-[0-9]{3}$ ]] || exit 1
+          [[ "$WORKER_DIGEST" =~ ^[0-9a-f]{64}$ && "$MIGRATE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          [[ "$IMAGE_ROOT" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]] || exit 1
+
+          migration_image="$IMAGE_ROOT/migrate@sha256:$MIGRATE_DIGEST"
+          worker_image="$IMAGE_ROOT/worker@sha256:$WORKER_DIGEST"
+          if ! az containerapp job update --name "$MIGRATION_JOB_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$migration_image" --output none; then
+            record migration-result failure; exit 1
+          fi
+          if ! bash .github/scripts/wait-for-container-app-job.sh --name "$MIGRATION_JOB_NAME" \
+            --resource-group "$RESOURCE_GROUP" --poll-budget "${MIGRATION_POLL_BUDGET:-30}" \
+            --timeout "${MIGRATION_TIMEOUT:-300}"; then
+            record migration-result failure; exit 1
+          fi
+          record migration-result success
+
+          if ! prior_image="$(az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query 'properties.template.containers[0].image' --output tsv 2>/dev/null)"; then
+            exit 1
+          fi
+          [[ "$prior_image" =~ @sha256:([0-9a-f]{64})$ ]] || exit 1
+          prior_digest="sha256:${BASH_REMATCH[1]}"
+          record prior-digest "$prior_digest"
+
+          current_revision() {
+            az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --query properties.latestRevisionName --output tsv 2>/dev/null
+          }
+          wait_revision() {
+            bash .github/scripts/wait-for-container-app-revision.sh --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --digest "$2" --poll-budget "${REVISION_POLL_BUDGET:-30}" \
+              --timeout "${REVISION_TIMEOUT:-300}"
+          }
+          run_smoke() {
+            bash .github/scripts/wait-for-container-app-job.sh --name "$SMOKE_JOB_NAME" \
+              --resource-group "$RESOURCE_GROUP" --poll-budget "${SMOKE_POLL_BUDGET:-30}" \
+              --timeout "${SMOKE_TIMEOUT:-300}"
+          }
+          rollback_worker() {
+            local revision
+            az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --image "$prior_image" --output none || return 1
+            revision="$(current_revision)" || return 1
+            [[ -n "$revision" ]] || return 1
+            wait_revision "$revision" "$prior_digest" || return 1
+            run_smoke || return 1
+          }
+
+          release_failed=false
+          if ! az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$worker_image" --output none; then
+            record revision-result failure
+            release_failed=true
+          else
+            revision="$(current_revision)" || revision=""
+            if [[ -z "$revision" ]] || ! wait_revision "$revision" "sha256:$WORKER_DIGEST"; then
+              record revision-result failure
+              release_failed=true
+            else
+              record revision-result success
+              if run_smoke; then record smoke-result success; else record smoke-result failure; release_failed=true; fi
+            fi
+          fi
+          if [[ "$release_failed" == false ]]; then exit 0; fi
+          if rollback_worker; then record rollback-result success; else record rollback-result failure; fi
+          exit 1
+
   delivery-summary:
     name: Publish secret-safe delivery summary
-    needs: [changes, validation, publish-images, shared-retained, dev-infrastructure, prod-infrastructure, shared-reconcile, infrastructure-complete, application-ready]
+    needs: [changes, validation, publish-images, shared-retained, dev-infrastructure, prod-infrastructure, shared-reconcile, infrastructure-complete, application-ready, dev-release]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -734,6 +896,14 @@ jobs:
           EXACT_COUNT: ${{ needs.shared-reconcile.outputs.exact-count }}
           INFRASTRUCTURE_RESULT: ${{ needs.infrastructure-complete.result }}
           APPLICATION_RESULT: ${{ needs.application-ready.result }}
+          RELEASE_JOB_RESULT: ${{ needs.dev-release.result }}
+          RELEASE_ENVIRONMENT: dev
+          WORKER_DIGEST: ${{ needs.application-ready.outputs.worker-digest }}
+          MIGRATION_DIGEST: ${{ needs.application-ready.outputs.migrate-digest }}
+          MIGRATION_RESULT: ${{ needs.dev-release.outputs.migration-result }}
+          PRIOR_DIGEST: ${{ needs.dev-release.outputs.prior-digest }}
+          SMOKE_RESULT: ${{ needs.dev-release.outputs.smoke-result }}
+          ROLLBACK_RESULT: ${{ needs.dev-release.outputs.rollback-result }}
         run: |
           set -Eeuo pipefail
           {
@@ -751,4 +921,12 @@ jobs:
             printf -- '- retained_egress_count: `%s`\n- exact_egress_count: `%s`\n' "${RETAINED_COUNT:-0}" "${EXACT_COUNT:-0}"
             printf -- '- infrastructure_gate: `%s`\n- application_gate: `%s`\n' \
               "$INFRASTRUCTURE_RESULT" "$APPLICATION_RESULT"
+            printf -- '- development_release: `%s`\n- release_environment: `%s`\n' \
+              "$RELEASE_JOB_RESULT" "$RELEASE_ENVIRONMENT"
+            printf -- '- worker_digest: `%s`\n- migration_digest: `%s`\n' \
+              "${WORKER_DIGEST:-unavailable}" "${MIGRATION_DIGEST:-unavailable}"
+            printf -- '- migration_result: `%s`\n- prior_digest: `%s`\n' \
+              "${MIGRATION_RESULT:-skipped}" "${PRIOR_DIGEST:-unavailable}"
+            printf -- '- smoke_result: `%s`\n- rollback_result: `%s`\n' \
+              "${SMOKE_RESULT:-skipped}" "${ROLLBACK_RESULT:-skipped}"
           } >>"$GITHUB_STEP_SUMMARY"

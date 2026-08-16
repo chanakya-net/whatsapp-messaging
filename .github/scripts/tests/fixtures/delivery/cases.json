@@ -43,6 +43,12 @@
       "expected": {"application": "false", "infrastructure": "true", "shared": "true", "dev": "true", "prod": "true", "layers": "shared,dev,prod"}
     },
     {
+      "name": "delivery-release-contract-helper",
+      "event": "push",
+      "paths": [".github/scripts/tests/delivery-release-contract.inc.sh"],
+      "expected": {"application": "true", "infrastructure": "true", "shared": "true", "dev": "true", "prod": "true", "layers": "application,shared,dev,prod"}
+    },
+    {
       "name": "documentation-only",
       "event": "push",
       "paths": ["docs/runbook.md"],
@@ -74,6 +80,111 @@
     {"name": "ordered-success", "infrastructure": true, "results": ["success", "success", "success", "success"], "passes": true, "state": "success"},
     {"name": "reconciliation-failure", "infrastructure": true, "results": ["success", "success", "success", "failure"], "passes": false, "state": ""},
     {"name": "unexpected-mutation", "infrastructure": false, "results": ["success", "skipped", "skipped", "skipped"], "passes": false, "state": ""}
+  ],
+  "release": [
+    {
+      "name": "release-success",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {
+        "exit": 0,
+        "migration-result": "success",
+        "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "revision-result": "success",
+        "smoke-result": "success",
+        "rollback-result": "skipped"
+      }
+    },
+    {
+      "name": "migration-failure",
+      "migration": {"status": "Failed"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "failure", "prior-digest": "unavailable", "revision-result": "skipped", "smoke-result": "skipped", "rollback-result": "skipped"}
+    },
+    {
+      "name": "migration-timeout",
+      "migration": {"status": "Running"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "failure", "prior-digest": "unavailable", "revision-result": "skipped", "smoke-result": "skipped", "rollback-result": "skipped"}
+    },
+    {
+      "name": "revision-failure",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Failed", "health": "Unhealthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "revision-result": "failure", "smoke-result": "skipped", "rollback-result": "success", "worker-updates": 2, "smoke-starts": 1}
+    },
+    {
+      "name": "revision-timeout",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioning", "health": "Unknown", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "revision-result": "failure", "smoke-result": "skipped", "rollback-result": "success", "worker-updates": 2, "smoke-starts": 1}
+    },
+    {
+      "name": "smoke-failure",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Failed", "Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "revision-result": "success", "smoke-result": "failure", "rollback-result": "success", "worker-updates": 2, "smoke-starts": 2}
+    },
+    {
+      "name": "rollback-failure",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Failed", "health": "Unhealthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Failed", "health": "Unhealthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "revision-result": "failure", "smoke-result": "skipped", "rollback-result": "failure", "worker-updates": 2, "smoke-starts": 0}
+    },
+    {
+      "name": "prior-digest-capture-failure",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": false,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "unavailable", "revision-result": "skipped", "smoke-result": "skipped", "rollback-result": "skipped"}
+    }
   ],
   "egress_failures": [
     "dev-collection",
