@@ -1,4 +1,10 @@
 mock_provider "azurerm" {
+  mock_resource "azurerm_monitor_action_group" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.Insights/actionGroups/ag-messagebridge-dev-cin-042"
+    }
+  }
+
   mock_resource "azurerm_key_vault" {
     defaults = {
       id        = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.KeyVault/vaults/kv-msgbr-dev-cin-042"
@@ -9,6 +15,18 @@ mock_provider "azurerm" {
   mock_resource "azurerm_container_app_environment" {
     defaults = {
       id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.App/managedEnvironments/cae-messagebridge-dev-cin-042"
+    }
+  }
+
+  mock_resource "azurerm_container_app" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.App/containerApps/ca-messagebridge-dev-cin-042"
+    }
+  }
+
+  mock_resource "azurerm_container_app_job" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.App/jobs/job-messagebridge-dev-cin-042"
     }
   }
 }
@@ -35,6 +53,7 @@ variables {
   tenant_id        = "00000000-0000-4000-8000-000000000001"
   subscription_id  = "00000000-0000-4000-8000-000000000002"
   bootstrap_serial = "042"
+  alert_email      = "platform-alerts@example.com"
   migration_image = {
     repository = "ghcr.io/chanakya-net/whatsapp-messaging/migrate"
     digest     = "4c1d7a1f0f1a4dbb9a1b3f6d5e2c8a7b6d4e3f2a1b0c9d8e7f6a5b4c3d2e1f00"

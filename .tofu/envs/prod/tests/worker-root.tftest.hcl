@@ -1,4 +1,10 @@
 mock_provider "azurerm" {
+  mock_resource "azurerm_monitor_action_group" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.Insights/actionGroups/ag-messagebridge-prod-cin-042"
+    }
+  }
+
   mock_resource "azurerm_key_vault" {
     defaults = {
       id        = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.KeyVault/vaults/kv-msgbr-prod-cin-042"
@@ -58,6 +64,7 @@ override_resource {
 override_resource {
   target = module.worker.azurerm_container_app_job.migration
   values = {
+    id                    = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.App/jobs/mig-messagebridge-prod-cin-042"
     outbound_ip_addresses = ["20.193.0.30", "20.193.0.31"]
   }
 }
@@ -65,6 +72,7 @@ override_resource {
 override_resource {
   target = module.worker.azurerm_container_app_job.smoke
   values = {
+    id                    = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.App/jobs/smoke-messagebridge-prod-cin-042"
     outbound_ip_addresses = ["20.193.0.40", "20.193.0.20"]
   }
 }
@@ -73,6 +81,7 @@ variables {
   tenant_id        = "00000000-0000-4000-8000-000000000001"
   subscription_id  = "00000000-0000-4000-8000-000000000002"
   bootstrap_serial = "042"
+  alert_email      = "platform-alerts@example.com"
   operator_identity = {
     principal_id   = "00000000-0000-4000-8000-000000000004"
     principal_type = "Group"
