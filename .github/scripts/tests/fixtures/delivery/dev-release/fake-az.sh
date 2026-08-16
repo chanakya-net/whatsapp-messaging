@@ -80,6 +80,7 @@ fi
 
 if [[ "$1 $2" == "containerapp update" ]]; then
   count="$(next_count worker-updates)"
+  if ((count == 1)); then json_bool '.worker_update_success' || exit 1; fi
   if ((count > 1)); then json_bool '.rollback_update_success' || exit 1; fi
   exit 0
 fi

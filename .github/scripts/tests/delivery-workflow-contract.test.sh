@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/delivery.yml"
 FIXTURES="$REPO_ROOT/.github/scripts/tests/fixtures/delivery/cases.json"
+DEPLOYMENT_DOCS="$REPO_ROOT/docs/deployment.md"
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
@@ -289,16 +290,23 @@ test_skip_combined_dependency_and_safe_summary() {
   assert_contains "$summary" 'apply|APPLY' 'Summary must report apply results.'
   assert_contains "$summary" 'SHARED_JOB_RESULT:.*needs\.shared-retained\.result' 'Summary must include shared guard job status.'
   assert_contains "$summary" 'RECONCILE_JOB_RESULT:.*needs\.shared-reconcile\.result' 'Summary must include reconciliation job status.'
-  assert_contains "$summary" 'needs:.*dev-release' 'Summary must wait for development release results.'
-  assert_contains "$summary" 'RELEASE_JOB_RESULT:.*needs\.dev-release\.result' 'Summary must include development release status.'
-  assert_contains "$summary" 'RELEASE_ENVIRONMENT: dev' 'Summary must identify the development environment.'
-  assert_contains "$summary" 'WORKER_DIGEST:.*needs\.application-ready\.outputs\.worker-digest' 'Summary must include gated worker digest.'
-  assert_contains "$summary" 'MIGRATION_DIGEST:.*needs\.application-ready\.outputs\.migrate-digest' 'Summary must include gated migration digest.'
-  assert_contains "$summary" 'MIGRATION_RESULT:.*needs\.dev-release\.outputs\.migration-result' 'Summary must include migration result.'
-  assert_contains "$summary" 'PRIOR_DIGEST:.*needs\.dev-release\.outputs\.prior-digest' 'Summary must include prior worker digest.'
-  assert_contains "$summary" 'SMOKE_RESULT:.*needs\.dev-release\.outputs\.smoke-result' 'Summary must include smoke result.'
-  assert_contains "$summary" 'ROLLBACK_RESULT:.*needs\.dev-release\.outputs\.rollback-result' 'Summary must include rollback result.'
-  for field in development_release release_environment worker_digest migration_digest migration_result prior_digest smoke_result rollback_result; do
+  assert_contains "$summary" 'needs:.*dev-release.*prod-release|needs:.*prod-release.*dev-release' \
+    'Summary must wait for development and production release results.'
+  assert_contains "$summary" 'DEV_RELEASE_JOB_RESULT:.*needs\.dev-release\.result' 'Summary must include development release status.'
+  assert_contains "$summary" 'PROD_RELEASE_JOB_RESULT:.*needs\.prod-release\.result' 'Summary must include production release status.'
+  assert_contains "$summary" 'PROD_APPROVAL_ENVIRONMENT: prod' 'Summary must identify protected production approval environment.'
+  assert_contains "$summary" 'DEV_WORKER_DIGEST:.*needs\.application-ready\.outputs\.worker-digest' \
+    'Summary must retain the attempted worker digest when development release fails.'
+  assert_contains "$summary" 'DEV_MIGRATION_DIGEST:.*needs\.application-ready\.outputs\.migrate-digest' \
+    'Summary must retain the attempted migration digest when development release fails.'
+  assert_contains "$summary" 'PROD_WORKER_DIGEST:.*needs\.prod-release\.outputs\.worker-digest' 'Summary must include promoted worker digest.'
+  assert_contains "$summary" 'PROD_MIGRATION_DIGEST:.*needs\.prod-release\.outputs\.migrate-digest' 'Summary must include promoted migration digest.'
+  assert_contains "$summary" 'PROD_MIGRATION_RESULT:.*needs\.prod-release\.outputs\.migration-result' 'Summary must include production migration result.'
+  assert_contains "$summary" 'PROD_HEALTH_RESULT:.*needs\.prod-release\.outputs\.revision-result' 'Summary must include production health result.'
+  assert_contains "$summary" 'PROD_PRIOR_DIGEST:.*needs\.prod-release\.outputs\.prior-digest' 'Summary must include prior production worker digest.'
+  assert_contains "$summary" 'PROD_SMOKE_RESULT:.*needs\.prod-release\.outputs\.smoke-result' 'Summary must include production smoke result.'
+  assert_contains "$summary" 'PROD_ROLLBACK_RESULT:.*needs\.prod-release\.outputs\.rollback-result' 'Summary must include production rollback result.'
+  for field in development_release production_release approval_environment dev_worker_digest dev_migration_digest prod_worker_digest prod_migration_digest identical_digests prod_migration/health/smoke prod_prior_digest prod_rollback_result; do
     assert_contains "$summary" "$field:" "Summary must publish sanitized $field."
   done
   assert_absent "$summary" 'secrets\.|vars\.|ARM_|AZURE_|TOFU_|tfvars|\.tfstate|resource.group|server.name|ranges|cat ' 'Summary must not expose resource or configuration values.'
@@ -351,7 +359,7 @@ test_global_permissions_pins_and_timeouts() {
   if grep -E 'uses: [^[:space:]]+@' "$WORKFLOW" | grep -Ev '@[0-9a-f]{40}([[:space:]]|$)' >/dev/null; then
     fail 'Every external action in delivery must be pinned to a full SHA.'
   fi
-  for job in changes shared-retained dev-infrastructure prod-infrastructure shared-reconcile infrastructure-complete application-ready dev-release delivery-summary; do
+  for job in changes shared-retained dev-infrastructure prod-infrastructure shared-reconcile infrastructure-complete application-ready dev-release prod-release delivery-summary; do
     block="$(job_block "$job")"
     assert_contains "$block" '^    timeout-minutes: [0-9]+$' "$job must set an explicit timeout."
   done
@@ -359,6 +367,7 @@ test_global_permissions_pins_and_timeouts() {
 }
 
 . "$REPO_ROOT/.github/scripts/tests/delivery-release-contract.inc.sh"
+. "$REPO_ROOT/.github/scripts/tests/delivery-promotion-contract.inc.sh"
 
 test_classification_and_skeleton
 test_shared_retained_gate
@@ -366,6 +375,9 @@ test_environment_order_approvals_and_handoff
 test_safe_egress_reconciliation
 test_skip_combined_dependency_and_safe_summary
 test_dev_release_gate
+test_development_promotion_handoff
+test_prod_promotion_gate
 test_dev_release_scenarios
+test_prod_release_scenarios
 test_global_permissions_pins_and_timeouts
 printf '%s\n' 'Delivery workflow contract checks passed.'

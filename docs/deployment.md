@@ -628,6 +628,47 @@ Configure `nuget.config` in your consuming application:
 
 **HITL Decision**: Package feed location and authentication are environment-specific. Update feed URL and credentials per deployment environment.
 
+## Protected production promotion
+
+`.github/workflows/delivery.yml` is the sole ordered application delivery path. A successful
+development release writes a one-day, run-attempt-specific promotion artifact containing only
+the commit, development-tested worker and migration digests, and sanitized migration, health,
+smoke, and rollback results. Production validates that artifact against explicit development job
+outputs. It does not rebuild, retag, copy, or resolve either image through a mutable tag.
+
+Configure the repository's `prod` GitHub Environment before enabling promotion:
+
+1. Add required reviewers and restrict deployment branches to the intended delivery branch.
+2. Disable administrator protection-rule bypass where repository policy permits it.
+3. Prevent self-review when independent approval is required by policy.
+4. Store the production Azure client ID and production OpenTofu backend coordinates as environment
+   variables. Do not expose production deployment identity values outside protected `prod` jobs.
+
+Required reviewer identities and bypass policy live in GitHub Environment settings; workflow YAML
+can select `prod` but cannot declare those reviewers. GitHub evaluates the Environment gate before
+starting the job, so approval occurs before production OIDC issuance and every production mutation.
+Production promotions also use a stable, non-cancelling concurrency group so two approved attempts
+cannot mutate production concurrently.
+
+After approval, the workflow performs this fixed sequence:
+
+1. Validate the immutable handoff's commit, exact digests, environment, and successful results.
+2. Sign in with the production deployment identity and resolve runtime names from production state.
+3. Update and run the migration job with the exact development-tested migration digest; wait for success.
+4. Capture the current worker digest, update the worker to the exact development-tested worker digest,
+   and wait for that digest to report healthy.
+5. Run the internal production smoke job.
+
+Migration failure stops before worker mutation. Worker update, health, or smoke failure triggers one
+application rollback: restore the captured worker digest, wait for that exact prior digest to become
+healthy, then rerun internal smoke. The workflow never reverses database schema automatically.
+Migration recovery requires an operator-led forward fix or the approved database point-in-time restore
+procedure.
+
+The delivery summary reports commit, `prod` approval environment, development and production digests,
+digest identity, migration, health, smoke, prior worker digest, and rollback result. It intentionally
+omits secrets, environment configuration, backend coordinates, resource names, state, and logs.
+
 ## HITL (Human-In-The-Loop) Decisions
 
 The following decisions require manual intervention and cannot be automated:

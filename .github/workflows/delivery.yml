@@ -710,6 +710,9 @@ jobs:
       contents: read
       id-token: write
     outputs:
+      worker-digest: ${{ steps.handoff.outputs.worker-digest }}
+      migrate-digest: ${{ steps.handoff.outputs.migrate-digest }}
+      handoff-artifact: ${{ steps.handoff.outputs.artifact-name }}
       migration-result: ${{ steps.release.outputs.migration-result }}
       prior-digest: ${{ steps.release.outputs.prior-digest }}
       revision-result: ${{ steps.release.outputs.revision-result }}
@@ -861,9 +864,254 @@ jobs:
           if rollback_worker; then record rollback-result success; else record rollback-result failure; fi
           exit 1
 
+      - name: Create successful development promotion handoff
+        id: handoff
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          HANDOFF_RUN_ID: ${{ github.run_id }}
+          HANDOFF_RUN_ATTEMPT: ${{ github.run_attempt }}
+          MIGRATION_RESULT: ${{ steps.release.outputs.migration-result }}
+          REVISION_RESULT: ${{ steps.release.outputs.revision-result }}
+          SMOKE_RESULT: ${{ steps.release.outputs.smoke-result }}
+          ROLLBACK_RESULT: ${{ steps.release.outputs.rollback-result }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WORKER_DIGEST" =~ ^[0-9a-f]{64}$ && "$MIGRATE_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$MIGRATION_RESULT" == success && "$REVISION_RESULT" == success ]]
+          [[ "$SMOKE_RESULT" == success && "$ROLLBACK_RESULT" == skipped ]]
+          handoff_dir="$RUNNER_TEMP/dev-promotion"
+          install -d -m 700 "$handoff_dir"
+          jq -n --arg commit "$COMMIT_SHA" --arg environment dev \
+            --arg worker_digest "$WORKER_DIGEST" --arg migration_digest "$MIGRATE_DIGEST" \
+            --arg migration "$MIGRATION_RESULT" --arg revision "$REVISION_RESULT" \
+            --arg smoke "$SMOKE_RESULT" --arg rollback "$ROLLBACK_RESULT" \
+            '{schema_version: 1, commit: $commit, environment: $environment,
+              worker_digest: $worker_digest, migration_digest: $migration_digest,
+              results: {migration: $migration, revision: $revision, smoke: $smoke, rollback: $rollback}}' \
+            >"$handoff_dir/handoff.json"
+          jq -e '
+            type == "object" and
+            (keys == ["commit", "environment", "migration_digest", "results", "schema_version", "worker_digest"]) and
+            .schema_version == 1 and .environment == "dev" and
+            (.commit | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.worker_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+            (.migration_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+            (.results == {migration: "success", revision: "success", smoke: "success", rollback: "skipped"})
+          ' "$handoff_dir/handoff.json" >/dev/null
+          printf 'worker-digest=%s\nmigrate-digest=%s\n' "$WORKER_DIGEST" "$MIGRATE_DIGEST" >>"$GITHUB_OUTPUT"
+          printf 'artifact-name=dev-promotion-%s-%s\n' \
+            "$HANDOFF_RUN_ID" "$HANDOFF_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+      - name: Upload immutable development promotion handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.handoff.outputs.artifact-name }}
+          path: ${{ runner.temp }}/dev-promotion/handoff.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+  prod-release:
+    name: Promote tested application to production
+    needs: [dev-release]
+    if: ${{ needs.dev-release.result == 'success' && needs.dev-release.outputs.migration-result == 'success' && needs.dev-release.outputs.revision-result == 'success' && needs.dev-release.outputs.smoke-result == 'success' && needs.dev-release.outputs.rollback-result == 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: prod
+    concurrency:
+      group: production-promotion
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      worker-digest: ${{ steps.handoff.outputs.worker-digest }}
+      migrate-digest: ${{ steps.handoff.outputs.migrate-digest }}
+      migration-result: ${{ steps.release.outputs.migration-result }}
+      prior-digest: ${{ steps.release.outputs.prior-digest }}
+      revision-result: ${{ steps.release.outputs.revision-result }}
+      smoke-result: ${{ steps.release.outputs.smoke-result }}
+      rollback-result: ${{ steps.release.outputs.rollback-result }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PROD }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_PROD: ${{ vars.TOFU_STATE_CONTAINER_PROD }}
+      TOFU_STATE_KEY_PROD: ${{ vars.TOFU_STATE_KEY_PROD }}
+      IMAGE_ROOT: ghcr.io/chanakya-net/whatsapp-messaging
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Download immutable development promotion handoff
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.dev-release.outputs.handoff-artifact }}
+          path: ${{ runner.temp }}/prod-promotion
+      - name: Validate exact development promotion handoff
+        id: handoff
+        shell: bash
+        env:
+          HANDOFF_FILE: ${{ runner.temp }}/prod-promotion/handoff.json
+          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_WORKER_DIGEST: ${{ needs.dev-release.outputs.worker-digest }}
+          EXPECTED_MIGRATE_DIGEST: ${{ needs.dev-release.outputs.migrate-digest }}
+        run: |
+          set -Eeuo pipefail
+          [[ -f "$HANDOFF_FILE" && ! -L "$HANDOFF_FILE" ]]
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_WORKER_DIGEST" =~ ^[0-9a-f]{64}$ && "$EXPECTED_MIGRATE_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg worker "$EXPECTED_WORKER_DIGEST" \
+            --arg migration "$EXPECTED_MIGRATE_DIGEST" '
+            type == "object" and
+            (keys == ["commit", "environment", "migration_digest", "results", "schema_version", "worker_digest"]) and
+            .schema_version == 1 and .commit == $commit and .environment == "dev" and
+            (.worker_digest == $worker and (.worker_digest | test("^[0-9a-f]{64}$"))) and
+            (.migration_digest == $migration and (.migration_digest | test("^[0-9a-f]{64}$"))) and
+            (.results | type == "object" and keys == ["migration", "revision", "rollback", "smoke"]) and
+            .results == {migration: "success", revision: "success", smoke: "success", rollback: "skipped"}
+          ' "$HANDOFF_FILE" >/dev/null
+          printf 'worker-digest=%s\nmigrate-digest=%s\n' \
+            "$EXPECTED_WORKER_DIGEST" "$EXPECTED_MIGRATE_DIGEST" >>"$GITHUB_OUTPUT"
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+      - name: Sign in with production deploy identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PROD }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Resolve production runtime names
+        id: runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/prod-release.XXXXXX")"
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          root=.tofu/envs/prod
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_PROD" == prod && "$TOFU_STATE_KEY_PROD" == messagebridge/prod.tfstate ]] || exit 1
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_PROD" \
+            -backend-config="key=$TOFU_STATE_KEY_PROD" -backend-config="use_azuread_auth=true" \
+            >"$runtime_dir/init.log" 2>&1; then
+            printf 'Production release OpenTofu initialization failed.\n' >&2; exit 1
+          fi
+          if ! tofu -chdir="$root" output -json >"$runtime_dir/outputs.json" 2>"$runtime_dir/output.log"; then
+            printf 'Production runtime names unavailable.\n' >&2; exit 1
+          fi
+          jq -e '
+            [.migration_job_name.value, .smoke_job_name.value, .worker_name.value] |
+            all(.[]; type == "string" and test("^[a-z][a-z0-9-]{0,30}[a-z0-9]$"))
+          ' "$runtime_dir/outputs.json" >/dev/null || exit 1
+          {
+            jq -r '"migration-job-name=" + .migration_job_name.value' "$runtime_dir/outputs.json"
+            jq -r '"smoke-job-name=" + .smoke_job_name.value' "$runtime_dir/outputs.json"
+            jq -r '"worker-name=" + .worker_name.value' "$runtime_dir/outputs.json"
+            printf 'resource-group=rg-messagebridge-prod-centralindia-%s\n' "$serial"
+          } >>"$GITHUB_OUTPUT"
+      - name: Migrate, deploy, smoke, and roll back production
+        id: release
+        shell: bash
+        env:
+          MIGRATION_JOB_NAME: ${{ steps.runtime.outputs.migration-job-name }}
+          SMOKE_JOB_NAME: ${{ steps.runtime.outputs.smoke-job-name }}
+          WORKER_NAME: ${{ steps.runtime.outputs.worker-name }}
+          RESOURCE_GROUP: ${{ steps.runtime.outputs.resource-group }}
+          WORKER_DIGEST: ${{ steps.handoff.outputs.worker-digest }}
+          MIGRATE_DIGEST: ${{ steps.handoff.outputs.migrate-digest }}
+        run: |
+          set -Eeuo pipefail
+          record() { printf '%s=%s\n' "$1" "$2" >>"$GITHUB_OUTPUT"; }
+          record migration-result pending
+          record prior-digest unavailable
+          record revision-result skipped
+          record smoke-result skipped
+          record rollback-result skipped
+
+          valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}[a-z0-9]$ ]]; }
+          valid_name "$MIGRATION_JOB_NAME" && valid_name "$SMOKE_JOB_NAME" && valid_name "$WORKER_NAME" || exit 1
+          [[ "$RESOURCE_GROUP" =~ ^rg-messagebridge-prod-centralindia-[0-9]{3}$ ]] || exit 1
+          [[ "$WORKER_DIGEST" =~ ^[0-9a-f]{64}$ && "$MIGRATE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          [[ "$IMAGE_ROOT" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]] || exit 1
+
+          migration_image="$IMAGE_ROOT/migrate@sha256:$MIGRATE_DIGEST"
+          worker_image="$IMAGE_ROOT/worker@sha256:$WORKER_DIGEST"
+          if ! az containerapp job update --name "$MIGRATION_JOB_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$migration_image" --output none; then
+            record migration-result failure; exit 1
+          fi
+          if ! bash .github/scripts/wait-for-container-app-job.sh --name "$MIGRATION_JOB_NAME" \
+            --resource-group "$RESOURCE_GROUP" --poll-budget "${MIGRATION_POLL_BUDGET:-30}" \
+            --timeout "${MIGRATION_TIMEOUT:-300}"; then
+            record migration-result failure; exit 1
+          fi
+          record migration-result success
+
+          if ! prior_image="$(az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query 'properties.template.containers[0].image' --output tsv 2>/dev/null)"; then
+            exit 1
+          fi
+          [[ "$prior_image" =~ @sha256:([0-9a-f]{64})$ ]] || exit 1
+          prior_digest="sha256:${BASH_REMATCH[1]}"
+          record prior-digest "$prior_digest"
+
+          current_revision() {
+            az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --query properties.latestRevisionName --output tsv 2>/dev/null
+          }
+          wait_revision() {
+            bash .github/scripts/wait-for-container-app-revision.sh --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --digest "$2" --poll-budget "${REVISION_POLL_BUDGET:-30}" \
+              --timeout "${REVISION_TIMEOUT:-300}"
+          }
+          run_smoke() {
+            bash .github/scripts/wait-for-container-app-job.sh --name "$SMOKE_JOB_NAME" \
+              --resource-group "$RESOURCE_GROUP" --poll-budget "${SMOKE_POLL_BUDGET:-30}" \
+              --timeout "${SMOKE_TIMEOUT:-300}"
+          }
+          rollback_worker() {
+            local revision
+            az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --image "$prior_image" --output none || return 1
+            revision="$(current_revision)" || return 1
+            [[ -n "$revision" ]] || return 1
+            wait_revision "$revision" "$prior_digest" || return 1
+            run_smoke || return 1
+          }
+
+          release_failed=false
+          if ! az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$worker_image" --output none; then
+            record revision-result failure
+            release_failed=true
+          else
+            revision="$(current_revision)" || revision=""
+            if [[ -z "$revision" ]] || ! wait_revision "$revision" "sha256:$WORKER_DIGEST"; then
+              record revision-result failure
+              release_failed=true
+            else
+              record revision-result success
+              if run_smoke; then record smoke-result success; else record smoke-result failure; release_failed=true; fi
+            fi
+          fi
+          if [[ "$release_failed" == false ]]; then exit 0; fi
+          if rollback_worker; then record rollback-result success; else record rollback-result failure; fi
+          exit 1
+
   delivery-summary:
     name: Publish secret-safe delivery summary
-    needs: [changes, validation, publish-images, shared-retained, dev-infrastructure, prod-infrastructure, shared-reconcile, infrastructure-complete, application-ready, dev-release]
+    needs: [changes, validation, publish-images, shared-retained, dev-infrastructure, prod-infrastructure, shared-reconcile, infrastructure-complete, application-ready, dev-release, prod-release]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -896,14 +1144,22 @@ jobs:
           EXACT_COUNT: ${{ needs.shared-reconcile.outputs.exact-count }}
           INFRASTRUCTURE_RESULT: ${{ needs.infrastructure-complete.result }}
           APPLICATION_RESULT: ${{ needs.application-ready.result }}
-          RELEASE_JOB_RESULT: ${{ needs.dev-release.result }}
-          RELEASE_ENVIRONMENT: dev
-          WORKER_DIGEST: ${{ needs.application-ready.outputs.worker-digest }}
-          MIGRATION_DIGEST: ${{ needs.application-ready.outputs.migrate-digest }}
-          MIGRATION_RESULT: ${{ needs.dev-release.outputs.migration-result }}
-          PRIOR_DIGEST: ${{ needs.dev-release.outputs.prior-digest }}
-          SMOKE_RESULT: ${{ needs.dev-release.outputs.smoke-result }}
-          ROLLBACK_RESULT: ${{ needs.dev-release.outputs.rollback-result }}
+          DEV_RELEASE_JOB_RESULT: ${{ needs.dev-release.result }}
+          DEV_WORKER_DIGEST: ${{ needs.application-ready.outputs.worker-digest }}
+          DEV_MIGRATION_DIGEST: ${{ needs.application-ready.outputs.migrate-digest }}
+          DEV_MIGRATION_RESULT: ${{ needs.dev-release.outputs.migration-result }}
+          DEV_HEALTH_RESULT: ${{ needs.dev-release.outputs.revision-result }}
+          DEV_SMOKE_RESULT: ${{ needs.dev-release.outputs.smoke-result }}
+          DEV_ROLLBACK_RESULT: ${{ needs.dev-release.outputs.rollback-result }}
+          PROD_RELEASE_JOB_RESULT: ${{ needs.prod-release.result }}
+          PROD_APPROVAL_ENVIRONMENT: prod
+          PROD_WORKER_DIGEST: ${{ needs.prod-release.outputs.worker-digest }}
+          PROD_MIGRATION_DIGEST: ${{ needs.prod-release.outputs.migrate-digest }}
+          PROD_MIGRATION_RESULT: ${{ needs.prod-release.outputs.migration-result }}
+          PROD_HEALTH_RESULT: ${{ needs.prod-release.outputs.revision-result }}
+          PROD_SMOKE_RESULT: ${{ needs.prod-release.outputs.smoke-result }}
+          PROD_PRIOR_DIGEST: ${{ needs.prod-release.outputs.prior-digest }}
+          PROD_ROLLBACK_RESULT: ${{ needs.prod-release.outputs.rollback-result }}
         run: |
           set -Eeuo pipefail
           {
@@ -921,12 +1177,28 @@ jobs:
             printf -- '- retained_egress_count: `%s`\n- exact_egress_count: `%s`\n' "${RETAINED_COUNT:-0}" "${EXACT_COUNT:-0}"
             printf -- '- infrastructure_gate: `%s`\n- application_gate: `%s`\n' \
               "$INFRASTRUCTURE_RESULT" "$APPLICATION_RESULT"
-            printf -- '- development_release: `%s`\n- release_environment: `%s`\n' \
-              "$RELEASE_JOB_RESULT" "$RELEASE_ENVIRONMENT"
-            printf -- '- worker_digest: `%s`\n- migration_digest: `%s`\n' \
-              "${WORKER_DIGEST:-unavailable}" "${MIGRATION_DIGEST:-unavailable}"
-            printf -- '- migration_result: `%s`\n- prior_digest: `%s`\n' \
-              "${MIGRATION_RESULT:-skipped}" "${PRIOR_DIGEST:-unavailable}"
-            printf -- '- smoke_result: `%s`\n- rollback_result: `%s`\n' \
-              "${SMOKE_RESULT:-skipped}" "${ROLLBACK_RESULT:-skipped}"
+            printf -- '- development_release: `%s`\n' "$DEV_RELEASE_JOB_RESULT"
+            printf -- '- dev_worker_digest: `%s`\n- dev_migration_digest: `%s`\n' \
+              "${DEV_WORKER_DIGEST:-unavailable}" "${DEV_MIGRATION_DIGEST:-unavailable}"
+            printf -- '- dev_migration/health/smoke/rollback: `%s/%s/%s/%s`\n' \
+              "${DEV_MIGRATION_RESULT:-skipped}" "${DEV_HEALTH_RESULT:-skipped}" \
+              "${DEV_SMOKE_RESULT:-skipped}" "${DEV_ROLLBACK_RESULT:-skipped}"
+            # Production digests come from the revalidated development handoff; this publishes that guarantee.
+            identical=unavailable
+            if [[ -n "$PROD_WORKER_DIGEST" && -n "$PROD_MIGRATION_DIGEST" ]]; then
+              if [[ "$DEV_WORKER_DIGEST" == "$PROD_WORKER_DIGEST" && \
+                "$DEV_MIGRATION_DIGEST" == "$PROD_MIGRATION_DIGEST" ]]; then
+                identical=true
+              else
+                identical=false
+              fi
+            fi
+            printf -- '- production_release: `%s`\n- approval_environment: `%s`\n' \
+              "$PROD_RELEASE_JOB_RESULT" "$PROD_APPROVAL_ENVIRONMENT"
+            printf -- '- prod_worker_digest: `%s`\n- prod_migration_digest: `%s`\n- identical_digests: `%s`\n' \
+              "${PROD_WORKER_DIGEST:-unavailable}" "${PROD_MIGRATION_DIGEST:-unavailable}" "$identical"
+            printf -- '- prod_migration/health/smoke: `%s/%s/%s`\n' \
+              "${PROD_MIGRATION_RESULT:-skipped}" "${PROD_HEALTH_RESULT:-skipped}" "${PROD_SMOKE_RESULT:-skipped}"
+            printf -- '- prod_prior_digest: `%s`\n- prod_rollback_result: `%s`\n' \
+              "${PROD_PRIOR_DIGEST:-unavailable}" "${PROD_ROLLBACK_RESULT:-skipped}"
           } >>"$GITHUB_STEP_SUMMARY"
