@@ -1,0 +1,18 @@
+[
+  {
+    "id": 314,
+    "user": {
+      "login": "github-actions[bot]",
+      "type": "Bot"
+    },
+    "body": "<!-- messagebridge-infra-plan:shared -->\nold bounded summary"
+  },
+  {
+    "id": 315,
+    "user": {
+      "login": "octocat",
+      "type": "User"
+    },
+    "body": "unrelated comment"
+  }
+]

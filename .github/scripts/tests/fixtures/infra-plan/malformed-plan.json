@@ -1,0 +1,12 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "azurerm_resource.bad",
+      "mode": "managed",
+      "type": "azurerm_resource",
+      "name": "bad",
+      "change": { "actions": ["execute"] }
+    }
+  ]
+}
