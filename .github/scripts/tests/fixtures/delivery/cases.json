@@ -81,7 +81,106 @@
     {"name": "reconciliation-failure", "infrastructure": true, "results": ["success", "success", "success", "failure"], "passes": false, "state": ""},
     {"name": "unexpected-mutation", "infrastructure": false, "results": ["success", "skipped", "skipped", "skipped"], "passes": false, "state": ""}
   ],
+  "promotion_handoff": [
+    {
+      "name": "valid-tested-development-handoff",
+      "passes": true,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "dev",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"}
+      }
+    },
+    {
+      "name": "wrong-commit",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "environment": "dev",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"}
+      }
+    },
+    {
+      "name": "wrong-environment",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "prod",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"}
+      }
+    },
+    {
+      "name": "mismatched-worker-digest",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "dev",
+        "worker_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"}
+      }
+    },
+    {
+      "name": "malformed-migration-digest",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "dev",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"}
+      }
+    },
+    {
+      "name": "failed-development-smoke",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "dev",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "failure", "rollback": "success"}
+      }
+    },
+    {
+      "name": "unexpected-field",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "dev",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"},
+        "configuration": "must-not-pass"
+      }
+    }
+  ],
   "release": [
+    {
+      "name": "migration-update-failure",
+      "migration": {"status": "Succeeded", "update_success": false},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "failure", "prior-digest": "unavailable", "revision-result": "skipped", "smoke-result": "skipped", "rollback-result": "skipped"}
+    },
     {
       "name": "release-success",
       "migration": {"status": "Succeeded"},
@@ -132,6 +231,19 @@
       "prior_capture_success": true,
       "revision": {
         "new": {"provisioning": "Failed", "health": "Unhealthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "revision-result": "failure", "smoke-result": "skipped", "rollback-result": "success", "worker-updates": 2, "smoke-starts": 1}
+    },
+    {
+      "name": "worker-update-failure",
+      "migration": {"status": "Succeeded"},
+      "worker_update_success": false,
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
         "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
       },
       "smoke": {"statuses": ["Succeeded"]},
