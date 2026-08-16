@@ -289,7 +289,60 @@ test_skip_combined_dependency_and_safe_summary() {
   assert_contains "$summary" 'apply|APPLY' 'Summary must report apply results.'
   assert_contains "$summary" 'SHARED_JOB_RESULT:.*needs\.shared-retained\.result' 'Summary must include shared guard job status.'
   assert_contains "$summary" 'RECONCILE_JOB_RESULT:.*needs\.shared-reconcile\.result' 'Summary must include reconciliation job status.'
+  assert_contains "$summary" 'needs:.*dev-release' 'Summary must wait for development release results.'
+  assert_contains "$summary" 'RELEASE_JOB_RESULT:.*needs\.dev-release\.result' 'Summary must include development release status.'
+  assert_contains "$summary" 'RELEASE_ENVIRONMENT: dev' 'Summary must identify the development environment.'
+  assert_contains "$summary" 'WORKER_DIGEST:.*needs\.application-ready\.outputs\.worker-digest' 'Summary must include gated worker digest.'
+  assert_contains "$summary" 'MIGRATION_DIGEST:.*needs\.application-ready\.outputs\.migrate-digest' 'Summary must include gated migration digest.'
+  assert_contains "$summary" 'MIGRATION_RESULT:.*needs\.dev-release\.outputs\.migration-result' 'Summary must include migration result.'
+  assert_contains "$summary" 'PRIOR_DIGEST:.*needs\.dev-release\.outputs\.prior-digest' 'Summary must include prior worker digest.'
+  assert_contains "$summary" 'SMOKE_RESULT:.*needs\.dev-release\.outputs\.smoke-result' 'Summary must include smoke result.'
+  assert_contains "$summary" 'ROLLBACK_RESULT:.*needs\.dev-release\.outputs\.rollback-result' 'Summary must include rollback result.'
+  for field in development_release release_environment worker_digest migration_digest migration_result prior_digest smoke_result rollback_result; do
+    assert_contains "$summary" "$field:" "Summary must publish sanitized $field."
+  done
   assert_absent "$summary" 'secrets\.|vars\.|ARM_|AZURE_|TOFU_|tfvars|\.tfstate|resource.group|server.name|ranges|cat ' 'Summary must not expose resource or configuration values.'
+}
+
+test_dev_release_gate() {
+  local block
+  block="$(job_block dev-release)"
+  [ -n "$block" ] || fail 'Missing development release job.'
+  assert_contains "$block" '^    needs: \[changes, validation, application-ready, infrastructure-complete\]$' \
+    'Development release must wait for validation, verified digests, and infrastructure.'
+  assert_contains "$block" "if:.*application-ready\.result == 'success'" \
+    'Development release must require the application gate to succeed.'
+  assert_contains "$block" "if:.*application-ready\.outputs\.ready == 'true'" \
+    'Development release must require verified immutable digests.'
+  assert_contains "$block" "if:.*infrastructure-complete\.result == 'success'" \
+    'Development release must require successful infrastructure completion.'
+  assert_contains "$block" '^    environment: dev$' 'Development release must use the dev environment.'
+  assert_contains "$block" '^    timeout-minutes: [0-9]+$' 'Development release needs an explicit timeout.'
+  assert_contains "$block" '^      contents: read$' 'Development release needs read-only contents.'
+  assert_contains "$block" '^      id-token: write$' 'Development release needs scoped OIDC.'
+  assert_absent "$block" 'packages: write|actions: write|pull-requests: write' \
+    'Development release permissions are too broad.'
+  assert_contains "$block" 'uses: actions/checkout@[0-9a-f]{40}' 'Development release must use pinned checkout.'
+  assert_contains "$block" 'uses: opentofu/setup-opentofu@[0-9a-f]{40}' 'Development release must use pinned OpenTofu.'
+  assert_contains "$block" 'uses: Azure/login@[0-9a-f]{40}' 'Development release must use pinned Azure login.'
+  assert_contains "$block" 'client-id:.*AZURE_CLIENT_ID_DEV' 'Development release must use the dev identity.'
+  assert_absent "$block" 'AZURE_CLIENT_ID_(SHARED|PROD|PLAN)' 'Development release must not receive another identity.'
+  assert_contains "$block" 'TOFU_STATE_CONTAINER_DEV' 'Development release must use the dev backend container.'
+  assert_contains "$block" 'TOFU_STATE_KEY_DEV' 'Development release must use the dev backend key.'
+  assert_absent "$block" 'TOFU_STATE_(CONTAINER|KEY)_(SHARED|PROD)|TOFU_PLAN_VARS_' \
+    'Development release must not access other state or plan inputs.'
+  assert_contains "$block" 'WORKER_DIGEST:.*needs\.application-ready\.outputs\.worker-digest' \
+    'Development release must consume only the gated worker digest.'
+  assert_contains "$block" 'MIGRATE_DIGEST:.*needs\.application-ready\.outputs\.migrate-digest' \
+    'Development release must consume only the gated migration digest.'
+  assert_absent "$block" 'needs\.publish-images\.outputs\.(worker|migrate)-digest' \
+    'Development release must not bypass the application gate.'
+  assert_contains "$block" 'tofu .* output -json' 'Development release must read runtime names from OpenTofu outputs.'
+  for output in migration_job_name smoke_job_name worker_name; do
+    assert_contains "$block" "\\.$output\\.value" "Development release must consume $output from OpenTofu."
+  done
+  assert_contains "$block" 'wait-for-container-app-job\.sh' 'Development release must use the bounded job helper.'
+  assert_contains "$block" 'wait-for-container-app-revision\.sh' 'Development release must use the bounded revision helper.'
 }
 
 test_global_permissions_pins_and_timeouts() {
@@ -298,17 +351,21 @@ test_global_permissions_pins_and_timeouts() {
   if grep -E 'uses: [^[:space:]]+@' "$WORKFLOW" | grep -Ev '@[0-9a-f]{40}([[:space:]]|$)' >/dev/null; then
     fail 'Every external action in delivery must be pinned to a full SHA.'
   fi
-  for job in changes shared-retained dev-infrastructure prod-infrastructure shared-reconcile infrastructure-complete application-ready delivery-summary; do
+  for job in changes shared-retained dev-infrastructure prod-infrastructure shared-reconcile infrastructure-complete application-ready dev-release delivery-summary; do
     block="$(job_block "$job")"
     assert_contains "$block" '^    timeout-minutes: [0-9]+$' "$job must set an explicit timeout."
   done
   assert_absent "$workflow" 'cancel-in-progress: true|continue-on-error:' 'Ordered mutation must not cancel or suppress failures.'
 }
 
+. "$REPO_ROOT/.github/scripts/tests/delivery-release-contract.inc.sh"
+
 test_classification_and_skeleton
 test_shared_retained_gate
 test_environment_order_approvals_and_handoff
 test_safe_egress_reconciliation
 test_skip_combined_dependency_and_safe_summary
+test_dev_release_gate
+test_dev_release_scenarios
 test_global_permissions_pins_and_timeouts
 printf '%s\n' 'Delivery workflow contract checks passed.'
