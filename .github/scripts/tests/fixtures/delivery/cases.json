@@ -55,10 +55,12 @@
       "expected": {"application": "false", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "none"}
     },
     {
-      "name": "manual-fail-safe",
+      "name": "manual-publish",
       "event": "workflow_dispatch",
+      "target": "publish",
+      "environment": "none",
       "paths": [],
-      "expected": {"application": "true", "infrastructure": "true", "shared": "true", "dev": "true", "prod": "true", "layers": "application,shared,dev,prod"}
+      "expected": {"application": "true", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "application"}
     }
   ],
   "classification_failures": [
@@ -68,6 +70,28 @@
       "paths": [],
       "git_failure": true
     }
+  ],
+  "dispatch_routing": [
+    {"name": "publish", "target": "publish", "environment": "none", "passes": true, "expected": {"delivery-target": "publish", "delivery-environment": "none", "application": "true", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "application"}},
+    {"name": "development", "target": "dev", "environment": "none", "passes": true, "expected": {"delivery-target": "dev", "delivery-environment": "none", "application": "true", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "application"}},
+    {"name": "production", "target": "prod", "environment": "none", "passes": true, "expected": {"delivery-target": "prod", "delivery-environment": "none", "application": "true", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "application"}},
+    {"name": "reload-development", "target": "reload-secrets", "environment": "dev", "passes": true, "expected": {"delivery-target": "reload-secrets", "delivery-environment": "dev", "application": "false", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "none"}},
+    {"name": "reload-production", "target": "reload-secrets", "environment": "prod", "passes": true, "expected": {"delivery-target": "reload-secrets", "delivery-environment": "prod", "application": "false", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "none"}},
+    {"name": "empty-target", "target": "", "environment": "none", "passes": false},
+    {"name": "empty-environment", "target": "publish", "environment": "", "passes": false},
+    {"name": "unknown-target", "target": "destroy", "environment": "none", "passes": false},
+    {"name": "unknown-environment", "target": "reload-secrets", "environment": "staging", "passes": false},
+    {"name": "publish-with-environment", "target": "publish", "environment": "dev", "passes": false},
+    {"name": "reload-without-environment", "target": "reload-secrets", "environment": "none", "passes": false}
+  ],
+  "reload": [
+    {"name": "reload-success", "metadata": {}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Healthy"}}, "smoke": {"statuses": ["Succeeded"]}, "rollback": {"activate_success": true}, "expected": {"exit": 0, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "success", "health-result": "success", "smoke-result": "success", "rollback-result": "skipped", "updates": 1, "activations": 0, "smoke-starts": 1}},
+    {"name": "versioned-reference", "metadata": {"versioned": true, "secret_value": "fixture-secret-value"}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Healthy"}}, "smoke": {"statuses": []}, "rollback": {"activate_success": true}, "expected": {"exit": 1, "current-digest": "unavailable", "execution-result": "failure", "health-result": "skipped", "smoke-result": "skipped", "rollback-result": "skipped", "updates": 0, "activations": 0, "smoke-starts": 0}},
+    {"name": "revision-copy-failure", "metadata": {}, "update_success": false, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Healthy"}}, "smoke": {"statuses": ["Succeeded"]}, "rollback": {"activate_success": true}, "expected": {"exit": 1, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "failure", "health-result": "skipped", "smoke-result": "skipped", "rollback-result": "success", "updates": 1, "activations": 1, "smoke-starts": 1}},
+    {"name": "unhealthy-revision", "metadata": {}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Unhealthy"}}, "smoke": {"statuses": ["Succeeded"]}, "rollback": {"activate_success": true}, "expected": {"exit": 1, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "success", "health-result": "failure", "smoke-result": "skipped", "rollback-result": "success", "updates": 1, "activations": 1, "smoke-starts": 1}},
+    {"name": "revision-timeout", "metadata": {}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioning", "health": "Unknown"}}, "smoke": {"statuses": ["Succeeded"]}, "rollback": {"activate_success": true}, "expected": {"exit": 1, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "success", "health-result": "failure", "smoke-result": "skipped", "rollback-result": "success", "updates": 1, "activations": 1, "smoke-starts": 1}},
+    {"name": "smoke-failure", "metadata": {}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Healthy"}}, "smoke": {"statuses": ["Failed", "Succeeded"]}, "rollback": {"activate_success": true}, "expected": {"exit": 1, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "success", "health-result": "success", "smoke-result": "failure", "rollback-result": "success", "updates": 1, "activations": 1, "smoke-starts": 2}},
+    {"name": "rollback-failure", "metadata": {}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Unhealthy"}}, "smoke": {"statuses": []}, "rollback": {"activate_success": false}, "expected": {"exit": 1, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "success", "health-result": "failure", "smoke-result": "skipped", "rollback-result": "failure", "updates": 1, "activations": 1, "smoke-starts": 0}}
   ],
   "readiness": [
     {"name": "application-only", "application": true, "infrastructure": false, "images": "success", "infrastructure_result": "success", "ready": true},

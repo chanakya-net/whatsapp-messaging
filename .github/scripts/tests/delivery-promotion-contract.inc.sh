@@ -41,8 +41,9 @@ assert_prod_documentation() {
 
 assert_prod_gate_contract() {
   local block=$1 login_line validate_line
-  assert_contains "$block" '^    needs: \[dev-release\]$' 'Production promotion must depend only on tested development release.'
-  assert_contains "$block" "if:.*dev-release\.result == 'success'" 'Production promotion must require development success.'
+  assert_contains "$block" '^    needs: \[changes, dev-release\]$' \
+    'Production promotion must depend only on sanitized routing and tested development release.'
+  assert_contains "$block" "dev-release\.result == 'success'" 'Production promotion must require development success.'
   assert_contains "$block" '^    environment: prod$' 'Production promotion must use protected prod Environment.'
   assert_contains "$block" '^      group: production-promotion$' 'Production promotion needs stable environment concurrency.'
   assert_contains "$block" '^      cancel-in-progress: false$' 'Production promotion must not cancel active mutation.'
