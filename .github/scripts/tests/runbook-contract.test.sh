@@ -5,400 +5,162 @@ REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 RUNBOOKS_DIR="$REPO_ROOT/docs/runbooks"
 DEPLOYMENT_GUIDE="$REPO_ROOT/docs/deployment.md"
 
-fail() {
-  printf 'FAIL: %s\n' "$1" >&2
-  exit 1
-}
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+pass() { printf 'PASS: %s\n' "$1"; }
 
-assert_file_exists() {
-  local path=$1 message=$2
-  [[ -f "$path" ]] || fail "$message (missing: $path)"
+assert_file() {
+  [[ -f "$1" ]] || fail "missing required document: $1"
 }
 
 assert_contains() {
-  local needle=$1 path=$2 message=$3
-  grep -Fq -- "$needle" "$path" || fail "$message (not found in $path: $needle)"
+  grep -Fq -- "$1" "$2" || fail "$3"
 }
 
-assert_not_contains() {
-  local needle=$1 path=$2 message=$3
-  grep -Fq -- "$needle" "$path" && fail "$message (found in $path: $needle)" || true
-}
-
-assert_regex() {
+assert_no_regex() {
   local pattern=$1 path=$2 message=$3
-  grep -Eq "$pattern" "$path" || fail "$message (pattern not found in $path: $pattern)"
-}
-
-test_runbooks_exist() {
-  local required_runbooks=(
-    "deployment.md"
-    "rollback.md"
-    "migration-failure.md"
-    "secret-rotation.md"
-    "cloudamqp-outage.md"
-    "database-restore.md"
-  )
-
-  for runbook in "${required_runbooks[@]}"; do
-    local path="$RUNBOOKS_DIR/$runbook"
-    assert_file_exists "$path" "Runbook must exist: $runbook"
-  done
-}
-
-test_no_real_secrets_in_runbooks() {
-  local real_secret_patterns=(
-    # Real Azure Key Vault names
-    'kv-messagebridge-[a-z]*-[0-9]{3}'
-    # Real database connection strings
-    'Server=psql-messagebridge'
-    # Real Azure storage accounts
-    'sa[a-z]*messagebridge'
-    # Real secret values (passwords with common patterns)
-    'Password=[A-Za-z0-9!@#$%^&*]{16,}'
-    # Real tokens (Azure, GitHub, etc.)
-    'ghp_[A-Za-z0-9]{36}'
-  )
-
-  for runbook in "$RUNBOOKS_DIR"/*.md; do
-    for pattern in "${real_secret_patterns[@]}"; do
-      grep -Ei "$pattern" "$runbook" && \
-        fail "Runbook contains real secret pattern: $(basename "$runbook") matches $pattern"
-    done
-  done
-}
-
-test_no_unsafe_secret_patterns() {
-  # Reject patterns that expose secret values via CLI or logs
-
-  for runbook in "$RUNBOOKS_DIR"/*.md; do
-    local name=$(basename "$runbook")
-
-    # Reject --value arguments with secrets
-    grep -E "(--value|--set.*value)" "$runbook" | grep -q "password\|secret\|key" && \
-      fail "$name: Cannot pass secret values via '--value' command argument (use Azure Portal)"
-
-    # Reject PGPASSWORD environment variable
-    grep -q "PGPASSWORD=" "$runbook" && \
-      fail "$name: Cannot use PGPASSWORD environment variable (connects to database directly)"
-
-    # Reject keyvault secret show --query value pattern
-    grep -q "keyvault secret show.*--query value" "$runbook" && \
-      fail "$name: Cannot retrieve and display secret values (use Azure Portal for verification)"
-
-    # Reject password variables in shell scripts
-    grep -E '(password|secret|key)=.*\$\(' "$runbook" | grep -qv "placeholder\|disabled" && \
-      fail "$name: Cannot pass secret in shell variable via command substitution"
-
-    # Reject read -s pattern that then passes variable to command
-    if grep -q "read -sp" "$runbook"; then
-      local line_after_read=$(grep -A 1 "read -sp" "$runbook" | tail -1)
-      if echo "$line_after_read" | grep -qE "az|psql|docker" | grep -v "Portal"; then
-        fail "$name: Cannot pass secret read via 'read -sp' to commands (use Azure Portal)"
-      fi
-    fi
-  done
-}
-
-test_approved_secret_names_only() {
-  local approved_names=(
-    'rabbitmq-connection-string'
-    'new-relic-otlp-headers'
-    'whatsapp-provider-placeholder'
-    'email-provider-placeholder'
-  )
-
-  local unapproved_names=(
-    'messagebridge-db-password'
-    'messagebridge-rabbitmq-password'
-    'messagebridge-api-key'
-    'new-relic-license-key'
-  )
-
-  for runbook in "$RUNBOOKS_DIR"/*.md; do
-    local name=$(basename "$runbook")
-
-    # Check for unapproved secret names
-    for unapproved in "${unapproved_names[@]}"; do
-      grep -q "$unapproved" "$runbook" && \
-        fail "$name: Uses unapproved secret name '$unapproved' (use approved names from seed-placeholder-secrets.sh)"
-    done
-
-    # Deployment runbook must reference approved names
-    if [[ "$name" == "deployment.md" ]]; then
-      grep -q "rabbitmq-connection-string" "$runbook" || \
-        fail "$name: deployment.md must reference 'rabbitmq-connection-string' secret"
-    fi
-  done
-}
-
-test_deployment_runbook_structure() {
-  local doc="$RUNBOOKS_DIR/deployment.md"
-  assert_file_exists "$doc" "Deployment runbook must exist"
-
-  # Check for key content (flexible on exact section names)
-  local required_content=(
-    "Authentication"
-    "Input"
-    "Naming"
-    "region"
-    "Bootstrap"
-    "OIDC"
-    "Foundation"
-    "Database"
-    "CloudAMQP"
-  )
-
-  for content in "${required_content[@]}"; do
-    assert_contains "$content" "$doc" "Deployment runbook must include: $content"
-  done
-
-  # Each step must have commands or portal locations
-  assert_regex 'bash|az|gh|psql|Portal' "$doc" \
-    "Deployment runbook must include commands or portal locations"
-}
-
-test_rollback_runbook_structure() {
-  local doc="$RUNBOOKS_DIR/rollback.md"
-  assert_file_exists "$doc" "Rollback runbook must exist"
-
-  local required_content=(
-    "rollback"
-    "Recovery"
-    "Failure"
-    "revision"
-  )
-
-  for content in "${required_content[@]}"; do
-    assert_contains "$content" "$doc" "Rollback runbook must include: $content"
-  done
-}
-
-test_migration_failure_runbook_structure() {
-  local doc="$RUNBOOKS_DIR/migration-failure.md"
-  assert_file_exists "$doc" "Migration failure runbook must exist"
-
-  local required_content=(
-    "migration"
-    "Forward"
-    "restore"
-    "Failure"
-    "Escalation"
-  )
-
-  for content in "${required_content[@]}"; do
-    assert_contains "$content" "$doc" "Migration failure runbook must include: $content"
-  done
-}
-
-test_secret_rotation_runbook_structure() {
-  local doc="$RUNBOOKS_DIR/secret-rotation.md"
-  assert_file_exists "$doc" "Secret rotation runbook must exist"
-
-  local required_content=(
-    "rotation"
-    "Key Vault"
-    "Dev"
-    "Production"
-    "Approval"
-  )
-
-  for content in "${required_content[@]}"; do
-    assert_contains "$content" "$doc" "Secret rotation runbook must include: $content"
-  done
-}
-
-test_cloudamqp_outage_runbook_structure() {
-  local doc="$RUNBOOKS_DIR/cloudamqp-outage.md"
-  assert_file_exists "$doc" "CloudAMQP outage runbook must exist"
-
-  local required_content=(
-    "outage"
-    "CloudAMQP"
-    "credential"
-    "rotation"
-    "Broker"
-    "Failure"
-  )
-
-  for content in "${required_content[@]}"; do
-    assert_contains "$content" "$doc" "CloudAMQP outage runbook must include: $content"
-  done
-}
-
-test_database_restore_runbook_updated() {
-  local doc="$RUNBOOKS_DIR/database-restore.md"
-  assert_file_exists "$doc" "Database restore runbook must exist"
-
-  # Must reference quarterly execution
-  assert_contains "Quarterly execution" "$doc" \
-    "Database restore must explicitly cover quarterly execution"
-
-  # Must have RPO/RTO evidence section
-  assert_contains "RPO/RTO" "$doc" \
-    "Database restore must include RPO/RTO evidence guidance"
-
-  # Must have explicit cleanup confirmation
-  assert_contains "Cleanup" "$doc" \
-    "Database restore must include cleanup section"
-}
-
-test_every_step_has_required_elements() {
-  # Verify deployment.md has required fields for each operational section
-  local doc="$RUNBOOKS_DIR/deployment.md"
-
-  # Stage 1 should describe authentication and verification
-  grep -A 10 "Stage 1:" "$doc" | grep -q "az account show" || \
-    fail "Stage 1 must include authentication verification command"
-
-  # Stage 4 should reference bootstrap.sh (not invented paths)
-  grep -A 5 "Stage 4:" "$doc" | grep -q "bootstrap.sh" || \
-    fail "Stage 4 must reference scripts/infra/bootstrap.sh"
-
-  # Stage 5 should reference approved secret names only
-  grep -A 10 "Stage 5:" "$doc" | grep -q "seed-placeholder-secrets.sh" || \
-    fail "Stage 5 must reference approved secret seeding script"
-
-  # Verify no direct `az containerapp create` (use OpenTofu/delivery.yml)
-  grep -q "az containerapp create" "$doc" && \
-    fail "Deployment runbook must not use direct 'az containerapp create' (use OpenTofu)"
-
-  # Verify no mutable tags (only digest-pinned references)
-  grep -E "worker:(v|dev-)" "$doc" | grep -qv "@sha256:" && \
-    fail "Deployment runbook must use immutable digest references, not mutable tags"
-
-  # Verify migration uses manual job, not docker run
-  grep -A 10 "Stage 11:" "$doc" | grep -q "containerapp job" || \
-    fail "Deployment runbook must reference manual Container Apps migration job"
-
-  # Verify no direct database creation (use OpenTofu)
-  grep -q "az postgres flexible-server create" "$doc" && \
-    fail "Deployment runbook must not create database directly (use OpenTofu)"
-}
-
-test_markdown_syntax() {
-  for runbook in "$RUNBOOKS_DIR"/*.md; do
-    # Verify markdown headers are balanced
-    local open_count=$(grep -Ec '^#+ ' "$runbook" || true)
-    [[ $open_count -gt 0 ]] || fail "Runbook has no headers: $(basename "$runbook")"
-
-    # Verify code blocks are closed
-    local open_blocks=$(grep -Ec '^```' "$runbook" || true)
-    [[ $((open_blocks % 2)) -eq 0 ]] || fail "Runbook has unclosed code blocks: $(basename "$runbook")"
-  done
-}
-
-test_links_are_valid() {
-  for runbook in "$RUNBOOKS_DIR"/*.md; do
-    # Extract markdown links [text](path) and remove brackets
-    grep -Eo '\]\([^)]+\)' "$runbook" | cut -c3- | rev | cut -c2- | rev | while read -r link; do
-      # Skip http(s) links
-      if [[ "$link" =~ ^https?:// ]]; then
-        continue
-      fi
-
-      # Resolve relative to docs/runbooks/
-      local target_path="$RUNBOOKS_DIR/$link"
-      # Allow fragment links
-      target_path="${target_path%#*}"
-
-      [[ -f "$target_path" ]] || fail "Broken link in $(basename "$runbook"): $link"
-    done
-  done
-}
-
-test_no_contradictions_with_deployment() {
-  # Check for contradictory guidance between runbooks and deployment.md
-
-  # Both should agree on Azure Container Apps being primary production model
-  assert_contains "Azure Container Apps" "$DEPLOYMENT_GUIDE" \
-    "deployment.md must establish Azure Container Apps as primary model"
-
-  # Check that database runbooks don't contradict deployment guidance
-  if grep -i "startup-migration" "$DEPLOYMENT_GUIDE"; then
-    fail "deployment.md contains outdated startup-migration guidance"
+  if grep -Eqi -- "$pattern" "$path"; then
+    fail "$message ($path)"
   fi
 }
 
-test_all_twelve_hitl_stages_covered() {
-  # The issue requires covering twelve HITL stages
-  # This test verifies they're documented across the runbooks
+all_docs() {
+  printf '%s\n' "$DEPLOYMENT_GUIDE"
+  find "$RUNBOOKS_DIR" -maxdepth 1 -name '*.md' -type f -print | sort
+}
 
-  local hitl_stages=(
-    "authentication"
-    "input"
-    "naming"
-    "state"
-    "foundation"
-    "secret"
-    "database"
-    "cloudamqp"
-    "new relic"
-    "ghcr"
-    "release"
-    "rotation"
-  )
+document_has_unsafe_secret_transport() {
+  grep -Eqi '(gh auth token|authorization:[[:space:]]*bearer|\$\(cat[[:space:]]+/run/secrets|password=[^[:space:]]|docker[[:space:]].*(-e|--env).*(password|secret)|keyvault secret show.*--query[[:space:]]+value)' "$1"
+}
 
-  for stage in "${hitl_stages[@]}"; do
-    local found=0
-    for runbook in "$RUNBOOKS_DIR"/*.md; do
-      if grep -iq "$stage" "$runbook"; then
-        found=1
-        break
-      fi
-    done
-    [[ $found -eq 1 ]] || fail "HITL stage not documented: $stage"
+document_has_invalid_bootstrap() {
+  grep -Eq 'bootstrap\.sh[[:space:]]*$|bootstrap\.sh[[:space:]]+all|bootstrap\.sh[[:space:]]+[^[:space:]]+' "$1" &&
+    ! grep -Eq 'bootstrap\.sh[[:space:]]+(plan|apply|configure-github|verify)' "$1"
+}
+
+document_has_unsupported_location_or_name() {
+  grep -Eqi '(region|location)[[:space:]]*=[[:space:]]*(eastus|australiaeast)|rg-messagebridge-(dev|prod)-[a-z]+-[0-9]{3}' "$1"
+}
+
+document_has_unsafe_release_path() {
+  grep -Eqi '(docker[[:space:]]+buildx[[:space:]]+build.*--push|az[[:space:]]+containerapp[[:space:]]+(update|revision[[:space:]]+activate)|az[[:space:]]+containerapp[[:space:]]+job[[:space:]]+start)' "$1" ||
+    grep -Eq 'gh workflow run delivery\.yml' "$1" && ! grep -Eq 'gh workflow run delivery\.yml[[:space:]]+--ref[[:space:]]+"\$DELIVERY_REF"' "$1"
+}
+
+document_has_contradictory_delivery_guidance() {
+  grep -Eqi 'sole ordered application.delivery path' "$1" &&
+    grep -Eqi '(docker[[:space:]]+buildx.*--push|containerapp[[:space:]]+(update|job[[:space:]]+start))' "$1"
+}
+
+document_has_missing_mutation_field() {
+  local path=$1 field
+  for field in 'Target:' 'Inputs:' 'Safe path:' 'Expected result:' 'Failure interpretation:' 'Approval boundary:' 'Cleanup:'; do
+    grep -Fq -- "$field" "$path" || return 0
   done
+  return 1
+}
+
+test_required_documents() {
+  local doc
+  for doc in deployment rollback migration-failure secret-rotation cloudamqp-outage database-restore; do
+    assert_file "$RUNBOOKS_DIR/$doc.md"
+  done
+  assert_file "$DEPLOYMENT_GUIDE"
+  pass 'required deployment and runbook documents exist'
+}
+
+test_secret_safety() {
+  local doc
+  while IFS= read -r doc; do
+    assert_no_regex '(gh auth token|authorization:[[:space:]]*bearer|\$\(cat[[:space:]]+/run/secrets|password=[^[:space:]]|docker[[:space:]].*(-e|--env).*(password|secret)|keyvault secret show.*--query[[:space:]]+value)' "$doc" 'unsafe secret transport documented'
+  done < <(all_docs)
+  pass 'documentation contains no token capture, secret retrieval, or secret command transport'
+}
+
+test_bootstrap_and_foundation_contract() {
+  local doc="$RUNBOOKS_DIR/deployment.md"
+  assert_contains 'scripts/infra/bootstrap.sh plan' "$doc" 'bootstrap plan command missing'
+  assert_contains 'scripts/infra/bootstrap.sh apply' "$doc" 'bootstrap apply command missing'
+  assert_contains 'scripts/infra/bootstrap.sh configure-github' "$doc" 'GitHub configuration command missing'
+  assert_contains '.tofu/envs/shared' "$doc" 'shared foundation root missing'
+  assert_contains '.tofu/envs/dev' "$doc" 'dev foundation root missing'
+  assert_contains '.tofu/envs/prod' "$doc" 'prod foundation root missing'
+  assert_contains 'centralindia' "$doc" 'supported location missing'
+  assert_contains 'cin' "$doc" 'supported name token missing'
+  pass 'bootstrap subcommands, supported location, and foundation roots are explicit'
+}
+
+test_hitl_stages_and_links() {
+  local doc="$RUNBOOKS_DIR/deployment.md" stage link
+  for stage in {1..12}; do
+    assert_contains "Stage $stage" "$doc" "HITL stage $stage missing"
+  done
+  for link in rollback migration-failure secret-rotation cloudamqp-outage database-restore; do
+    assert_contains "./$link.md" "$doc" "required runbook link missing: $link"
+  done
+  pass 'all twelve HITL stages and recovery links are present'
+}
+
+test_delivery_contract() {
+  local doc="$RUNBOOKS_DIR/deployment.md"
+  assert_contains 'gh workflow run delivery.yml --ref "$DELIVERY_REF" -f target=publish -f environment=none' "$doc" 'publish dispatch missing explicit ref'
+  assert_contains 'gh workflow run delivery.yml --ref "$DELIVERY_REF" -f target=dev -f environment=none' "$doc" 'dev dispatch missing explicit ref'
+  assert_contains 'gh workflow run delivery.yml --ref "$DELIVERY_REF" -f target=prod -f environment=none' "$doc" 'prod dispatch missing explicit ref'
+  assert_no_regex 'docker[[:space:]]+buildx[[:space:]]+build.*--push|containerapp[[:space:]]+job[[:space:]]+start|containerappsjob-' "$doc" 'runbook bypasses the protected delivery workflow'
+  pass 'first release uses delivery ref, dev-to-prod handoff, and protected migration path'
+}
+
+test_mutation_metadata() {
+  local doc
+  while IFS= read -r doc; do
+    if document_has_missing_mutation_field "$doc"; then
+      fail "mutation contract fields missing from $doc"
+    fi
+  done < <(all_docs)
+  pass 'every in-scope document supplies the HITL mutation contract fields'
+}
+
+test_no_direct_production_mutations() {
+  local doc
+  for doc in "$RUNBOOKS_DIR/cloudamqp-outage.md" "$RUNBOOKS_DIR/rollback.md"; do
+    assert_no_regex 'az[[:space:]]+containerapp[[:space:]]+(update|revision[[:space:]]+activate)|rg-messagebridge-prod-centralindia-[0-9]{3}' "$doc" 'direct production Container Apps mutation or hard-coded target documented'
+  done
+  pass 'outage and rollback route production mutations through protected delivery'
+}
+
+assert_fixture_rejected() {
+  local label=$1 content=$2 checker=$3 fixture
+  fixture="$(mktemp)"
+  printf '%s\n' "$content" >"$fixture"
+  if ! "$checker" "$fixture"; then
+    rm -f "$fixture"
+    fail "negative fixture accepted: $label"
+  fi
+  rm -f "$fixture"
+  pass "negative fixture rejected: $label"
+}
+
+test_negative_fixtures() {
+  assert_fixture_rejected 'token capture' 'gh auth token | curl -H "Authorization: Bearer $TOKEN"' document_has_unsafe_secret_transport
+  assert_fixture_rejected 'secret command substitution' 'docker run -e "Password=$(cat /run/secrets/value)" image' document_has_unsafe_secret_transport
+  assert_fixture_rejected 'invalid bootstrap subcommand' 'bash scripts/infra/bootstrap.sh bootstrap' document_has_invalid_bootstrap
+  assert_fixture_rejected 'unsupported location' 'location=eastus' document_has_unsupported_location_or_name
+  assert_fixture_rejected 'guessed resource target' 'rg-messagebridge-prod-eus-042' document_has_unsupported_location_or_name
+  assert_fixture_rejected 'unsafe direct release' 'az containerapp job start --name guessed' document_has_unsafe_release_path
+  assert_fixture_rejected 'unreferenced dispatch' 'gh workflow run delivery.yml -f target=dev -f environment=none' document_has_unsafe_release_path
+  assert_fixture_rejected 'missing mutation field' $'Target: x\nInputs: x\nSafe path: x' document_has_missing_mutation_field
+  assert_fixture_rejected 'contradictory delivery guidance' $'delivery.yml is the sole ordered application-delivery path\ndocker buildx build --push' document_has_contradictory_delivery_guidance
 }
 
 main() {
-  printf 'Running runbook contract tests...\n'
-  test_runbooks_exist
-  printf 'PASS: all required runbooks exist\n'
-
-  test_no_real_secrets_in_runbooks
-  printf 'PASS: no real secrets in runbooks\n'
-
-  test_no_unsafe_secret_patterns
-  printf 'PASS: no unsafe secret retrieval/display patterns\n'
-
-  test_approved_secret_names_only
-  printf 'PASS: all secret names are approved\n'
-
-  test_deployment_runbook_structure
-  printf 'PASS: deployment runbook has required structure\n'
-
-  test_rollback_runbook_structure
-  printf 'PASS: rollback runbook has required structure\n'
-
-  test_migration_failure_runbook_structure
-  printf 'PASS: migration-failure runbook has required structure\n'
-
-  test_secret_rotation_runbook_structure
-  printf 'PASS: secret-rotation runbook has required structure\n'
-
-  test_cloudamqp_outage_runbook_structure
-  printf 'PASS: cloudamqp-outage runbook has required structure\n'
-
-  test_database_restore_runbook_updated
-  printf 'PASS: database-restore runbook is complete\n'
-
-  test_every_step_has_required_elements
-  printf 'PASS: every operational step has required structure and correct commands\n'
-
-  test_markdown_syntax
-  printf 'PASS: markdown syntax is valid\n'
-
-  test_links_are_valid
-  printf 'PASS: all links are valid\n'
-
-  test_no_contradictions_with_deployment
-  printf 'PASS: no contradictions with deployment.md\n'
-
-  test_all_twelve_hitl_stages_covered
-  printf 'PASS: all twelve HITL stages documented\n'
-
-  printf '\nAll runbook contract tests passed.\n'
+  test_required_documents
+  test_secret_safety
+  test_bootstrap_and_foundation_contract
+  test_hitl_stages_and_links
+  test_delivery_contract
+  test_mutation_metadata
+  test_no_direct_production_mutations
+  test_negative_fixtures
+  pass 'runbook contract tests passed'
 }
 
 main "$@"

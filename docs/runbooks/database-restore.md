@@ -7,6 +7,23 @@ evidence without touching the production server or its databases.
 Driver script: [`scripts/db/restore-drill.sh`](../../scripts/db/restore-drill.sh).
 Fixtures: [`.github/scripts/tests/restore-drill.test.sh`](../../.github/scripts/tests/restore-drill.test.sh).
 
+## Quarterly drill mutation contract
+
+- Target: an isolated temporary restore server derived by the driver from the
+  approved drill serial and restore point; never the production server.
+- Inputs: approved three-digit drill serial, approved UTC restore point, and
+  operator network metadata. These are operational metadata, not credentials.
+- Safe path: run `plan`, then `restore`, `verify`, and the explicitly confirmed
+  `destroy` command in [Quarterly execution](#quarterly-execution).
+- Expected result: the driver creates and verifies only its temporary server,
+  records RPO/RTO evidence, and removes temporary access on exit.
+- Failure interpretation: a failed restore or integrity check means the drill
+  did not pass; preserve the temporary server for database-owner inspection.
+- Approval boundary: database owner approves the drill and separately approves
+  the typed destruction confirmation after evidence has been captured.
+- Cleanup: `destroy` removes the temporary server; retry it or use Azure Portal
+  only for that identified temporary resource if automated cleanup fails.
+
 ## Safety model
 
 - The driver **never** mutates the production server. It only restores a

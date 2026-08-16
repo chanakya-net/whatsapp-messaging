@@ -309,7 +309,14 @@ Logs and health responses must never contain RabbitMQ URIs, database usernames/p
 
 ### Header replacement
 
-Replace the value of `new-relic-otlp-headers` in the matching environment Key Vault; keep its reference URI versionless. Container Apps retrieves the latest version within 30 minutes and restarts active revisions that consume the secret in an environment variable. Do not put the replacement value in a deployment command, OpenTofu plan, or log. Verify the recovered worker with the safe reference query and New Relic signal checks above.
+Use Azure Portal to create a new version of `new-relic-otlp-headers` in the
+output-derived environment Key Vault; keep its reference URI versionless. Do
+not put the replacement value in a command, OpenTofu plan, or log. After the
+portal audit record is available, use the approved delivery ref to dispatch the
+protected environment reload described in the [Secret Rotation Runbook](runbooks/secret-rotation.md).
+The workflow validates the reference, reloads at the current digest, and
+performs its bounded health/smoke and rollback handling. Verify the recovered
+worker with the safe reference query and New Relic signal checks above.
 
 ### Provider delivery status
 
