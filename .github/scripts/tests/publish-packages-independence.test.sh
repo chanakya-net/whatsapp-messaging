@@ -6,6 +6,7 @@ PACKAGE_WORKFLOW="$REPO_ROOT/.github/workflows/publish-packages.yml"
 IMAGE_WORKFLOWS=(
   "$REPO_ROOT/.github/workflows/_validation.yml"
   "$REPO_ROOT/.github/workflows/_publish-images.yml"
+  "$REPO_ROOT/.github/workflows/delivery.yml"
 )
 EXPECTED_SHA256="1c41c4282e9fc285aae402ef38e60b8b03f45b2995a21d69d5e673c6f631bba2"
 

@@ -141,4 +141,5 @@ assert_absent "$verify_block" 'login-action|docker login|packages: write|GITHUB_
 assert_absent "$workflow" 'Azure/login|az containerapp|NUGET_' \
   'Reusable image publication must not deploy Azure resources or couple NuGet publication.'
 
+bash "$REPO_ROOT/.github/scripts/tests/delivery-workflow-contract.test.sh"
 printf '%s\n' 'Reusable image publication workflow contract checks passed.'
