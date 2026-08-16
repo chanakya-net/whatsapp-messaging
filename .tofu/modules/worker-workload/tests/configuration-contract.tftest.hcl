@@ -146,6 +146,7 @@ run "wires_matching_secrets_and_runtime_configuration" {
         Observability__ServiceName                                    = "MessageBridge.Worker"
         Observability__MetricsEndpointEnabled                         = "false"
         OTEL_EXPORTER_OTLP_ENDPOINT                                   = "https://otlp.nr-data.net:4318"
+        OTEL_EXPORTER_OTLP_PROTOCOL                                   = "http/protobuf"
         OTEL_SERVICE_NAME                                             = "MessageBridge.Worker"
         ASPNETCORE_ENVIRONMENT                                        = "Production"
         ASPNETCORE_HTTP_PORTS                                         = "8080"
@@ -160,7 +161,7 @@ run "wires_matching_secrets_and_runtime_configuration" {
 
   assert {
     condition = (
-      length(azurerm_container_app.worker.template[0].container[0].env) == 34 &&
+      length(azurerm_container_app.worker.template[0].container[0].env) == 35 &&
       !contains([for setting in azurerm_container_app.worker.template[0].container[0].env : setting.name], "MessageBridge__ProcessingHistory__DevelopmentRetentionHours") &&
       !contains([for setting in azurerm_container_app.worker.template[0].container[0].env : setting.name], "ConnectionStrings__DefaultConnection") &&
       !contains([for setting in azurerm_container_app.worker.template[0].container[0].env : setting.name], "MESSAGEBRIDGE_CONNECTION_STRING")

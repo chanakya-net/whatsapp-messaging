@@ -20,6 +20,8 @@ public sealed class ContainerLogSanitizerTests
             raw credential echo: container-admin pg-secret-36 rabbit-user-36 rabbit-pass-36
             PLAIN login refused: user 'invalid_rabbit_user_32' - invalid credentials
             password=field-secret token=token-secret Authorization: Bearer auth-secret
+            OTEL_EXPORTER_OTLP_HEADERS=api-key=new-relic-header-secret
+            transport header: Api-Key new-relic-api-key-secret
             recipients: person@example.com and +1 (415) 555-2671
             payload={"body":"private structured payload","token":"inside-secret"}
             payload=private text payload
@@ -41,6 +43,8 @@ public sealed class ContainerLogSanitizerTests
             "field-secret",
             "token-secret",
             "auth-secret",
+            "new-relic-header-secret",
+            "new-relic-api-key-secret",
             "person@example.com",
             "+1 (415) 555-2671",
             "private structured payload",
