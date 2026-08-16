@@ -5,6 +5,26 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      target:
+        description: Delivery operation
+        type: choice
+        required: true
+        default: publish
+        options:
+          - publish
+          - dev
+          - prod
+          - reload-secrets
+      environment:
+        description: Secret reload environment
+        type: choice
+        required: true
+        default: none
+        options:
+          - none
+          - dev
+          - prod
 
 permissions:
   contents: read
@@ -27,6 +47,8 @@ jobs:
       dev: ${{ steps.classify.outputs.dev }}
       prod: ${{ steps.classify.outputs.prod }}
       layers: ${{ steps.classify.outputs.layers }}
+      delivery-target: ${{ steps.classify.outputs.delivery-target }}
+      delivery-environment: ${{ steps.classify.outputs.delivery-environment }}
     steps:
       - name: Check out delivery commit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -38,13 +60,26 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
+          DELIVERY_TARGET: ${{ github.event.inputs.target }}
+          DELIVERY_ENVIRONMENT: ${{ github.event.inputs.environment }}
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
         run: |
           set -Eeuo pipefail
           application=false infrastructure=false shared=false dev=false prod=false
+          delivery_target=automatic delivery_environment=none
           if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
-            application=true infrastructure=true shared=true dev=true prod=true
+            case "$DELIVERY_TARGET:$DELIVERY_ENVIRONMENT" in
+              publish:none|dev:none|prod:none)
+                application=true
+                delivery_target="$DELIVERY_TARGET" ;;
+              reload-secrets:dev|reload-secrets:prod)
+                delivery_target=reload-secrets
+                delivery_environment="$DELIVERY_ENVIRONMENT" ;;
+              *)
+                printf 'Invalid manual delivery selection.\n' >&2
+                exit 1 ;;
+            esac
           else
             changed_paths_file="$(mktemp "$RUNNER_TEMP/changed-paths.XXXXXX")"
             trap 'rm -f -- "$changed_paths_file"' EXIT
@@ -86,6 +121,7 @@ jobs:
           {
             printf 'application=%s\ninfrastructure=%s\n' "$application" "$infrastructure"
             printf 'shared=%s\ndev=%s\nprod=%s\nlayers=%s\n' "$shared" "$dev" "$prod" "$layer_list"
+            printf 'delivery-target=%s\ndelivery-environment=%s\n' "$delivery_target" "$delivery_environment"
           } >>"$GITHUB_OUTPUT"
 
   validation:
@@ -95,7 +131,9 @@ jobs:
   publish-images:
     name: Publish verified application images
     needs: [changes, validation]
-    if: needs.changes.outputs.application == 'true' && needs.validation.result == 'success'
+    if: >-
+      needs.changes.outputs.application == 'true' && needs.validation.result == 'success' &&
+      needs.changes.outputs.delivery-target != 'reload-secrets'
     permissions:
       contents: read
       packages: write
@@ -702,7 +740,11 @@ jobs:
   dev-release:
     name: Release verified application to development
     needs: [changes, validation, application-ready, infrastructure-complete]
-    if: ${{ needs.validation.result == 'success' && needs.application-ready.result == 'success' && needs.application-ready.outputs.ready == 'true' && needs.infrastructure-complete.result == 'success' }}
+    if: >-
+      needs.validation.result == 'success' && needs.application-ready.result == 'success' &&
+      needs.application-ready.outputs.ready == 'true' && needs.infrastructure-complete.result == 'success' &&
+      (needs.changes.outputs.delivery-target == 'automatic' ||
+      needs.changes.outputs.delivery-target == 'dev' || needs.changes.outputs.delivery-target == 'prod')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: dev
@@ -914,8 +956,12 @@ jobs:
 
   prod-release:
     name: Promote tested application to production
-    needs: [dev-release]
-    if: ${{ needs.dev-release.result == 'success' && needs.dev-release.outputs.migration-result == 'success' && needs.dev-release.outputs.revision-result == 'success' && needs.dev-release.outputs.smoke-result == 'success' && needs.dev-release.outputs.rollback-result == 'skipped' }}
+    needs: [changes, dev-release]
+    if: >-
+      (needs.changes.outputs.delivery-target == 'automatic' || needs.changes.outputs.delivery-target == 'prod') &&
+      needs.dev-release.result == 'success' && needs.dev-release.outputs.migration-result == 'success' &&
+      needs.dev-release.outputs.revision-result == 'success' && needs.dev-release.outputs.smoke-result == 'success' &&
+      needs.dev-release.outputs.rollback-result == 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: prod
@@ -1109,9 +1155,356 @@ jobs:
           if rollback_worker; then record rollback-result success; else record rollback-result failure; fi
           exit 1
 
+  dev-secret-reload:
+    name: Reload development Key Vault references
+    needs: [changes, validation]
+    if: >-
+      needs.validation.result == 'success' &&
+      needs.changes.outputs.delivery-target == 'reload-secrets' &&
+      needs.changes.outputs.delivery-environment == 'dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      current-digest: ${{ steps.reload.outputs.current-digest }}
+      execution-result: ${{ steps.reload.outputs.execution-result }}
+      health-result: ${{ steps.reload.outputs.health-result }}
+      smoke-result: ${{ steps.reload.outputs.smoke-result }}
+      rollback-result: ${{ steps.reload.outputs.rollback-result }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEV }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_DEV: ${{ vars.TOFU_STATE_CONTAINER_DEV }}
+      TOFU_STATE_KEY_DEV: ${{ vars.TOFU_STATE_KEY_DEV }}
+      RELOAD_ENVIRONMENT: dev
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+      - name: Sign in with development deploy identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEV }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Resolve development reload runtime names
+        id: runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/dev-secret-runtime.XXXXXX")"
+          chmod 700 "$runtime_dir"
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          root=.tofu/envs/dev
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_DEV" == dev && "$TOFU_STATE_KEY_DEV" == messagebridge/dev.tfstate ]] || exit 1
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_DEV" \
+            -backend-config="key=$TOFU_STATE_KEY_DEV" -backend-config="use_azuread_auth=true" \
+            >"$runtime_dir/init.log" 2>&1; then
+            printf 'Development reload OpenTofu initialization failed.\n' >&2; exit 1
+          fi
+          if ! worker_name="$(tofu -chdir="$root" output -raw worker_name 2>"$runtime_dir/worker.log")" ||
+            ! smoke_name="$(tofu -chdir="$root" output -raw smoke_job_name 2>"$runtime_dir/smoke.log")"; then
+            printf 'Development reload runtime names unavailable.\n' >&2; exit 1
+          fi
+          [[ "$worker_name" =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ ]] || exit 1
+          [[ "$smoke_name" =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ ]] || exit 1
+          printf 'worker-name=%s\nsmoke-job-name=%s\n' "$worker_name" "$smoke_name" >>"$GITHUB_OUTPUT"
+          printf 'resource-group=rg-messagebridge-dev-centralindia-%s\n' "$serial" >>"$GITHUB_OUTPUT"
+      - name: Reload dev secrets and verify rollback
+        id: reload
+        shell: bash
+        env:
+          WORKER_NAME: ${{ steps.runtime.outputs.worker-name }}
+          SMOKE_JOB_NAME: ${{ steps.runtime.outputs.smoke-job-name }}
+          RESOURCE_GROUP: ${{ steps.runtime.outputs.resource-group }}
+        run: |
+          set -Eeuo pipefail
+          record() { printf '%s=%s\n' "$1" "$2" >>"$GITHUB_OUTPUT"; }
+          record current-digest unavailable
+          record execution-result pending
+          record health-result skipped
+          record smoke-result skipped
+          record rollback-result skipped
+          valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}[a-z0-9]$ ]]; }
+          valid_name "$WORKER_NAME" && valid_name "$SMOKE_JOB_NAME" || exit 1
+          [[ "$RESOURCE_GROUP" =~ ^rg-messagebridge-dev-centralindia-([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$ARM_SUBSCRIPTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+          expected_identity="/subscriptions/$ARM_SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-runtime-dev-cin-$serial"
+          metadata_file="$(mktemp "$RUNNER_TEMP/dev-secret-metadata.XXXXXX")"
+          chmod 600 "$metadata_file"
+          trap 'rm -f -- "$metadata_file"' EXIT
+          if ! az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query '{secrets:properties.configuration.secrets,identities:identity.userAssignedIdentities}' \
+            --output json >"$metadata_file" 2>/dev/null; then
+            record execution-result failure; exit 1
+          fi
+          if ! jq -e --arg identity "$expected_identity" '
+            type == "object" and (.secrets | type == "array" and length == 2) and
+            ([.secrets[].name] | sort) == ["new-relic-otlp-headers", "rabbitmq-connection-string"] and
+            all(.secrets[];
+              . as $secret | $secret.identity == $identity and ($secret.value? == null) and
+              ($secret.keyVaultUrl | type == "string" and
+                test("^https://[a-z0-9-]+\\.vault\\.azure\\.net/secrets/" + $secret.name + "$"))) and
+            (.identities | type == "object" and keys == [$identity])
+          ' "$metadata_file" >/dev/null 2>&1; then
+            record execution-result failure; exit 1
+          fi
+          current_revision() {
+            az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --query properties.latestRevisionName --output tsv 2>/dev/null
+          }
+          revision_active() {
+            az containerapp revision show --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --query properties.active --output tsv 2>/dev/null
+          }
+          wait_revision() {
+            bash .github/scripts/wait-for-container-app-revision.sh --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --digest "$2" --poll-budget "${REVISION_POLL_BUDGET:-30}" \
+              --timeout "${REVISION_TIMEOUT:-300}"
+          }
+          run_smoke() {
+            bash .github/scripts/wait-for-container-app-job.sh --name "$SMOKE_JOB_NAME" \
+              --resource-group "$RESOURCE_GROUP" --poll-budget "${SMOKE_POLL_BUDGET:-30}" \
+              --timeout "${SMOKE_TIMEOUT:-300}"
+          }
+          prior_revision="$(current_revision)" || prior_revision=""
+          prior_image="$(az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query 'properties.template.containers[0].image' --output tsv 2>/dev/null)" || prior_image=""
+          [[ "$prior_revision" =~ ^${WORKER_NAME}--[a-z0-9][a-z0-9-]{0,62}$ ]] || { record execution-result failure; exit 1; }
+          [[ "$prior_image" =~ ^ghcr\.io/chanakya-net/whatsapp-messaging/worker@sha256:([0-9a-f]{64})$ ]] || { record execution-result failure; exit 1; }
+          current_digest="sha256:${BASH_REMATCH[1]}"
+          record current-digest "$current_digest"
+          if [[ "$(revision_active "$prior_revision")" != true ]] || ! wait_revision "$prior_revision" "$current_digest"; then
+            record execution-result failure; exit 1
+          fi
+          rollback_prior() {
+            az containerapp revision activate --name "$WORKER_NAME" --revision "$prior_revision" \
+              --resource-group "$RESOURCE_GROUP" --output none || return 1
+            [[ "$(revision_active "$prior_revision")" == true ]] || return 1
+            wait_revision "$prior_revision" "$current_digest" || return 1
+            run_smoke || return 1
+          }
+          reload_marker="reload-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "$reload_marker" =~ ^reload-[0-9]+-[0-9]+$ ]] || exit 1
+          reload_failed=false
+          if ! az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$prior_image" --revision-suffix "$reload_marker" \
+            --set-env-vars "MESSAGEBRIDGE_SECRET_RELOAD=$reload_marker" --output none; then
+            record execution-result failure; reload_failed=true
+          else
+            new_revision="$(current_revision)" || new_revision=""
+            if [[ -z "$new_revision" || "$new_revision" == "$prior_revision" ]]; then
+              record execution-result failure; reload_failed=true
+            else
+              record execution-result success
+              if wait_revision "$new_revision" "$current_digest"; then
+                record health-result success
+                if run_smoke; then record smoke-result success; else record smoke-result failure; reload_failed=true; fi
+              else
+                record health-result failure; reload_failed=true
+              fi
+            fi
+          fi
+          [[ "$reload_failed" == true ]] || exit 0
+          if rollback_prior; then record rollback-result success; else record rollback-result failure; fi
+          exit 1
+
+  prod-secret-reload:
+    name: Reload production Key Vault references
+    needs: [changes, validation]
+    if: >-
+      needs.validation.result == 'success' &&
+      needs.changes.outputs.delivery-target == 'reload-secrets' &&
+      needs.changes.outputs.delivery-environment == 'prod'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: prod
+    concurrency:
+      group: production-promotion
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      current-digest: ${{ steps.reload.outputs.current-digest }}
+      execution-result: ${{ steps.reload.outputs.execution-result }}
+      health-result: ${{ steps.reload.outputs.health-result }}
+      smoke-result: ${{ steps.reload.outputs.smoke-result }}
+      rollback-result: ${{ steps.reload.outputs.rollback-result }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PROD }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_PROD: ${{ vars.TOFU_STATE_CONTAINER_PROD }}
+      TOFU_STATE_KEY_PROD: ${{ vars.TOFU_STATE_KEY_PROD }}
+      RELOAD_ENVIRONMENT: prod
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+      - name: Sign in with production deploy identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PROD }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Resolve production reload runtime names
+        id: runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/prod-secret-runtime.XXXXXX")"
+          chmod 700 "$runtime_dir"
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          root=.tofu/envs/prod
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_PROD" == prod && "$TOFU_STATE_KEY_PROD" == messagebridge/prod.tfstate ]] || exit 1
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_PROD" \
+            -backend-config="key=$TOFU_STATE_KEY_PROD" -backend-config="use_azuread_auth=true" \
+            >"$runtime_dir/init.log" 2>&1; then
+            printf 'Production reload OpenTofu initialization failed.\n' >&2; exit 1
+          fi
+          if ! worker_name="$(tofu -chdir="$root" output -raw worker_name 2>"$runtime_dir/worker.log")" ||
+            ! smoke_name="$(tofu -chdir="$root" output -raw smoke_job_name 2>"$runtime_dir/smoke.log")"; then
+            printf 'Production reload runtime names unavailable.\n' >&2; exit 1
+          fi
+          [[ "$worker_name" =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ ]] || exit 1
+          [[ "$smoke_name" =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ ]] || exit 1
+          printf 'worker-name=%s\nsmoke-job-name=%s\n' "$worker_name" "$smoke_name" >>"$GITHUB_OUTPUT"
+          printf 'resource-group=rg-messagebridge-prod-centralindia-%s\n' "$serial" >>"$GITHUB_OUTPUT"
+      - name: Reload prod secrets and verify rollback
+        id: reload
+        shell: bash
+        env:
+          WORKER_NAME: ${{ steps.runtime.outputs.worker-name }}
+          SMOKE_JOB_NAME: ${{ steps.runtime.outputs.smoke-job-name }}
+          RESOURCE_GROUP: ${{ steps.runtime.outputs.resource-group }}
+        run: |
+          set -Eeuo pipefail
+          record() { printf '%s=%s\n' "$1" "$2" >>"$GITHUB_OUTPUT"; }
+          record current-digest unavailable
+          record execution-result pending
+          record health-result skipped
+          record smoke-result skipped
+          record rollback-result skipped
+          valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}[a-z0-9]$ ]]; }
+          valid_name "$WORKER_NAME" && valid_name "$SMOKE_JOB_NAME" || exit 1
+          [[ "$RESOURCE_GROUP" =~ ^rg-messagebridge-prod-centralindia-([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$ARM_SUBSCRIPTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+          expected_identity="/subscriptions/$ARM_SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-runtime-prod-cin-$serial"
+          metadata_file="$(mktemp "$RUNNER_TEMP/prod-secret-metadata.XXXXXX")"
+          chmod 600 "$metadata_file"
+          trap 'rm -f -- "$metadata_file"' EXIT
+          if ! az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query '{secrets:properties.configuration.secrets,identities:identity.userAssignedIdentities}' \
+            --output json >"$metadata_file" 2>/dev/null; then
+            record execution-result failure; exit 1
+          fi
+          if ! jq -e --arg identity "$expected_identity" '
+            type == "object" and (.secrets | type == "array" and length == 2) and
+            ([.secrets[].name] | sort) == ["new-relic-otlp-headers", "rabbitmq-connection-string"] and
+            all(.secrets[];
+              . as $secret | $secret.identity == $identity and ($secret.value? == null) and
+              ($secret.keyVaultUrl | type == "string" and
+                test("^https://[a-z0-9-]+\\.vault\\.azure\\.net/secrets/" + $secret.name + "$"))) and
+            (.identities | type == "object" and keys == [$identity])
+          ' "$metadata_file" >/dev/null 2>&1; then
+            record execution-result failure; exit 1
+          fi
+          current_revision() {
+            az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --query properties.latestRevisionName --output tsv 2>/dev/null
+          }
+          revision_active() {
+            az containerapp revision show --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --query properties.active --output tsv 2>/dev/null
+          }
+          wait_revision() {
+            bash .github/scripts/wait-for-container-app-revision.sh --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --digest "$2" --poll-budget "${REVISION_POLL_BUDGET:-30}" \
+              --timeout "${REVISION_TIMEOUT:-300}"
+          }
+          run_smoke() {
+            bash .github/scripts/wait-for-container-app-job.sh --name "$SMOKE_JOB_NAME" \
+              --resource-group "$RESOURCE_GROUP" --poll-budget "${SMOKE_POLL_BUDGET:-30}" \
+              --timeout "${SMOKE_TIMEOUT:-300}"
+          }
+          prior_revision="$(current_revision)" || prior_revision=""
+          prior_image="$(az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query 'properties.template.containers[0].image' --output tsv 2>/dev/null)" || prior_image=""
+          [[ "$prior_revision" =~ ^${WORKER_NAME}--[a-z0-9][a-z0-9-]{0,62}$ ]] || { record execution-result failure; exit 1; }
+          [[ "$prior_image" =~ ^ghcr\.io/chanakya-net/whatsapp-messaging/worker@sha256:([0-9a-f]{64})$ ]] || { record execution-result failure; exit 1; }
+          current_digest="sha256:${BASH_REMATCH[1]}"
+          record current-digest "$current_digest"
+          if [[ "$(revision_active "$prior_revision")" != true ]] || ! wait_revision "$prior_revision" "$current_digest"; then
+            record execution-result failure; exit 1
+          fi
+          rollback_prior() {
+            az containerapp revision activate --name "$WORKER_NAME" --revision "$prior_revision" \
+              --resource-group "$RESOURCE_GROUP" --output none || return 1
+            [[ "$(revision_active "$prior_revision")" == true ]] || return 1
+            wait_revision "$prior_revision" "$current_digest" || return 1
+            run_smoke || return 1
+          }
+          reload_marker="reload-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "$reload_marker" =~ ^reload-[0-9]+-[0-9]+$ ]] || exit 1
+          reload_failed=false
+          if ! az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$prior_image" --revision-suffix "$reload_marker" \
+            --set-env-vars "MESSAGEBRIDGE_SECRET_RELOAD=$reload_marker" --output none; then
+            record execution-result failure; reload_failed=true
+          else
+            new_revision="$(current_revision)" || new_revision=""
+            if [[ -z "$new_revision" || "$new_revision" == "$prior_revision" ]]; then
+              record execution-result failure; reload_failed=true
+            else
+              record execution-result success
+              if wait_revision "$new_revision" "$current_digest"; then
+                record health-result success
+                if run_smoke; then record smoke-result success; else record smoke-result failure; reload_failed=true; fi
+              else
+                record health-result failure; reload_failed=true
+              fi
+            fi
+          fi
+          [[ "$reload_failed" == true ]] || exit 0
+          if rollback_prior; then record rollback-result success; else record rollback-result failure; fi
+          exit 1
+
   delivery-summary:
     name: Publish secret-safe delivery summary
-    needs: [changes, validation, publish-images, shared-retained, dev-infrastructure, prod-infrastructure, shared-reconcile, infrastructure-complete, application-ready, dev-release, prod-release]
+    needs: [changes, validation, publish-images, shared-retained, dev-infrastructure, prod-infrastructure, shared-reconcile, infrastructure-complete, application-ready, dev-release, prod-release, dev-secret-reload, prod-secret-reload]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1121,6 +1514,9 @@ jobs:
       - name: Summarize delivery results
         shell: bash
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          DELIVERY_TARGET: ${{ needs.changes.outputs.delivery-target }}
+          DELIVERY_ENVIRONMENT: ${{ needs.changes.outputs.delivery-environment }}
           COMMIT_SHA: ${{ github.sha }}
           CHANGED_LAYERS: ${{ needs.changes.outputs.layers }}
           VALIDATION_RESULT: ${{ needs.validation.result }}
@@ -1160,8 +1556,62 @@ jobs:
           PROD_SMOKE_RESULT: ${{ needs.prod-release.outputs.smoke-result }}
           PROD_PRIOR_DIGEST: ${{ needs.prod-release.outputs.prior-digest }}
           PROD_ROLLBACK_RESULT: ${{ needs.prod-release.outputs.rollback-result }}
+          DEV_RELOAD_DIGEST: ${{ needs.dev-secret-reload.outputs.current-digest }}
+          DEV_RELOAD_EXECUTION: ${{ needs.dev-secret-reload.outputs.execution-result }}
+          DEV_RELOAD_HEALTH: ${{ needs.dev-secret-reload.outputs.health-result }}
+          DEV_RELOAD_SMOKE: ${{ needs.dev-secret-reload.outputs.smoke-result }}
+          DEV_RELOAD_ROLLBACK: ${{ needs.dev-secret-reload.outputs.rollback-result }}
+          PROD_RELOAD_DIGEST: ${{ needs.prod-secret-reload.outputs.current-digest }}
+          PROD_RELOAD_EXECUTION: ${{ needs.prod-secret-reload.outputs.execution-result }}
+          PROD_RELOAD_HEALTH: ${{ needs.prod-secret-reload.outputs.health-result }}
+          PROD_RELOAD_SMOKE: ${{ needs.prod-secret-reload.outputs.smoke-result }}
+          PROD_RELOAD_ROLLBACK: ${{ needs.prod-secret-reload.outputs.rollback-result }}
         run: |
           set -Eeuo pipefail
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            manual_environment=none manual_digest=unavailable execution_status=skipped
+            health_status=skipped smoke_status=skipped rollback_status=skipped
+            case "$DELIVERY_TARGET:$DELIVERY_ENVIRONMENT" in
+              publish:none)
+                manual_digest="worker:${DEV_WORKER_DIGEST:-unavailable},migration:${DEV_MIGRATION_DIGEST:-unavailable}"
+                execution_status="$IMAGES_RESULT" ;;
+              dev:none)
+                manual_environment=dev
+                manual_digest="worker:${DEV_WORKER_DIGEST:-unavailable},migration:${DEV_MIGRATION_DIGEST:-unavailable}"
+                execution_status="$DEV_RELEASE_JOB_RESULT"
+                health_status="${DEV_HEALTH_RESULT:-skipped}" smoke_status="${DEV_SMOKE_RESULT:-skipped}"
+                rollback_status="${DEV_ROLLBACK_RESULT:-skipped}" ;;
+              prod:none)
+                manual_environment=prod
+                manual_digest="worker:${PROD_WORKER_DIGEST:-unavailable},migration:${PROD_MIGRATION_DIGEST:-unavailable}"
+                execution_status="$PROD_RELEASE_JOB_RESULT"
+                health_status="${PROD_HEALTH_RESULT:-skipped}" smoke_status="${PROD_SMOKE_RESULT:-skipped}"
+                rollback_status="${PROD_ROLLBACK_RESULT:-skipped}" ;;
+              reload-secrets:dev)
+                manual_environment=dev manual_digest="${DEV_RELOAD_DIGEST:-unavailable}"
+                execution_status="${DEV_RELOAD_EXECUTION:-skipped}" health_status="${DEV_RELOAD_HEALTH:-skipped}"
+                smoke_status="${DEV_RELOAD_SMOKE:-skipped}" rollback_status="${DEV_RELOAD_ROLLBACK:-skipped}" ;;
+              reload-secrets:prod)
+                manual_environment=prod manual_digest="${PROD_RELOAD_DIGEST:-unavailable}"
+                execution_status="${PROD_RELOAD_EXECUTION:-skipped}" health_status="${PROD_RELOAD_HEALTH:-skipped}"
+                smoke_status="${PROD_RELOAD_SMOKE:-skipped}" rollback_status="${PROD_RELOAD_ROLLBACK:-skipped}" ;;
+              *) exit 1 ;;
+            esac
+            [[ "$manual_environment" =~ ^(none|dev|prod)$ ]] || exit 1
+            [[ "$manual_digest" == unavailable || "$manual_digest" =~ ^sha256:[0-9a-f]{64}$ ||
+              "$manual_digest" =~ ^worker:([0-9a-f]{64}|unavailable),migration:([0-9a-f]{64}|unavailable)$ ]] ||
+              manual_digest=unavailable
+            for status in execution_status health_status smoke_status rollback_status; do
+              [[ "${!status}" =~ ^(success|failure|skipped|cancelled|pending|unavailable)$ ]] || printf -v "$status" unavailable
+            done
+            {
+              printf '### Manual delivery\n'
+              printf -- '- environment: `%s`\n- digest: `%s`\n' "$manual_environment" "$manual_digest"
+              printf -- '- execution_status: `%s`\n- health_status: `%s`\n' "$execution_status" "$health_status"
+              printf -- '- smoke_status: `%s`\n- rollback_status: `%s`\n' "$smoke_status" "$rollback_status"
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           {
             printf '### Ordered delivery\n'
             printf -- '- commit: `%s`\n- changed_layers: `%s`\n' "$COMMIT_SHA" "${CHANGED_LAYERS:-none}"

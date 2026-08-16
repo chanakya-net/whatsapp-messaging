@@ -628,6 +628,64 @@ Configure `nuget.config` in your consuming application:
 
 **HITL Decision**: Package feed location and authentication are environment-specific. Update feed URL and credentials per deployment environment.
 
+## Manual delivery operations
+
+Use `.github/workflows/delivery.yml` for every manual image or Azure application operation. The
+workflow accepts only the bounded `target` and `environment` choices below. It does not accept an
+image digest, tag, secret name, credential, connection string, token, or secret value.
+
+| Target | Environment input | Scope and result |
+|---|---|---|
+| `publish` | `none` | Validates, builds, scans, pushes, attests, and anonymously verifies both public GHCR images. Azure is not accessed. |
+| `dev` | `none` | Publishes when required, then runs the existing development migration, exact-digest worker release, health check, smoke check, and application rollback path. |
+| `prod` | `none` | Completes the same verified development release and immutable handoff, then waits for protected production approval and promotes those exact digests. |
+| `reload-secrets` | `dev` | Validates current versionless Key Vault references and reloads the development worker at its current digest. It does not publish, migrate, or apply infrastructure. |
+| `reload-secrets` | `prod` | Performs the same current-digest reload behind the protected production approval and concurrency boundary. |
+
+Invoke a target from an authenticated GitHub CLI session, replacing `<delivery-ref>` with the commit
+or protected branch to operate:
+
+```bash
+gh workflow run delivery.yml --ref <delivery-ref> -f target=publish -f environment=none
+gh workflow run delivery.yml --ref <delivery-ref> -f target=dev -f environment=none
+gh workflow run delivery.yml --ref <delivery-ref> -f target=prod -f environment=none
+gh workflow run delivery.yml --ref <delivery-ref> -f target=reload-secrets -f environment=dev
+gh workflow run delivery.yml --ref <delivery-ref> -f target=reload-secrets -f environment=prod
+```
+
+Before running an operation:
+
+1. Ensure repository validation is green and the worker and migration GHCR packages are public so
+   the publication job can perform anonymous digest verification.
+2. Configure the `dev` and `prod` GitHub Environments with their environment-specific Azure OIDC
+   client IDs and reviewed OpenTofu backend coordinates. Configure required reviewers for production;
+   apply the same reviewer policy to development if local policy requires it.
+3. Keep the workflow's stable, non-cancelling concurrency settings enabled. A manual operation is
+   serialized with automatic delivery and cannot overtake another state mutation.
+4. For a reload, update secret values in Key Vault out of band first. Operators must never pass a secret value to the workflow,
+   place one in a dispatch field, or paste one into a run summary.
+
+`publish` ends after anonymous digest verification. `dev` may pause for development Environment
+approval. `prod` first requires a successful development migration, healthy revision, smoke check,
+and no rollback; it then pauses for required reviewers on the `prod` GitHub Environment before any
+production OIDC token is issued. Reloads use only the selected environment identity; production
+reload approval also occurs before production OIDC issuance.
+
+The manual summary is deliberately limited to environment, immutable digest, execution/health/smoke
+status, and rollback status. Interpret failures as follows:
+
+- Validation, scan, attestation, push, or anonymous-verification failure means no Azure deployment
+  was attempted.
+- Development failure prevents production promotion. A worker health or smoke failure invokes the
+  existing application rollback; migration failure stops before worker mutation.
+- Reload rejects missing, extra, identity-mismatched, or versioned Key Vault references before worker
+  mutation. After mutation begins, revision creation, health, or smoke failure triggers reload rollback to the captured prior revision.
+  Reload rollback succeeds only after that prior revision is active,
+  healthy at the captured digest, and passes the internal smoke job.
+- Release rollback restores only the prior worker image, and reload rollback restores the verified
+  prior revision. Neither path ever reverses the database schema; migration recovery requires a
+  forward fix or the approved database recovery procedure.
+
 ## Protected production promotion
 
 `.github/workflows/delivery.yml` is the sole ordered application delivery path. A successful

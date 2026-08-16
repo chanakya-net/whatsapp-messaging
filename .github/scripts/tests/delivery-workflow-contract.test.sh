@@ -57,7 +57,7 @@ test_classification_and_skeleton() {
   assert_contains "$concurrency" '^  group: main-delivery$' 'Delivery needs one stable concurrency group.'
   assert_contains "$concurrency" '^  cancel-in-progress: false$' 'State mutation must never be cancelled by a later run.'
   assert_contains "$validation" 'uses: \./\.github/workflows/_validation\.yml' 'Delivery must always call reusable validation.'
-  assert_contains "$images" "if:.*needs\.changes\.outputs\.application == 'true'" 'Image publication must skip non-application changes.'
+  assert_contains "$images" "needs\.changes\.outputs\.application == 'true'" 'Image publication must skip non-application changes.'
   assert_contains "$images" 'uses: \./\.github/workflows/_publish-images\.yml' 'Application changes must use verified image publication.'
   assert_contains "$images" '^      packages: write$' 'Image caller alone needs package write access.'
   for output in application infrastructure shared dev prod layers; do
@@ -84,6 +84,8 @@ EOF
     output_file="$test_dir/$name.out"
     : >"$output_file"
     RUNNER_TEMP="$test_dir" PATH="$test_dir/bin:$PATH" DELIVERY_CASE="$case_json" EVENT_NAME="$event" \
+      DELIVERY_TARGET="$(jq -r '.target // ""' <<<"$case_json")" \
+      DELIVERY_ENVIRONMENT="$(jq -r '.environment // ""' <<<"$case_json")" \
       BEFORE_SHA=1111111111111111111111111111111111111111 \
       AFTER_SHA=2222222222222222222222222222222222222222 \
       GITHUB_OUTPUT="$output_file" bash -Eeuo pipefail -c "$classifier"
@@ -100,6 +102,7 @@ EOF
     output_file="$test_dir/$name.out"
     : >"$output_file"
     if RUNNER_TEMP="$test_dir" PATH="$test_dir/bin:$PATH" DELIVERY_CASE="$case_json" EVENT_NAME=push \
+      DELIVERY_TARGET= DELIVERY_ENVIRONMENT= \
       BEFORE_SHA=1111111111111111111111111111111111111111 \
       AFTER_SHA=2222222222222222222222222222222222222222 \
       GITHUB_OUTPUT="$output_file" bash -Eeuo pipefail -c "$classifier"; then
@@ -318,11 +321,11 @@ test_dev_release_gate() {
   [ -n "$block" ] || fail 'Missing development release job.'
   assert_contains "$block" '^    needs: \[changes, validation, application-ready, infrastructure-complete\]$' \
     'Development release must wait for validation, verified digests, and infrastructure.'
-  assert_contains "$block" "if:.*application-ready\.result == 'success'" \
+  assert_contains "$block" "application-ready\.result == 'success'" \
     'Development release must require the application gate to succeed.'
-  assert_contains "$block" "if:.*application-ready\.outputs\.ready == 'true'" \
+  assert_contains "$block" "application-ready\.outputs\.ready == 'true'" \
     'Development release must require verified immutable digests.'
-  assert_contains "$block" "if:.*infrastructure-complete\.result == 'success'" \
+  assert_contains "$block" "infrastructure-complete\.result == 'success'" \
     'Development release must require successful infrastructure completion.'
   assert_contains "$block" '^    environment: dev$' 'Development release must use the dev environment.'
   assert_contains "$block" '^    timeout-minutes: [0-9]+$' 'Development release needs an explicit timeout.'
@@ -359,7 +362,7 @@ test_global_permissions_pins_and_timeouts() {
   if grep -E 'uses: [^[:space:]]+@' "$WORKFLOW" | grep -Ev '@[0-9a-f]{40}([[:space:]]|$)' >/dev/null; then
     fail 'Every external action in delivery must be pinned to a full SHA.'
   fi
-  for job in changes shared-retained dev-infrastructure prod-infrastructure shared-reconcile infrastructure-complete application-ready dev-release prod-release delivery-summary; do
+  for job in changes shared-retained dev-infrastructure prod-infrastructure shared-reconcile infrastructure-complete application-ready dev-release prod-release dev-secret-reload prod-secret-reload delivery-summary; do
     block="$(job_block "$job")"
     assert_contains "$block" '^    timeout-minutes: [0-9]+$' "$job must set an explicit timeout."
   done
@@ -380,4 +383,5 @@ test_prod_promotion_gate
 test_dev_release_scenarios
 test_prod_release_scenarios
 test_global_permissions_pins_and_timeouts
+bash "$REPO_ROOT/.github/scripts/tests/delivery-dispatch-contract.test.sh"
 printf '%s\n' 'Delivery workflow contract checks passed.'
