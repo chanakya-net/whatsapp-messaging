@@ -1,0 +1,83 @@
+{
+  "classification": [
+    {
+      "name": "application-only",
+      "event": "push",
+      "paths": ["src/MessageBridge.Worker/Program.cs"],
+      "expected": {"application": "true", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "application"}
+    },
+    {
+      "name": "dev-infrastructure-only",
+      "event": "push",
+      "paths": [".tofu/envs/dev/worker.tf"],
+      "expected": {"application": "false", "infrastructure": "true", "shared": "false", "dev": "true", "prod": "false", "layers": "dev"}
+    },
+    {
+      "name": "combined",
+      "event": "push",
+      "paths": ["src/MessageBridge.Worker/Program.cs", ".tofu/envs/prod/worker.tf"],
+      "expected": {"application": "true", "infrastructure": "true", "shared": "false", "dev": "false", "prod": "true", "layers": "application,prod"}
+    },
+    {
+      "name": "database-module",
+      "event": "push",
+      "paths": [".tofu/modules/database/main.tf"],
+      "expected": {"application": "false", "infrastructure": "true", "shared": "true", "dev": "false", "prod": "false", "layers": "shared"}
+    },
+    {
+      "name": "environment-module",
+      "event": "push",
+      "paths": [".tofu/modules/container-environment/main.tf"],
+      "expected": {"application": "false", "infrastructure": "true", "shared": "false", "dev": "true", "prod": "true", "layers": "dev,prod"}
+    },
+    {
+      "name": "metric-alerts-module",
+      "event": "push",
+      "paths": [".tofu/modules/metric-alerts/main.tf"],
+      "expected": {"application": "false", "infrastructure": "true", "shared": "true", "dev": "true", "prod": "true", "layers": "shared,dev,prod"}
+    },
+    {
+      "name": "egress-helper-infrastructure-only",
+      "event": "push",
+      "paths": [".github/scripts/reconcile-postgres-egress.sh"],
+      "expected": {"application": "false", "infrastructure": "true", "shared": "true", "dev": "true", "prod": "true", "layers": "shared,dev,prod"}
+    },
+    {
+      "name": "documentation-only",
+      "event": "push",
+      "paths": ["docs/runbook.md"],
+      "expected": {"application": "false", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "none"}
+    },
+    {
+      "name": "manual-fail-safe",
+      "event": "workflow_dispatch",
+      "paths": [],
+      "expected": {"application": "true", "infrastructure": "true", "shared": "true", "dev": "true", "prod": "true", "layers": "application,shared,dev,prod"}
+    }
+  ],
+  "readiness": [
+    {"name": "application-only", "application": true, "infrastructure": false, "images": "success", "infrastructure_result": "success", "ready": true},
+    {"name": "infrastructure-only", "application": false, "infrastructure": true, "images": "skipped", "infrastructure_result": "success", "ready": false},
+    {"name": "combined-success", "application": true, "infrastructure": true, "images": "success", "infrastructure_result": "success", "ready": true},
+    {"name": "combined-infrastructure-failure", "application": true, "infrastructure": true, "images": "success", "infrastructure_result": "failure", "ready": false}
+  ],
+  "infrastructure_readiness": [
+    {"name": "intentional-skip", "infrastructure": false, "results": ["skipped", "skipped", "skipped", "skipped"], "passes": true, "state": "skipped"},
+    {"name": "ordered-success", "infrastructure": true, "results": ["success", "success", "success", "success"], "passes": true, "state": "success"},
+    {"name": "reconciliation-failure", "infrastructure": true, "results": ["success", "success", "success", "failure"], "passes": false, "state": ""},
+    {"name": "unexpected-mutation", "infrastructure": false, "results": ["success", "skipped", "skipped", "skipped"], "passes": false, "state": ""}
+  ],
+  "egress_failures": [
+    "dev-collection",
+    "prod-collection",
+    "retained-generation",
+    "retained-plan",
+    "retained-apply",
+    "exact-generation",
+    "exact-plan",
+    "exact-apply",
+    "azure-list",
+    "azure-broad-rule",
+    "final-divergence"
+  ]
+}

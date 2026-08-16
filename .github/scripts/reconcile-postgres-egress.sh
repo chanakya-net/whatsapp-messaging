@@ -17,6 +17,10 @@ Modes:
 Options:
   --dev-root DIR          Dev OpenTofu root (default: .tofu/envs/dev)
   --prod-root DIR         Prod OpenTofu root (default: .tofu/envs/prod)
+  --reviewed-ranges-file FILE
+                          Prior shared exact range map (retained only)
+  --dev-output-file FILE  Pre-collected, validated dev output
+  --prod-output-file FILE Pre-collected, validated prod output
   --resource-group NAME   PostgreSQL resource group (retained/verify required)
   --server-name NAME      PostgreSQL flexible server (retained/verify required)
   --output FILE           JSON tfvars destination (retained/exact required)
@@ -42,13 +46,18 @@ parse_args() {
   DEV_ROOT="$REPO_ROOT/.tofu/envs/dev"
   PROD_ROOT="$REPO_ROOT/.tofu/envs/prod"
   RESOURCE_GROUP="" SERVER_NAME="" OUTPUT_FILE="" PARALLELISM=""
+  REVIEWED_RANGES_FILE="" DEV_OUTPUT_FILE="" PROD_OUTPUT_FILE=""
+  ROOTS_EXPLICIT=false
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --dev-root|--prod-root|--resource-group|--server-name|--output|--parallelism)
+      --dev-root|--prod-root|--reviewed-ranges-file|--dev-output-file|--prod-output-file|--resource-group|--server-name|--output|--parallelism)
         take_value "$@"
         case "$1" in
-          --dev-root) DEV_ROOT="$2" ;;
-          --prod-root) PROD_ROOT="$2" ;;
+          --dev-root) DEV_ROOT="$2"; ROOTS_EXPLICIT=true ;;
+          --prod-root) PROD_ROOT="$2"; ROOTS_EXPLICIT=true ;;
+          --reviewed-ranges-file) REVIEWED_RANGES_FILE="$2" ;;
+          --dev-output-file) DEV_OUTPUT_FILE="$2" ;;
+          --prod-output-file) PROD_OUTPUT_FILE="$2" ;;
           --resource-group) RESOURCE_GROUP="$2" ;;
           --server-name) SERVER_NAME="$2" ;;
           --output) OUTPUT_FILE="$2" ;;
@@ -73,10 +82,49 @@ validate_args() {
   if [ -n "$PARALLELISM" ]; then
     [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]] || fail '--parallelism must be a positive integer'
   fi
+  local file_pair=false
+  if [ -n "$DEV_OUTPUT_FILE" ] || [ -n "$PROD_OUTPUT_FILE" ]; then
+    [ -n "$DEV_OUTPUT_FILE" ] && [ -n "$PROD_OUTPUT_FILE" ] ||
+      fail '--dev-output-file and --prod-output-file must be supplied together'
+    file_pair=true
+  fi
+  if [ -n "$REVIEWED_RANGES_FILE" ] && [ "$file_pair" = true ]; then
+    fail '--reviewed-ranges-file cannot be combined with environment output files'
+  fi
+  if [ "$ROOTS_EXPLICIT" = true ] && { [ -n "$REVIEWED_RANGES_FILE" ] || [ "$file_pair" = true ]; }; then
+    fail 'explicit roots cannot be combined with file inputs'
+  fi
+  if [ -n "$REVIEWED_RANGES_FILE" ] && [ "$MODE" != retained ]; then
+    fail '--reviewed-ranges-file is accepted only in retained mode'
+  fi
+  SOURCE_KIND=roots
+  [ -z "$REVIEWED_RANGES_FILE" ] || SOURCE_KIND=snapshot
+  [ "$file_pair" = false ] || SOURCE_KIND=files
+}
+
+validate_input_file() {
+  local file=$1 label=$2
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || fail "$label must be a readable regular file"
+}
+
+validate_reviewed_map() {
+  local file=$1
+  validate_input_file "$file" 'reviewed ranges file'
+  jq -e '
+    def cidr32:
+      type == "string" and
+      test("^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}/32$") and
+      . != "0.0.0.0/32";
+    type == "object" and length > 0 and
+    ([.[]] | length == (unique | length)) and
+    all(to_entries[]; (.value | cidr32) and
+      .key == ("ip-" + (.value | rtrimstr("/32") | gsub("\\."; "-"))))
+  ' "$file" >/dev/null || fail 'reviewed PostgreSQL egress map is incomplete or invalid'
 }
 
 validate_environment() {
   local expected=$1 file=$2
+  validate_input_file "$file" "$expected output file"
   jq -e --arg expected "$expected" '
     def cidr32:
       type == "string" and
@@ -97,20 +145,35 @@ validate_environment() {
 
 collect_environment() {
   local root=$1 expected=$2 destination=$3
-  tofu -chdir="$root" output -json reviewed_postgres_egress >"$destination" ||
+  tofu -chdir="$root" output -json reviewed_postgres_egress \
+    >"$destination" 2>"$WORK_DIR/$expected-output.log" ||
     fail "unable to read $expected reviewed PostgreSQL egress output"
   validate_environment "$expected" "$destination"
 }
 
 collect_reviewed_ranges() {
-  collect_environment "$DEV_ROOT" dev "$WORK_DIR/dev.json"
-  collect_environment "$PROD_ROOT" prod "$WORK_DIR/prod.json"
-  jq -s '[.[].ranges[]] | unique | sort' "$WORK_DIR/dev.json" "$WORK_DIR/prod.json" >"$WORK_DIR/reviewed.json"
+  case "$SOURCE_KIND" in
+    snapshot)
+      validate_reviewed_map "$REVIEWED_RANGES_FILE"
+      jq '[.[]] | unique | sort' "$REVIEWED_RANGES_FILE" >"$WORK_DIR/reviewed.json"
+      ;;
+    files)
+      validate_environment dev "$DEV_OUTPUT_FILE"
+      validate_environment prod "$PROD_OUTPUT_FILE"
+      jq -s '[.[].ranges[]] | unique | sort' "$DEV_OUTPUT_FILE" "$PROD_OUTPUT_FILE" >"$WORK_DIR/reviewed.json"
+      ;;
+    roots)
+      collect_environment "$DEV_ROOT" dev "$WORK_DIR/dev.json"
+      collect_environment "$PROD_ROOT" prod "$WORK_DIR/prod.json"
+      jq -s '[.[].ranges[]] | unique | sort' "$WORK_DIR/dev.json" "$WORK_DIR/prod.json" >"$WORK_DIR/reviewed.json"
+      ;;
+  esac
 }
 
 collect_azure_ranges() {
   az postgres flexible-server firewall-rule list \
-    --resource-group "$RESOURCE_GROUP" --name "$SERVER_NAME" --output json >"$WORK_DIR/azure.json" ||
+    --resource-group "$RESOURCE_GROUP" --name "$SERVER_NAME" --output json \
+    >"$WORK_DIR/azure.json" 2>"$WORK_DIR/azure-list.log" ||
     fail 'unable to list PostgreSQL firewall rules'
   jq -e '
     def ipv4:
