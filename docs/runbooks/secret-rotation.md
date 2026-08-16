@@ -4,20 +4,21 @@ Procedure for rotating credentials stored in Azure Key Vault and reloading them 
 
 ## Overview
 
-MessageBridge stores all secrets in Azure Key Vault:
-- Database password
-- RabbitMQ password
-- New Relic license key
-- API keys
+MessageBridge stores all secrets in Azure Key Vault using versionless references:
 
-Secrets are versioned in Key Vault. When a secret expires or is compromised, a new version is created, and workers must reload it.
+- `rabbitmq-connection-string` — CloudAMQP connection credentials
+- `new-relic-otlp-headers` — New Relic authentication headers
+- `whatsapp-provider-placeholder` — disabled placeholder
+- `email-provider-placeholder` — disabled placeholder
 
-**Key principle:** Workers fetch secrets at startup and cache them. Rotating a secret does not automatically reload it in running instances; you must restart the worker or trigger a configuration reload.
+**Key principle**: Workers fetch secrets at startup and cache them. Versionless references automatically get the latest version. Creating a new secret version does not restart workers; you must trigger a reload job.
+
+**Security critical**: Never retrieve or display secret values via CLI, logs, or terminal history. Use Azure Key Vault portal for all value changes.
 
 ## Prerequisites
 
 - Azure CLI (`az`) authenticated with Key Vault Administrator role
-- Access to the target Key Vault (`kv-msgbr-prod-cin-042` or equivalent)
+- Access to target Key Vault via Azure portal (kv-msgbr-{dev|prod}-{region}-{serial})
 - At least one running worker instance (for testing reload)
 - New secret value provided out of band (never created in this runbook)
 
@@ -25,277 +26,154 @@ Secrets are versioned in Key Vault. When a secret expires or is compromised, a n
 
 Rotate secrets in this order to minimize downtime:
 
-1. **Dev first** — Create new version in dev Key Vault, test worker reload
-2. **Staging** (if applicable) — Repeat in staging environment
-3. **Production** — Create new version in prod, coordinate worker restart
-4. **Cleanup** — Verify old versions are no longer in use, optionally disable them
+1. **Dev first** — Create new version in dev Key Vault (portal), test worker reload
+2. **Production** — Create new version in prod Key Vault (portal), trigger reload via delivery.yml
+3. **Cleanup** — Verify old versions are disabled/archived in Key Vault (optional)
 
-## Step 1: Create New Secret Version in Dev
+## Step 1: Create New Secret Version (Dev)
 
-```bash
-# Connect to dev Key Vault
-kv_name="kv-msgbr-dev-cin-042"
-secret_name="messagebridge-rabbitmq-password"  # example
+**Via Azure Portal** (recommended):
 
-# Obtain new password (provided out of band)
-new_password=$(read -sp "Enter new $secret_name: "; echo "$REPLY")
+1. Navigate to Key Vault: kv-msgbr-dev-{region}-{serial}
+2. Select Secrets from left menu
+3. Click the secret name (e.g., `rabbitmq-connection-string`)
+4. Click "+ New Version"
+5. Paste the new value (provided out of band, never in this runbook)
+6. Click Create
+7. Copy the version URI (for verification)
 
-# Create new version in Key Vault
-az keyvault secret set \
-  --vault-name "$kv_name" \
-  --name "$secret_name" \
-  --value "$new_password"
+**Never** use CLI to set secrets in runbooks. Azure Portal ensures values are entered securely without terminal history or logs.
 
-# Verify new version was created (should show new date)
-az keyvault secret show \
-  --vault-name "$kv_name" \
-  --name "$secret_name" \
-  --query '[version,attributes.created]' -o json
-```
-
-Expected output:
-
-```json
-[
-  "abc123def456...",
-  "2026-08-16T15:30:00Z"
-]
-```
-
-Record the version ID (first line).
+Expected output: new version created with timestamp and URI.
 
 ## Step 2: Test Reload in Dev
 
-Deploy worker pointing to new secret version and verify it loads correctly:
+Trigger the protected reload workflow to reload secrets in running worker instances:
 
 ```bash
-# Get dev Container App name
-dev_ca_name="ca-messagebridge-dev-cin-042"
-dev_rg="rg-messagebridge-dev-cin-042"
+# Trigger secret reload via delivery.yml
+gh workflow run delivery.yml \
+  -f target=reload-secrets \
+  -f environment=dev
 
-# Check current configuration (verify it's using old version)
-az containerapp show \
-  --resource-group "$dev_rg" \
-  --name "$dev_ca_name" \
-  --query properties.template.containers[0].env | jq '.[] | select(.name=="RabbitMq__Password")'
+# Monitor reload progress
+gh run list --workflow=delivery.yml --limit=1 --json status,conclusion
+```
 
-# Manually restart the Container App (this forces workers to fetch latest secret)
-az containerapp update \
-  --resource-group "$dev_rg" \
-  --name "$dev_ca_name" \
-  --image "$(az containerapp show --resource-group "$dev_rg" --name "$dev_ca_name" --query properties.template.containers[0].image -o tsv)"
+This workflow:
+- Signals all dev workers to reload from Key Vault
+- Each worker fetches the versionless reference again (gets latest version)
+- No pod/container restart required
 
-# Wait for restart (30-60 seconds)
-sleep 60
+Check worker health after reload:
 
-# Verify worker health
+```bash
+# Get dev Container App URL
+dev_ca_name="ca-messagebridge-dev-${REGION:0:3}-${BOOTSTRAP_SERIAL}"
+dev_rg="rg-messagebridge-dev-${REGION:0:3}-${BOOTSTRAP_SERIAL}"
+
 dev_url=$(az containerapp show \
   --resource-group "$dev_rg" \
   --name "$dev_ca_name" \
   --query properties.latestRevisionFqdn -o tsv)
 
+# Verify worker is ready
 curl -s "https://$dev_url/health/ready" | jq .
 ```
 
-Expected: health endpoint returns 200, worker connects to RabbitMQ successfully.
+Expected: health endpoint returns 200, worker reports ready.
 
 ### Failure Handling
 
-If worker fails to start or health check fails after restart:
+If reload fails:
 
 ```bash
 # Check worker logs for credential errors
 az containerapp logs show \
   --resource-group "$dev_rg" \
   --name "$dev_ca_name" \
-  --since 10m | grep -i "password\|auth\|connection"
+  --since 10m | grep -i "error\|connection"
 
-# Verify the secret value in Key Vault
-az keyvault secret show \
-  --vault-name "$kv_name" \
-  --name "$secret_name" \
-  --query value
-
-# If secret is wrong, create another new version with correct value
-# Do NOT re-use incorrect version
+# Verify the secret exists and is readable (portal only)
+# Do NOT query the secret value via CLI
 ```
+
+If secret is wrong, create another new version in Key Vault portal with the correct value. Do not re-use an incorrect version.
 
 ## Step 3: Production Approval and Rotation
 
 After successful dev test, apply to production.
 
-**Approval step:** Notify team and get sign-off before rotating prod secrets. Document who approved and timestamp.
+**Approval step**: Notify team and document who approved and when before rotating prod secrets.
+
+Create new secret version in production Key Vault:
+
+1. Navigate to Key Vault: kv-msgbr-prod-{region}-{serial}
+2. Select Secrets from left menu
+3. Click the secret name
+4. Click "+ New Version"
+5. Paste the new value (same value tested in dev)
+6. Click Create
+
+Trigger production reload:
 
 ```bash
-# Rotate in production
-prod_kv="kv-msgbr-prod-cin-042"
-prod_ca_name="ca-messagebridge-prod-cin-042"
-prod_rg="rg-messagebridge-prod-cin-042"
+# Trigger secret reload via delivery.yml
+gh workflow run delivery.yml \
+  -f target=reload-secrets \
+  -f environment=prod
 
-# Create new version (same secret value as dev test)
-az keyvault secret set \
-  --vault-name "$prod_kv" \
-  --name "$secret_name" \
-  --value "$new_password"
+# Monitor reload progress
+gh run list --workflow=delivery.yml --limit=1 --json status,conclusion
+```
 
-# Verify version created
-az keyvault secret show \
-  --vault-name "$prod_kv" \
-  --name "$secret_name" \
-  --query '[version,attributes.created]' -o json
+This workflow:
+- Gracefully reloads secrets in production workers
+- No downtime or revision swap required
+- Workers fetch latest version from versionless URI
 
-# Restart production worker(s)
-# This minimizes downtime by using Container Apps revision swap
-prod_image=$(az containerapp show \
-  --resource-group "$prod_rg" \
-  --name "$prod_ca_name" \
-  --query properties.template.containers[0].image -o tsv)
+Verify production health:
 
-az containerapp update \
-  --resource-group "$prod_rg" \
-  --name "$prod_ca_name" \
-  --image "$prod_image"
+```bash
+# Get production Container App URL
+prod_ca_name="ca-messagebridge-prod-${REGION:0:3}-${BOOTSTRAP_SERIAL}"
+prod_rg="rg-messagebridge-prod-${REGION:0:3}-${BOOTSTRAP_SERIAL}"
 
-# Monitor health during restart (60–90 seconds)
 prod_url=$(az containerapp show \
   --resource-group "$prod_rg" \
   --name "$prod_ca_name" \
   --query properties.latestRevisionFqdn -o tsv)
 
-# Polling loop: check health every 5 seconds for 2 minutes
-for i in {1..24}; do
-  echo "[$i] Checking health..."
-  curl -s "https://$prod_url/health/ready" | jq .
-  sleep 5
-done
+# Verify worker is ready
+curl -s "https://$prod_url/health/ready" | jq .
 ```
 
-## Step 4: Verify Production Connectivity
+Expected: health endpoint returns 200, worker reports ready.
 
-After restart, verify worker is using new credentials:
+## Step 4: Cleanup (Optional)
 
-```bash
-# Check RabbitMQ connectivity
-rabbitmq_host=$(echo "$prod_url" | sed 's/^.*--//; s/.azurecontainerapps.io.*//')
-az containerapp exec \
-  --resource-group "$prod_rg" \
-  --name "$prod_ca_name" \
-  -- bash -c "echo 'AMQP connection established' | tee /proc/self/fd/2"
+After confirming the new secret version is working, disable the old version in Key Vault:
 
-# Check logs for successful authentication
-az containerapp logs show \
-  --resource-group "$prod_rg" \
-  --name "$prod_ca_name" \
-  --since 5m | grep -E "connected|authenticated|startup"
-```
+1. Navigate to Key Vault: kv-msgbr-prod-{region}-{serial}
+2. Select Secrets
+3. Click the secret name
+4. Click on the old version
+5. Click Disable (this marks it as inactive but preserves audit history)
 
-Expected: logs show successful connection to RabbitMQ/PostgreSQL without authentication errors.
+Do not delete old versions; disabled versions remain in audit logs for compliance.
 
-## Step 5: Cleanup Old Versions
+## Failure Recovery
 
-After confirming new secret is working, optionally disable old versions to prevent accidental use:
+If a secret is wrong and workers cannot reload:
 
-```bash
-# List all versions of the secret
-az keyvault secret list-versions \
-  --vault-name "$prod_kv" \
-  --name "$secret_name" \
-  --query '[].id' -o tsv
+1. **Create corrected version** in Key Vault portal with correct value
+2. **Re-trigger reload**: `gh workflow run delivery.yml -f target=reload-secrets -f environment={dev|prod}`
+3. **Verify health** again
 
-# Disable old versions (keep last 2 for rollback)
-# Get the list of version IDs, then disable older ones:
+If a secret was disclosed, immediately disable all versions and create a new one with a different value.
 
-az keyvault secret update \
-  --vault-name "$prod_kv" \
-  --name "$secret_name" \
-  --id "https://${prod_kv}.vault.azure.net/secrets/$secret_name/OLD_VERSION_ID" \
-  --set attributes.enabled=false
-```
+## Related Runbooks
 
-## Expected Results
-
-- New secret version created in Key Vault
-- Workers restart and fetch new secret
-- Application remains available (zero downtime via Container Apps revision swap)
-- All services (RabbitMQ, PostgreSQL, etc.) accept new credentials
-- Old versions are disabled or documented in runbook
-
-## Failure Interpretation
-
-| Symptom | Cause | Action |
-|---------|-------|--------|
-| Worker fails to start after restart | Incorrect new secret value | Roll back to previous version; verify secret value |
-| Partial restarts: some workers use old credential | Deployment in progress; revision swap incomplete | Wait 90 seconds; check all replicas are on new revision |
-| `authentication failed` errors in logs | Credential value typo or Key Vault permission issue | Verify secret value and managed identity permissions |
-| RabbitMQ connection drops after restart | Broker doesn't recognize new credential | Verify credential is configured in broker first (out-of-band) |
-| Long downtime during restart | Container App restart is slow (rare) | Consider rolling restart instead of full restart |
-
-## Rolling Restart (Alternative for Zero-Downtime)
-
-For critical production systems, rotate with zero downtime using Container Apps slots:
-
-```bash
-# Create a staging slot with new configuration
-az containerapp revision label create \
-  --name "$prod_ca_name" \
-  --resource-group "$prod_rg" \
-  --label staging \
-  --no-prompt
-
-# Verify staging slot is healthy
-sleep 60
-curl -s "https://${prod_ca_name}--staging.azurecontainerapps.io/health/ready"
-
-# Swap traffic 10% to staging
-az containerapp traffic set \
-  --name "$prod_ca_name" \
-  --resource-group "$prod_rg" \
-  --traffic staging=10 production=90
-
-# Monitor errors for 5 minutes
-sleep 300
-
-# If no errors, swap 100%
-az containerapp traffic set \
-  --name "$prod_ca_name" \
-  --resource-group "$prod_rg" \
-  --traffic staging=100
-
-# Clean up production slot
-az containerapp update \
-  --name "$prod_ca_name" \
-  --resource-group "$prod_rg" \
-  --remove labels production || true
-```
-
-## Post-Rotation Documentation
-
-Log the rotation in your operational runbook or incident tracker:
-
-```
-Date: 2026-08-16
-Secret: messagebridge-rabbitmq-password
-Old Version: abc123def456...
-New Version: xyz789abc123...
-Approved by: [team member]
-Dev tested: yes (2026-08-16 15:30 UTC)
-Prod rotated: yes (2026-08-16 16:00 UTC)
-Status: complete, workers healthy
-```
-
-## Scheduled Rotations
-
-Key secrets should be rotated on a schedule:
-
-- **Database password** — quarterly or per security policy
-- **RabbitMQ password** — quarterly or per security policy
-- **API keys** — annually or per security policy
-- **New Relic license key** — per New Relic renewal
-
-Set calendar reminders 2 weeks before scheduled rotation to plan and notify stakeholders.
-
-## See Also
-
-- [Deployment Guide](./deployment.md)
-- [Operations Guide](../operations.md)
-- [Key Vault Policy Contract Tests](../../.github/scripts/tests/key-vault-policy.test.sh)
+- [Secret Rotation in CloudAMQP Outage](./cloudamqp-outage.md) — rotating credentials during broker failover
+- [Deployment Runbook](./deployment.md) — initial secret seeding and bootstrap
+- [Operations Guide](../operations.md) — ongoing system health and alerts

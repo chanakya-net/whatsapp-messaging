@@ -63,8 +63,72 @@ test_no_real_secrets_in_runbooks() {
   for runbook in "$RUNBOOKS_DIR"/*.md; do
     for pattern in "${real_secret_patterns[@]}"; do
       grep -Ei "$pattern" "$runbook" && \
-        fail "Runbook contains real secret pattern: $(basename "$runbook") matches $pattern" || true
+        fail "Runbook contains real secret pattern: $(basename "$runbook") matches $pattern"
     done
+  done
+}
+
+test_no_unsafe_secret_patterns() {
+  # Reject patterns that expose secret values via CLI or logs
+
+  for runbook in "$RUNBOOKS_DIR"/*.md; do
+    local name=$(basename "$runbook")
+
+    # Reject --value arguments with secrets
+    grep -E "(--value|--set.*value)" "$runbook" | grep -q "password\|secret\|key" && \
+      fail "$name: Cannot pass secret values via '--value' command argument (use Azure Portal)"
+
+    # Reject PGPASSWORD environment variable
+    grep -q "PGPASSWORD=" "$runbook" && \
+      fail "$name: Cannot use PGPASSWORD environment variable (connects to database directly)"
+
+    # Reject keyvault secret show --query value pattern
+    grep -q "keyvault secret show.*--query value" "$runbook" && \
+      fail "$name: Cannot retrieve and display secret values (use Azure Portal for verification)"
+
+    # Reject password variables in shell scripts
+    grep -E '(password|secret|key)=.*\$\(' "$runbook" | grep -qv "placeholder\|disabled" && \
+      fail "$name: Cannot pass secret in shell variable via command substitution"
+
+    # Reject read -s pattern that then passes variable to command
+    if grep -q "read -sp" "$runbook"; then
+      local line_after_read=$(grep -A 1 "read -sp" "$runbook" | tail -1)
+      if echo "$line_after_read" | grep -qE "az|psql|docker" | grep -v "Portal"; then
+        fail "$name: Cannot pass secret read via 'read -sp' to commands (use Azure Portal)"
+      fi
+    fi
+  done
+}
+
+test_approved_secret_names_only() {
+  local approved_names=(
+    'rabbitmq-connection-string'
+    'new-relic-otlp-headers'
+    'whatsapp-provider-placeholder'
+    'email-provider-placeholder'
+  )
+
+  local unapproved_names=(
+    'messagebridge-db-password'
+    'messagebridge-rabbitmq-password'
+    'messagebridge-api-key'
+    'new-relic-license-key'
+  )
+
+  for runbook in "$RUNBOOKS_DIR"/*.md; do
+    local name=$(basename "$runbook")
+
+    # Check for unapproved secret names
+    for unapproved in "${unapproved_names[@]}"; do
+      grep -q "$unapproved" "$runbook" && \
+        fail "$name: Uses unapproved secret name '$unapproved' (use approved names from seed-placeholder-secrets.sh)"
+    done
+
+    # Deployment runbook must reference approved names
+    if [[ "$name" == "deployment.md" ]]; then
+      grep -q "rabbitmq-connection-string" "$runbook" || \
+        fail "$name: deployment.md must reference 'rabbitmq-connection-string' secret"
+    fi
   done
 }
 
@@ -180,18 +244,36 @@ test_database_restore_runbook_updated() {
 }
 
 test_every_step_has_required_elements() {
-  for runbook in "$RUNBOOKS_DIR"/*.md; do
-    local name=$(basename "$runbook")
+  # Verify deployment.md has required fields for each operational section
+  local doc="$RUNBOOKS_DIR/deployment.md"
 
-    # Each HITL step should identify prerequisites
-    grep -Ei '^##' "$runbook" | while read -r section; do
-      # For sections that describe operations, check they have command/location info
-      if echo "$section" | grep -Eiq 'step|phase|operation'; then
-        grep -A 20 "$section" "$runbook" | \
-          grep -Eiq 'bash|az|gh|portal|sql|psql' || true
-      fi
-    done
-  done
+  # Stage 1 should describe authentication and verification
+  grep -A 10 "Stage 1:" "$doc" | grep -q "az account show" || \
+    fail "Stage 1 must include authentication verification command"
+
+  # Stage 4 should reference bootstrap.sh (not invented paths)
+  grep -A 5 "Stage 4:" "$doc" | grep -q "bootstrap.sh" || \
+    fail "Stage 4 must reference scripts/infra/bootstrap.sh"
+
+  # Stage 5 should reference approved secret names only
+  grep -A 10 "Stage 5:" "$doc" | grep -q "seed-placeholder-secrets.sh" || \
+    fail "Stage 5 must reference approved secret seeding script"
+
+  # Verify no direct `az containerapp create` (use OpenTofu/delivery.yml)
+  grep -q "az containerapp create" "$doc" && \
+    fail "Deployment runbook must not use direct 'az containerapp create' (use OpenTofu)"
+
+  # Verify no mutable tags (only digest-pinned references)
+  grep -E "worker:(v|dev-)" "$doc" | grep -qv "@sha256:" && \
+    fail "Deployment runbook must use immutable digest references, not mutable tags"
+
+  # Verify migration uses manual job, not docker run
+  grep -A 10 "Stage 11:" "$doc" | grep -q "containerapp job" || \
+    fail "Deployment runbook must reference manual Container Apps migration job"
+
+  # Verify no direct database creation (use OpenTofu)
+  grep -q "az postgres flexible-server create" "$doc" && \
+    fail "Deployment runbook must not create database directly (use OpenTofu)"
 }
 
 test_markdown_syntax() {
@@ -277,6 +359,12 @@ main() {
   test_no_real_secrets_in_runbooks
   printf 'PASS: no real secrets in runbooks\n'
 
+  test_no_unsafe_secret_patterns
+  printf 'PASS: no unsafe secret retrieval/display patterns\n'
+
+  test_approved_secret_names_only
+  printf 'PASS: all secret names are approved\n'
+
   test_deployment_runbook_structure
   printf 'PASS: deployment runbook has required structure\n'
 
@@ -296,7 +384,7 @@ main() {
   printf 'PASS: database-restore runbook is complete\n'
 
   test_every_step_has_required_elements
-  printf 'PASS: every operational step has required elements\n'
+  printf 'PASS: every operational step has required structure and correct commands\n'
 
   test_markdown_syntax
   printf 'PASS: markdown syntax is valid\n'

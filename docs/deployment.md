@@ -6,8 +6,9 @@ Production deployment of MessageBridge: container configuration, CloudAMQP TLS, 
 
 ```text
 ┌─────────────────────────────────────────┐
-│  Application (Kubernetes Pod)           │
+│  Azure Container Apps Worker            │
 │  └─ MessageBridge Worker Service        │
+│     ├─ Immutable digest (no mutable tag)│
 │     ├─ Health Endpoints (port 8080)     │
 │     └─ Graceful Shutdown Support        │
 └────────────────┬────────────────────────┘
@@ -18,9 +19,14 @@ Production deployment of MessageBridge: container configuration, CloudAMQP TLS, 
         └────────┬────────┘
                  │
         ┌────────▼────────┐
-        │  PostgreSQL     │
-        │  (Cloud DB)     │
+        │  Azure Database │
+        │  for PostgreSQL │
         └─────────────────┘
+
+Infrastructure: OpenTofu (.tofu/bootstrap, .tofu/envs/{dev,prod})
+Key Vault: Versionless secret references
+Migration: Manual Container Apps job (pre-deployment)
+Delivery: GitHub workflow (delivery.yml)
 ```
 
 ## Container Image
@@ -161,133 +167,49 @@ These examples show the worker's runtime configuration. `MessageBridge.Publisher
 }
 ```
 
-#### docker-compose.prod.yml (Reference)
+### Azure Container Apps Configuration
 
-For production with secrets managed externally (e.g., Kubernetes Secrets, Azure Key Vault), pass configuration via environment variables:
+Production deployment uses Azure Container Apps with workload identity for secure secret access:
 
-```yaml
-version: "3.8"
-
-services:
-  worker:
-    image: ${WORKER_IMAGE}
-    ports:
-      - "8080:8080"
-    environment:
-      ASPNETCORE_ENVIRONMENT: Production
-      ConnectionStrings__DefaultConnection: ${ConnectionStrings__DefaultConnection}
-      MESSAGEBRIDGE_CONNECTION_STRING: ${MESSAGEBRIDGE_CONNECTION_STRING}
-      RabbitMq__Host: ${RabbitMq__Host}
-      RabbitMq__Port: ${RabbitMq__Port:-5671}
-      RabbitMq__Username: ${RabbitMq__Username}
-      RabbitMq__Password: ${RabbitMq__Password}
-      RabbitMq__VirtualHost: ${RabbitMq__VirtualHost:-/}
-      RabbitMq__UseSsl: ${RabbitMq__UseSsl:-true}
-      Observability__ServiceName: ${Observability__ServiceName:-MessageBridge.Worker}
-      Observability__MetricsEndpointEnabled: ${Observability__MetricsEndpointEnabled:-true}
-      Observability__OtlpEndpoint: ${Observability__OtlpEndpoint:-}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 30s
-    restart: unless-stopped
-```
-
-Environment file (`.env.prod`):
-
-```bash
-ConnectionStrings__DefaultConnection=Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=your-password;SslMode=Require;
-MESSAGEBRIDGE_CONNECTION_STRING=Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=your-password;SslMode=Require;
-RabbitMq__Host=amqp-broker-123.cloudamqp.com
-RabbitMq__Port=5671
-RabbitMq__Username=your-username
-RabbitMq__Password=your-password
-RabbitMq__VirtualHost=/
-RabbitMq__UseSsl=true
-Observability__ServiceName=MessageBridge.Worker
-Observability__MetricsEndpointEnabled=true
-Observability__OtlpEndpoint=http://otlp-collector:4318/v1/traces
-```
-
-Then run: `docker-compose --env-file .env.prod up`
+- Workload identity (user-assigned managed identity) handles authentication to Key Vault
+- Container Apps runtime reads versionless secret URIs automatically
+- No secret values appear in environment variables, logs, or command lines
+- See [Bootstrap and Deployment Runbook](./runbooks/deployment.md) for operational details
 
 ## Secrets Management
 
-⚠️ **Security Critical**: Never commit secrets to version control.
+All secrets are stored in Azure Key Vault with versionless references.
 
-### Best Practices
+⚠️ **Security Critical**: Never pass secrets via command-line arguments, environment variables, logs, or version control.
 
-1. **Use a secrets provider**:
-   - Kubernetes Secrets (for Kubernetes deployments)
-   - Azure Key Vault (for Azure deployments)
-   - AWS Secrets Manager (for AWS deployments)
-   - HashiCorp Vault (for self-hosted)
+### Approved Secret Names
+
+These are the only secrets used by MessageBridge:
+
+- `rabbitmq-connection-string` — full CloudAMQP connection URI
+- `new-relic-otlp-headers` — New Relic OTLP authentication headers
+- `whatsapp-provider-placeholder` — disabled placeholder (absent in production)
+- `email-provider-placeholder` — disabled placeholder (absent in production)
+
+### Key Vault Configuration
+
+1. **Create Key Vault** (done by OpenTofu bootstrap)
+   - Versionless secret URI: `https://<vault-name>.vault.azure.net/secrets/<secret-name>`
+   - Workload identity grants read permission to approved secret names
+   - No list/delete/purge permissions for production runtime
 
 2. **Rotation**:
-   - Rotate credentials every 90 days (or per compliance policy)
-   - Update in secrets provider, restart pods
+   - Create new secret version in Key Vault (out of band, not in runbooks)
+   - Workers fetch versionless URI automatically (gets latest version)
+   - Restart workers via `delivery.yml reload-secrets` job
    - Old credentials continue working during grace period
 
 3. **Access Control**:
-   - Limit service account permissions to minimum required (least privilege)
-   - Audit all secret access
-   - Alert on unusual access patterns
+   - Workload identity (managed by OpenTofu) has least-privilege read access
+   - Audit Key Vault access via Azure Activity Log
+   - Alert on unauthorized secret access
 
-### Kubernetes Secrets (Example)
-
-```bash
-# Create secret from literals
-kubectl create secret generic messagebridge-secrets \
-  --from-literal=ConnectionStrings__DefaultConnection="Host=postgres.cloud;..." \
-  --from-literal=MESSAGEBRIDGE_CONNECTION_STRING="Host=postgres.cloud;..." \
-  --from-literal=RabbitMq__Host=rabbitmq.cloudamqp.com \
-  --from-literal=RabbitMq__Port=5671 \
-  --from-literal=RabbitMq__Username=admin \
-  --from-literal=RabbitMq__Password=$(openssl rand -base64 32) \
-  --from-literal=RabbitMq__VirtualHost=/ \
-  --from-literal=RabbitMq__UseSsl=true
-```
-
-These literal keys are injected by `envFrom` as-is, so the pod sees the same `IConfiguration` binding names the worker already consumes.
-
-Reference in deployment:
-
-```bash
-kubectl apply -f - <<'EOF'
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: messagebridge-worker
-spec:
-  template:
-    spec:
-      containers:
-        - name: worker
-          image: ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:<published-64-character-digest>
-          envFrom:
-            - secretRef:
-                name: messagebridge-secrets
-EOF
-```
-
-### Environment Variable Protection
-
-To prevent secrets from leaking in logs:
-
-```csharp
-// In Program.cs
-builder.Services.Configure<LoggerFilterOptions>(opts =>
-{
-    // Redact sensitive patterns in logs
-    opts.Rules.Add(new LoggerFilterRule
-    {
-        CategoryName = "Microsoft.*",
-        LogLevel = LogLevel.Debug,
-    });
-});
-```
+See [Secret Rotation Runbook](./runbooks/secret-rotation.md) for operational procedures.
 
 ## CloudAMQP Configuration
 
@@ -378,140 +300,27 @@ For the current deployment process, avoid keeping schema drift at startup; migra
 dotnet ef database update --project src/MessageBridge.Infrastructure --startup-project src/MessageBridge.Worker --connection "Host=prod-postgres;Database=messagebridge;Username=app;Password=...;"
 ```
 
-## Kubernetes Deployment
+## Azure Container Apps Deployment
 
-### Deployment Manifest
+Production deployment is managed via OpenTofu. All container configuration is defined in `.tofu/modules/worker-workload/main.tf` and provisioned by the OpenTofu infrastructure code.
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: messagebridge-worker
-  namespace: production
-  labels:
-    app: messagebridge
-    component: worker
-spec:
-  replicas: 3 # HA setup
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
-  selector:
-    matchLabels:
-      app: messagebridge
-      component: worker
-  template:
-    metadata:
-      labels:
-        app: messagebridge
-        component: worker
-    spec:
-      serviceAccountName: messagebridge
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-      containers:
-        - name: worker
-          image: ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:<published-64-character-digest>
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 8080
-              name: http
-          env:
-            - name: ASPNETCORE_ENVIRONMENT
-              value: "Production"
-          envFrom:
-            - secretRef:
-                name: messagebridge-secrets
-          resources:
-            requests:
-              memory: "512Mi"
-              cpu: "250m"
-            limits:
-              memory: "1Gi"
-              cpu: "1000m"
-          livenessProbe:
-            httpGet:
-              path: /health/live
-              port: http
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health/ready
-              port: http
-            initialDelaySeconds: 10
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 1
-          lifecycle:
-            preStop:
-              exec:
-                command: ["/bin/sh", "-c", "sleep 15"] # Graceful shutdown window
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: messagebridge-worker
-  namespace: production
-spec:
-  selector:
-    app: messagebridge
-    component: worker
-  ports:
-    - port: 8080
-      targetPort: http
-      protocol: TCP
-  type: ClusterIP
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: messagebridge-worker
-  namespace: production
-spec:
-  minAvailable: 2 # Always keep 2 pods running
-  selector:
-    matchLabels:
-      app: messagebridge
-      component: worker
-```
+### Deployment Model
 
-### Scaling
+- **Worker image**: Immutable digest-pinned reference (never mutable tags)
+- **Migration job**: Manual, independent Container Apps job triggered before deployment
+- **Scaling**: 1–5 replicas with automatic scaling based on CPU and memory metrics
+- **Health checks**: Startup, liveness, and readiness probes on port 8080
+- **Workload identity**: User-assigned managed identity for Key Vault secret access
+- **Secrets**: Versionless Key Vault references (updated without container restart)
 
-Horizontal Pod Autoscaler (HPA):
+See [Bootstrap and Deployment Runbook](./runbooks/deployment.md) for step-by-step operational procedures.
 
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: messagebridge-worker
-  namespace: production
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: messagebridge-worker
-  minReplicas: 3
-  maxReplicas: 10
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
-```
+### Delivery and Release
+
+- **Automated**: push to main → build images → test → deploy to dev
+- **Manual approval**: promotion to production via `delivery.yml` workflow
+- **Rollback**: revert to prior image digest via `delivery.yml` or OpenTofu
+- **Secrets reload**: `delivery.yml reload-secrets` job updates all instances without restart
 
 ## Monitoring & Observability
 
@@ -529,78 +338,29 @@ Use the `Observability` section to control traces and the Prometheus scrape endp
 }
 ```
 
-### Prometheus Scrape Config
+### Observability Configuration
 
-```yaml
-scrape_configs:
-  - job_name: "messagebridge"
-    kubernetes_sd_configs:
-      - role: pod
-        namespaces:
-          names:
-            - production
-    relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_label_app]
-        action: keep
-        regex: messagebridge
+Configure observability via environment variables and Key Vault references:
+
+```json
+{
+  "Observability": {
+    "ServiceName": "MessageBridge.Worker",
+    "MetricsEndpointEnabled": true,
+    "OtlpEndpoint": "https://otlp-collector.example.com/v1/traces"
+  }
+}
 ```
 
-### Log Aggregation
-
-Configure Serilog to output structured logs:
-
-```csharp
-// In Program.cs
-Log.Logger = new LoggerConfiguration()
-    .MinimumLevel.Information()
-    .Enrich.FromLogContext()
-    .Enrich.WithEnvironmentUserName()
-    .Enrich.WithMachineName()
-    .Enrich.WithProperty("Application", "MessageBridge.Worker")
-    .WriteTo.Console(new JsonFormatter())  // JSON to stdout
-    .CreateLogger();
-```
-
-Forward logs to your aggregation platform (Datadog, Splunk, ELK, etc.):
-
-```bash
-# Example: Datadog agent in sidecar
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: datadog-config
-data:
-  datadog.yaml: |
-    logs_enabled: true
-    container_collect_all: true
-EOF
-```
+See [Operations Guide](./operations.md) for monitoring setup and alert configuration.
 
 ## Graceful Shutdown
 
-MessageBridge handles graceful shutdown to avoid message loss:
+MessageBridge handles graceful shutdown to avoid message loss via Azure Container Apps lifecycle hooks:
 
-```csharp
-// In Program.cs
-var app = builder.Build();
-
-var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
-
-lifetime.ApplicationStopping.Register(() =>
-{
-    // BackgroundService instances are stopped by the host.
-    app.Logger.LogInformation("Application stopping; hosted outbox services will drain during shutdown.");
-});
-
-app.Run();
-```
-
-Kubernetes sends SIGTERM on pod termination:
-
-1. `preStop` hook waits 15 seconds (for load balancer drain)
-2. Application processes in-flight requests
-3. Pod is forcibly killed after `terminationGracePeriodSeconds` (default 30s)
+- Container runtime sends SIGTERM on revision termination
+- Application processes in-flight requests
+- Container is forcibly killed after termination grace period (default 30s)
 
 ## Package Feed Configuration
 
@@ -771,24 +531,26 @@ The following decisions require manual intervention and cannot be automated:
 
 ## Troubleshooting Deployment
 
-### Pod not starting
+### Container fails to start
 
-1. Check logs: `kubectl logs deployment/messagebridge-worker`
-2. Check events: `kubectl describe pod <pod-name>`
-3. Verify secrets exist: `kubectl get secrets | grep messagebridge`
-4. Test the local image: `docker run --rm messagebridge:local`
+1. Check logs: `az containerapp logs show --resource-group <rg> --name <ca-name>`
+2. Verify workload identity: `az identity show --resource-group <rg> --name <identity>`
+3. Verify Key Vault access: confirm runtime identity has read permissions for approved secret names
+4. Check provisioning state: `az containerapp show --query properties.provisioningState`
 
 ### OutOfMemory errors
 
-1. Check usage: `kubectl top pod <pod-name>`
-2. Increase limit: edit Deployment, set `limits.memory: 2Gi`
-3. Profile in staging before deploying
+1. Check Container App metrics: Azure Portal → Container Apps → Metrics
+2. Increase limit in OpenTofu: `.tofu/modules/worker-workload/variables.tf`
+3. Apply via `delivery.yml` workflow
 
-### Connection timeouts
+### Revision swap failures
 
-1. Verify CloudAMQP is reachable: `nslookup broker.cloudamqp.com`
-2. Check firewall: test port 5671 from pod
-3. Verify TLS certificate: `openssl s_client -connect broker.cloudamqp.com:5671`
+1. Check Container App history: `az containerapp revision list --resource-group <rg> --name <ca-name>`
+2. Verify image digest exists and is accessible
+3. Confirm workload identity has container registry pull permissions
+
+For operational procedures, see [Troubleshooting Guide](./operations.md).
 
 ## See Also
 
