@@ -234,7 +234,51 @@ Operators should expect duplicate delivery under retries and restarts.
 
 ## Observability
 
-The worker exposes structured logs, OpenTelemetry traces, and optional Prometheus metrics.
+The worker exports structured logs, traces, and metrics directly to New Relic by OTLP/HTTP at `https://otlp.nr-data.net:4318`. Its service name is `MessageBridge.Worker`; `/metrics` is deliberately not exposed and returns `404`.
+
+`OTEL_EXPORTER_OTLP_HEADERS` is populated from the environment vault's `new-relic-otlp-headers` secret through a versionless Key Vault reference. Store the complete New Relic header value there (for example, the required API-key header), never in OpenTofu variables, command lines, or application configuration.
+
+### New Relic validation
+
+After a worker revision is healthy, use New Relic to confirm recent data for `service.name = 'MessageBridge.Worker'` in all three signal types: logs, spans, and metrics. A small known-safe request to `/health/live` can create an ASP.NET Core trace; do not use a real recipient or a header value as a diagnostic probe.
+
+Confirm the deployed wiring without reading secret values:
+
+```bash
+az containerapp show \
+  --name "$WORKER_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --query "properties.template.containers[0].env[?name=='OTEL_EXPORTER_OTLP_HEADERS'].{name:name,secretRef:secretRef}" \
+  --output table
+```
+
+The output must show only `new-relic-otlp-headers` as the secret reference. It must not show a header value. There is no Log Analytics workspace, Application Insights resource, or Azure-managed Prometheus service for application telemetry.
+
+### Live Container Apps logs
+
+Use the console stream for worker logs and the system stream for revision diagnostics:
+
+```bash
+az containerapp logs show \
+  --name "$WORKER_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --type console \
+  --tail 100 \
+  --follow
+
+az containerapp logs show \
+  --name "$WORKER_NAME" \
+  --resource-group "$RESOURCE_GROUP" \
+  --type system \
+  --tail 100 \
+  --follow
+```
+
+Logs and health responses must never contain RabbitMQ URIs, database usernames/passwords or tokens, OTLP headers/API keys, authorization values, payloads, or recipient email addresses and phone numbers. Stop collection and treat the output as an incident if any such value appears; rotate the exposed credential and remove the captured output from its storage location.
+
+### Header replacement
+
+Replace the value of `new-relic-otlp-headers` in the matching environment Key Vault; keep its reference URI versionless. Container Apps retrieves the latest version within 30 minutes and restarts active revisions that consume the secret in an environment variable. Do not put the replacement value in a deployment command, OpenTofu plan, or log. Verify the recovered worker with the safe reference query and New Relic signal checks above.
 
 ### Provider delivery status
 

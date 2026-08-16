@@ -7,6 +7,7 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using OpenTelemetry.Exporter;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -60,12 +61,6 @@ public static class ObservabilityRegistration
             ResponseWriter = WriteReadyHealthStatusOnly
         });
 
-        var options = app.Services.GetRequiredService<IOptions<ObservabilityOptions>>().Value;
-        if (options.MetricsEndpointEnabled)
-        {
-            app.MapPrometheusScrapingEndpoint("/metrics");
-        }
-
         return app;
     }
 
@@ -81,10 +76,7 @@ public static class ObservabilityRegistration
 
             if (!string.IsNullOrWhiteSpace(options.OtlpEndpoint))
             {
-                logOptions.AddOtlpExporter(exporter =>
-                {
-                    exporter.Endpoint = new Uri(options.OtlpEndpoint);
-                });
+                logOptions.AddOtlpExporter(exporter => ConfigureOtlpExporter(exporter, options));
             }
         });
 
@@ -99,25 +91,25 @@ public static class ObservabilityRegistration
         if (string.IsNullOrWhiteSpace(options.OtlpEndpoint))
             return;
 
-        tracing.AddOtlpExporter(exporter =>
-        {
-            exporter.Endpoint = new Uri(options.OtlpEndpoint);
-        });
+        tracing.AddOtlpExporter(exporter => ConfigureOtlpExporter(exporter, options));
     }
 
     private static void AddMetrics(MeterProviderBuilder metrics, ObservabilityOptions options)
     {
         metrics.AddRuntimeInstrumentation();
         metrics.AddAspNetCoreInstrumentation();
-        metrics.AddPrometheusExporter();
-
         if (string.IsNullOrWhiteSpace(options.OtlpEndpoint))
             return;
 
-        metrics.AddOtlpExporter(exporter =>
-        {
-            exporter.Endpoint = new Uri(options.OtlpEndpoint);
-        });
+        metrics.AddOtlpExporter(exporter => ConfigureOtlpExporter(exporter, options));
+    }
+
+    public static void ConfigureOtlpExporter(
+        OtlpExporterOptions exporter,
+        ObservabilityOptions options)
+    {
+        exporter.Endpoint = new Uri(options.OtlpEndpoint!);
+        exporter.Protocol = OtlpExportProtocol.HttpProtobuf;
     }
 
     private static async Task WriteReadyHealthStatusOnly(

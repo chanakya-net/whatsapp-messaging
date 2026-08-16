@@ -20,6 +20,7 @@ using Npgsql;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
+using OpenTelemetry.Exporter;
 using Shouldly;
 using Wolverine;
 using Xunit;
@@ -40,6 +41,24 @@ public sealed class ObservabilityRegistrationTests
 
         var validOptions = validProvider.GetRequiredService<IOptions<ObservabilityOptions>>().Value;
         validOptions.ServiceName.ShouldBe("MessageBridge.TestWorker");
+    }
+
+    [Fact]
+    public void Otlp_Uses_HttpProtobuf_Without_Mutating_Secret_Headers()
+    {
+        const string headers = "api-key=not-for-logs";
+        var exporter = new OtlpExporterOptions { Headers = headers };
+
+        ObservabilityRegistration.ConfigureOtlpExporter(
+            exporter,
+            new ObservabilityOptions
+            {
+                OtlpEndpoint = "https://otlp.nr-data.net:4318"
+            });
+
+        exporter.Endpoint.ShouldBe(new Uri("https://otlp.nr-data.net:4318"));
+        exporter.Protocol.ShouldBe(OtlpExportProtocol.HttpProtobuf);
+        exporter.Headers.ShouldBe(headers);
     }
 
     [Fact]
@@ -86,7 +105,7 @@ public sealed class ObservabilityRegistrationTests
     }
 
     [Fact]
-    public async Task Metrics_Endpoint_Gated_By_Config()
+    public async Task Metrics_Endpoint_Remains_Disabled_When_Configured()
     {
         await using var disabled = await ObservabilityTestHost.StartAsync(
             new Dictionary<string, string?>
@@ -99,7 +118,7 @@ public sealed class ObservabilityRegistrationTests
 
         (await disabled.Client.GetAsync("/metrics")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
 
-        await using var enabled = await ObservabilityTestHost.StartAsync(
+        await using var configured = await ObservabilityTestHost.StartAsync(
             new Dictionary<string, string?>
             {
                 ["Observability:MetricsEndpointEnabled"] = "true",
@@ -109,7 +128,7 @@ public sealed class ObservabilityRegistrationTests
             },
             AddDependencyHealthProbes);
 
-        (await enabled.Client.GetAsync("/metrics")).StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await configured.Client.GetAsync("/metrics")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
     }
 
     [Fact]

@@ -33,6 +33,7 @@ locals {
       Observability__ServiceName                                    = var.runtime_configuration.otlp_service_name
       Observability__MetricsEndpointEnabled                         = "false"
       OTEL_EXPORTER_OTLP_ENDPOINT                                   = var.runtime_configuration.otlp_endpoint
+      OTEL_EXPORTER_OTLP_PROTOCOL                                   = "http/protobuf"
       OTEL_SERVICE_NAME                                             = var.runtime_configuration.otlp_service_name
     },
     {
