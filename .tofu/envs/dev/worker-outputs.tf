@@ -43,12 +43,42 @@ output "smoke_job_name" {
   value       = module.worker.smoke_job_name
 }
 
+output "smoke_job_outbound_ip_addresses" {
+  description = "Dev smoke job egress addresses for downstream database firewall reconciliation."
+  value       = module.worker.smoke_job_outbound_ip_addresses
+}
+
 output "migration_job_outbound_ip_addresses" {
   description = "Dev migration job egress addresses for downstream database firewall reconciliation."
   value       = module.worker.migration_job_outbound_ip_addresses
 }
 
+output "reviewed_postgres_egress" {
+  description = "Complete reviewed dev PostgreSQL egress, labelled by source and deduplicated."
+  value = {
+    environment = "dev"
+    sources     = local.reviewed_postgres_egress_sources
+    ranges = setunion(
+      local.reviewed_postgres_egress_sources.container_environment,
+      local.reviewed_postgres_egress_sources.worker,
+      local.reviewed_postgres_egress_sources.migration,
+      local.reviewed_postgres_egress_sources.smoke,
+    )
+  }
+}
+
 output "worker_alertable_resource_ids" {
   description = "Dev worker IDs eligible for downstream environment alerting."
   value       = module.worker.alertable_resource_ids
+}
+
+locals {
+  reviewed_postgres_egress_sources = {
+    container_environment = toset([
+      for address in module.container_environment.outbound_ip_addresses : "${address}/32"
+    ])
+    worker    = module.worker.postgres_egress_ranges.worker
+    migration = module.worker.postgres_egress_ranges.migration
+    smoke     = module.worker.postgres_egress_ranges.smoke
+  }
 }

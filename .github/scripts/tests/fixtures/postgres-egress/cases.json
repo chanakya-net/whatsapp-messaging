@@ -1,0 +1,98 @@
+{
+  "base": {
+    "dev": {
+      "environment": "dev",
+      "sources": {
+        "container_environment": ["10.0.0.1/32"],
+        "worker": ["10.0.0.2/32"],
+        "migration": ["10.0.0.3/32"],
+        "smoke": ["10.0.0.4/32"]
+      },
+      "ranges": ["10.0.0.1/32", "10.0.0.2/32", "10.0.0.3/32", "10.0.0.4/32"]
+    },
+    "prod": {
+      "environment": "prod",
+      "sources": {
+        "container_environment": ["10.0.1.1/32"],
+        "worker": ["10.0.1.2/32"],
+        "migration": ["10.0.1.3/32"],
+        "smoke": ["10.0.1.4/32"]
+      },
+      "ranges": ["10.0.1.1/32", "10.0.1.2/32", "10.0.1.3/32", "10.0.1.4/32"]
+    },
+    "azure": [
+      {"name": "ip-10-0-0-1", "startIpAddress": "10.0.0.1", "endIpAddress": "10.0.0.1"},
+      {"name": "ip-10-0-0-2", "startIpAddress": "10.0.0.2", "endIpAddress": "10.0.0.2"},
+      {"name": "ip-10-0-0-3", "startIpAddress": "10.0.0.3", "endIpAddress": "10.0.0.3"},
+      {"name": "ip-10-0-0-4", "startIpAddress": "10.0.0.4", "endIpAddress": "10.0.0.4"},
+      {"name": "ip-10-0-1-1", "startIpAddress": "10.0.1.1", "endIpAddress": "10.0.1.1"},
+      {"name": "ip-10-0-1-2", "startIpAddress": "10.0.1.2", "endIpAddress": "10.0.1.2"},
+      {"name": "ip-10-0-1-3", "startIpAddress": "10.0.1.3", "endIpAddress": "10.0.1.3"},
+      {"name": "ip-10-0-1-4", "startIpAddress": "10.0.1.4", "endIpAddress": "10.0.1.4"}
+    ]
+  },
+  "scenarios": {
+    "unchanged": {},
+    "additions": {
+      "dev": {
+        "sources": {"smoke": ["10.0.0.4/32", "10.0.0.5/32"]},
+        "ranges": ["10.0.0.1/32", "10.0.0.2/32", "10.0.0.3/32", "10.0.0.4/32", "10.0.0.5/32"]
+      }
+    },
+    "removals": {
+      "azure": [
+        {"name": "ip-10-0-0-1", "startIpAddress": "10.0.0.1", "endIpAddress": "10.0.0.1"},
+        {"name": "ip-10-0-0-2", "startIpAddress": "10.0.0.2", "endIpAddress": "10.0.0.2"},
+        {"name": "old-worker", "startIpAddress": "10.0.0.6", "endIpAddress": "10.0.0.6"},
+        {"name": "ip-10-0-0-3", "startIpAddress": "10.0.0.3", "endIpAddress": "10.0.0.3"},
+        {"name": "ip-10-0-0-4", "startIpAddress": "10.0.0.4", "endIpAddress": "10.0.0.4"},
+        {"name": "ip-10-0-1-1", "startIpAddress": "10.0.1.1", "endIpAddress": "10.0.1.1"},
+        {"name": "ip-10-0-1-2", "startIpAddress": "10.0.1.2", "endIpAddress": "10.0.1.2"},
+        {"name": "ip-10-0-1-3", "startIpAddress": "10.0.1.3", "endIpAddress": "10.0.1.3"},
+        {"name": "ip-10-0-1-4", "startIpAddress": "10.0.1.4", "endIpAddress": "10.0.1.4"}
+      ]
+    },
+    "duplicates": {
+      "dev": {"sources": {"smoke": ["10.0.0.2/32", "10.0.0.4/32"]}}
+    },
+    "empty": {
+      "dev": {
+        "sources": {"container_environment": [], "worker": [], "migration": [], "smoke": []},
+        "ranges": []
+      }
+    },
+    "incomplete": {"dev": {"sources": {"smoke": null}}},
+    "missing_environment": {"prod": null},
+    "invalid_cidr": {
+      "dev": {
+        "sources": {"worker": ["10.0.0.2/24"]},
+        "ranges": ["10.0.0.1/32", "10.0.0.2/24", "10.0.0.3/32", "10.0.0.4/32"]
+      }
+    },
+    "broad": {
+      "dev": {
+        "sources": {"worker": ["0.0.0.0/32"]},
+        "ranges": ["0.0.0.0/32", "10.0.0.1/32", "10.0.0.3/32", "10.0.0.4/32"]
+      }
+    },
+    "declared_mismatch": {
+      "dev": {"ranges": ["10.0.0.1/32", "10.0.0.2/32", "10.0.0.3/32"]}
+    },
+    "retained_transition": {
+      "dev": {
+        "sources": {"smoke": ["10.0.0.5/32"]},
+        "ranges": ["10.0.0.1/32", "10.0.0.2/32", "10.0.0.3/32", "10.0.0.5/32"]
+      }
+    },
+    "divergent": {
+      "azure": [
+        {"name": "unexpected", "startIpAddress": "10.0.9.9", "endIpAddress": "10.0.9.9"}
+      ]
+    },
+    "azure_broad": {
+      "azure": [
+        {"name": "AllowAllAzureServicesAndResourcesWithinAzureIps", "startIpAddress": "0.0.0.0", "endIpAddress": "0.0.0.0"}
+      ]
+    }
+  }
+}

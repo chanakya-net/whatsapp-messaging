@@ -66,11 +66,39 @@ variable "entra_administrator" {
   }
 }
 
-variable "firewall_rules" {
-  description = "Explicit public-network endpoints permitted to reach PostgreSQL."
-  type = map(object({
-    start_ip_address = string
-    end_ip_address   = string
-  }))
-  default = {}
+variable "reviewed_egress_ranges" {
+  description = "Complete delivery-reviewed PostgreSQL egress set keyed by canonical IPv4 /32 range."
+  type        = map(string)
+
+  validation {
+    condition     = length(var.reviewed_egress_ranges) > 0
+    error_message = "reviewed_egress_ranges must contain the complete non-empty reviewed set."
+  }
+
+  validation {
+    condition     = length(values(var.reviewed_egress_ranges)) == length(distinct(values(var.reviewed_egress_ranges)))
+    error_message = "reviewed_egress_ranges must not contain duplicate ranges."
+  }
+
+  validation {
+    condition = alltrue([
+      for range in values(var.reviewed_egress_ranges) :
+      can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+/32$", range)) &&
+      try(cidrhost(range, 0), "") == trimsuffix(range, "/32")
+    ])
+    error_message = "reviewed_egress_ranges must contain canonical IPv4 /32 CIDRs only."
+  }
+
+  validation {
+    condition     = !contains(values(var.reviewed_egress_ranges), "0.0.0.0/32")
+    error_message = "reviewed_egress_ranges must not contain Azure's broad 0.0.0.0 access rule."
+  }
+
+  validation {
+    condition = alltrue([
+      for key, range in var.reviewed_egress_ranges :
+      key == "ip-${replace(trimsuffix(range, "/32"), ".", "-")}"
+    ])
+    error_message = "reviewed_egress_ranges keys must use the stable ip-A-B-C-D form derived from each CIDR."
+  }
 }

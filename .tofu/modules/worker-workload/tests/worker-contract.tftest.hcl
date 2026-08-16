@@ -22,6 +22,28 @@ mock_provider "azurerm" {
   }
 }
 
+override_resource {
+  target = azurerm_container_app_job.migration
+  values = {
+    id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.App/jobs/mig-messagebridge-prod-cin-042"
+    outbound_ip_addresses = [
+      "20.192.0.30",
+      "20.192.0.31",
+    ]
+  }
+}
+
+override_resource {
+  target = azurerm_container_app_job.smoke
+  values = {
+    id = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.App/jobs/smoke-messagebridge-prod-cin-042"
+    outbound_ip_addresses = [
+      "20.192.0.40",
+      "20.192.0.20",
+    ]
+  }
+}
+
 variables {
   environment = {
     name                         = "ca-messagebridge-prod-cin-042"
@@ -101,6 +123,19 @@ variables {
     rate_limit_window_secs  = 60
     otlp_endpoint           = "https://otlp.nr-data.net:4318"
     otlp_service_name       = "MessageBridge.Worker"
+  }
+}
+
+run "exports_complete_workload_egress" {
+  command = plan
+
+  assert {
+    condition = output.postgres_egress_ranges == {
+      worker    = toset(["20.192.0.20/32", "20.192.0.21/32"])
+      migration = toset(["20.192.0.30/32", "20.192.0.31/32"])
+      smoke     = toset(["20.192.0.20/32", "20.192.0.40/32"])
+    }
+    error_message = "PostgreSQL egress must expose independent canonical worker, migration, and smoke ranges."
   }
 }
 
@@ -415,8 +450,9 @@ run "creates_one_manual_smoke_job" {
   assert {
     condition = (
       output.smoke_job_id == azurerm_container_app_job.smoke.id &&
-      output.smoke_job_name == var.smoke_job_name
+      output.smoke_job_name == var.smoke_job_name &&
+      output.smoke_job_outbound_ip_addresses == toset(["20.192.0.20", "20.192.0.40"])
     )
-    error_message = "Module must export smoke job metadata for orchestration."
+    error_message = "Module must export smoke job metadata and egress for orchestration."
   }
 }

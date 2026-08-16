@@ -18,11 +18,50 @@ variables {
     principal_name = "messagebridge-shared-operators"
     principal_type = "Group"
   }
+  reviewed_egress_ranges = {
+    ip-20-192-0-20 = "20.192.0.20/32"
+    ip-20-193-0-20 = "20.193.0.20/32"
+  }
   tags = {
     owner       = "platform"
     project     = "caller-cannot-override"
     environment = "caller-cannot-override"
   }
+}
+
+run "wires_exact_reviewed_firewall_set" {
+  command = plan
+
+  assert {
+    condition = (
+      output.postgres_firewall_ranges == var.reviewed_egress_ranges &&
+      module.database.postgres_firewall_ranges == var.reviewed_egress_ranges &&
+      toset(keys(output.postgres_firewall_ranges)) == toset(keys(var.reviewed_egress_ranges))
+    )
+    error_message = "Shared root must pass and re-export exactly the complete reviewed range map."
+  }
+}
+
+run "missing_reviewed_firewall_set_stops" {
+  command = plan
+
+  variables {
+    reviewed_egress_ranges = {}
+  }
+
+  expect_failures = [var.reviewed_egress_ranges]
+}
+
+run "broad_reviewed_firewall_range_stops" {
+  command = plan
+
+  variables {
+    reviewed_egress_ranges = {
+      ip-0-0-0-0 = "0.0.0.0/32"
+    }
+  }
+
+  expect_failures = [var.reviewed_egress_ranges]
 }
 
 run "wires_shared_database_with_deterministic_metadata" {

@@ -18,6 +18,9 @@ variables {
     principal_name = "messagebridge-shared-operators"
     principal_type = "Group"
   }
+  reviewed_egress_ranges = {
+    ip-203-0-113-10 = "203.0.113.10/32"
+  }
 }
 
 run "server_uses_approved_low_cost_posture" {
