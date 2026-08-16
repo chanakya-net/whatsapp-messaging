@@ -1,797 +1,88 @@
 # Deployment Guide
 
-Production deployment of MessageBridge: container configuration, CloudAMQP TLS, secrets management, scaling, and HITL (human-in-the-loop) decisions.
-
-## Architecture Overview
-
-```text
-┌─────────────────────────────────────────┐
-│  Application (Kubernetes Pod)           │
-│  └─ MessageBridge Worker Service        │
-│     ├─ Health Endpoints (port 8080)     │
-│     └─ Graceful Shutdown Support        │
-└────────────────┬────────────────────────┘
-                 │ TLS
-        ┌────────▼────────┐
-        │  CloudAMQP      │
-        │  (RabbitMQ SaaS)│
-        └────────┬────────┘
-                 │
-        ┌────────▼────────┐
-        │  PostgreSQL     │
-        │  (Cloud DB)     │
-        └─────────────────┘
-```
-
-## Container Image
-
-### Building
-
-The worker image repository is `ghcr.io/chanakya-net/whatsapp-messaging/worker`.
-Deploy only an immutable digest, never a mutable tag. The runtime listens on port 8080,
-serves `/health/live` and `/health/ready`, and always runs as the non-root `APP_UID` user.
-
-```bash
-# Build and load the host architecture for local testing.
-docker build -f src/MessageBridge.Worker/Dockerfile -t messagebridge:local .
-
-# Build both supported architectures and publish an immutable manifest.
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  --file src/MessageBridge.Worker/Dockerfile \
-  --tag ghcr.io/chanakya-net/whatsapp-messaging/worker:<release-tag> \
-  --push .
-
-# Resolve the published digest, then deploy this exact reference.
-WORKER_IMAGE='ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:<published-64-character-digest>'
-```
-
-### Migration image (manual only)
-
-The migration image `ghcr.io/chanakya-net/whatsapp-messaging/migrate` is intended to be
-invoked only by the manual Azure Container Apps migration job.
-
-- It is a dedicated container that executes the EF Core migration bundle for
-  `MessageBridgeDbContext`.
-- Worker startup must not call `Database.Migrate*` or reference this migration image.
-- The migration image should never be used as the worker container image or run as part of normal worker lifecycle.
-
-### Image Size Optimization
-
-- Use the digest-pinned ASP.NET runtime image (not the SDK)
-- Trim unused assemblies: `<PublishTrimmed>true</PublishTrimmed>` in `.csproj`
-- Result: ~150–200 MB per image
-
-### Running Locally
-
-```bash
-# Build image
-docker build -f src/MessageBridge.Worker/Dockerfile -t messagebridge:local .
-
-# Run container with configuration via environment / JSON
-docker run \
-  -p 8080:8080 \
-  -e ASPNETCORE_ENVIRONMENT=Production \
-  -e "ConnectionStrings__DefaultConnection=Host=postgres.local;Port=5432;Database=messagebridge;Username=app;Password=$(cat /run/secrets/db_password);" \
-  -e "MESSAGEBRIDGE_CONNECTION_STRING=Host=postgres.local;Port=5432;Database=messagebridge;Username=app;Password=$(cat /run/secrets/db_password);" \
-  -e "RabbitMq__Host=rabbitmq.local" \
-  -e "RabbitMq__Port=5671" \
-  -e "RabbitMq__Username=admin" \
-  -e "RabbitMq__Password=$(cat /run/secrets/rabbitmq_password)" \
-  -e "RabbitMq__VirtualHost=/" \
-  -e "RabbitMq__UseSsl=true" \
-  -e "Observability__ServiceName=MessageBridge.Worker" \
-  -e "Observability__MetricsEndpointEnabled=true" \
-  messagebridge:local
-```
-
-## Environment Configuration
-
-### Required Configuration
-
-The worker binds configuration from `appsettings.json` and environment variables using the [Options pattern](https://learn.microsoft.com/en-us/dotnet/core/extensions/options).
-
-PostgreSQL uses two bindings:
-
-- `MESSAGEBRIDGE_CONNECTION_STRING` feeds the processing store and outbox startup path in `MessageBridge.Infrastructure`
-- `ConnectionStrings:DefaultConnection` feeds the DbContext used by MassTransit registration and the readiness probe in `MessageBridge.Worker`
-
-| Setting                                 | Path in Config                         | Example                         | Notes                                                                     |
-| --------------------------------------- | -------------------------------------- | ------------------------------- | ------------------------------------------------------------------------- |
-| Environment                             | `ASPNETCORE_ENVIRONMENT`               | `Production`                    | Controls `appsettings.json` variant                                       |
-| Processing store connection             | `MESSAGEBRIDGE_CONNECTION_STRING`      | `Host=postgres.cloud;...`       | Read by `AddMessageBridgeProcessingStore`                                 |
-| Worker DbContext / readiness connection | `ConnectionStrings:DefaultConnection`  | `Host=postgres.cloud;...`       | Read by MassTransit registration and `PostgresReadinessProbe`             |
-| RabbitMQ host                           | `RabbitMq:Host`                        | `amqp-broker-123.cloudamqp.com` | Read by AddMessageBridgeMassTransit                                       |
-| RabbitMQ port                           | `RabbitMq:Port`                        | `5671`                          | Use 5671 with `RabbitMq:UseSsl=true`; 5672 is plaintext (not recommended) |
-| RabbitMQ username                       | `RabbitMq:Username`                    | (from secret)                   | CloudAMQP username                                                        |
-| RabbitMq password                       | `RabbitMq:Password`                    | (from secret)                   | CloudAMQP password (DO NOT commit)                                        |
-| RabbitMQ vhost                          | `RabbitMq:VirtualHost`                 | `/`                             | CloudAMQP vhost (usually `/`)                                             |
-| RabbitMQ TLS                            | `RabbitMq:UseSsl`                      | `true`                          | Enable TLS for CloudAMQP                                                  |
-| Observability service name              | `Observability:ServiceName`            | `MessageBridge.Worker`          | Service name for traces and metrics                                       |
-| Observability OTLP endpoint             | `Observability:OtlpEndpoint`           | `http://otlp-collector:4318`    | Optional; if provided, enables distributed traces                         |
-| Observability metrics endpoint          | `Observability:MetricsEndpointEnabled` | `true`                          | Enable `/metrics` Prometheus endpoint                                     |
-
-### Configuration Examples
-
-These examples show the worker's runtime configuration. `MessageBridge.Publisher` and `MessageBridge.Outbox` options are configured in application startup code when you consume those packages; they are not auto-bound from this file by the worker.
-
-#### appsettings.Production.json
-
-```json
-{
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "MessageBridge": "Information"
-    }
-  },
-  "ConnectionStrings": {
-    "DefaultConnection": "Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=from-secret;SslMode=Require;"
-  },
-  "RabbitMq": {
-    "Host": "amqp-broker-123.cloudamqp.com",
-    "Port": 5671,
-    "Username": "from-secret",
-    "Password": "from-secret",
-    "VirtualHost": "/",
-    "UseSsl": true
-  },
-  "Observability": {
-    "ServiceName": "MessageBridge.Worker",
-    "MetricsEndpointEnabled": true,
-    "OtlpEndpoint": "http://otlp-collector:4318/v1/traces"
-  },
-  "MessageBridge": {
-    "Topology": {
-      "EnvironmentPrefix": "prod"
-    },
-    "TransportRetry": {
-      "ImmediateRetryCount": 3,
-      "DelayedRedeliveryIntervals": ["00:05:00", "00:15:00", "01:00:00"]
-    },
-    "ProcessingHistory": {
-      "RecoveryEnabled": true,
-      "StaleThresholdMinutes": 30,
-      "CleanupEnabled": true,
-      "CleanupRetentionHours": 24,
-      "CleanupBatchSize": 500,
-      "CleanupIntervalMilliseconds": 1000
-    }
-  }
-}
-```
-
-#### docker-compose.prod.yml (Reference)
-
-For production with secrets managed externally (e.g., Kubernetes Secrets, Azure Key Vault), pass configuration via environment variables:
-
-```yaml
-version: "3.8"
-
-services:
-  worker:
-    image: ${WORKER_IMAGE}
-    ports:
-      - "8080:8080"
-    environment:
-      ASPNETCORE_ENVIRONMENT: Production
-      ConnectionStrings__DefaultConnection: ${ConnectionStrings__DefaultConnection}
-      MESSAGEBRIDGE_CONNECTION_STRING: ${MESSAGEBRIDGE_CONNECTION_STRING}
-      RabbitMq__Host: ${RabbitMq__Host}
-      RabbitMq__Port: ${RabbitMq__Port:-5671}
-      RabbitMq__Username: ${RabbitMq__Username}
-      RabbitMq__Password: ${RabbitMq__Password}
-      RabbitMq__VirtualHost: ${RabbitMq__VirtualHost:-/}
-      RabbitMq__UseSsl: ${RabbitMq__UseSsl:-true}
-      Observability__ServiceName: ${Observability__ServiceName:-MessageBridge.Worker}
-      Observability__MetricsEndpointEnabled: ${Observability__MetricsEndpointEnabled:-true}
-      Observability__OtlpEndpoint: ${Observability__OtlpEndpoint:-}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 30s
-    restart: unless-stopped
-```
-
-Environment file (`.env.prod`):
-
-```bash
-ConnectionStrings__DefaultConnection=Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=your-password;SslMode=Require;
-MESSAGEBRIDGE_CONNECTION_STRING=Host=postgres.cloud.example.com;Port=5432;Database=messagebridge;Username=app;Password=your-password;SslMode=Require;
-RabbitMq__Host=amqp-broker-123.cloudamqp.com
-RabbitMq__Port=5671
-RabbitMq__Username=your-username
-RabbitMq__Password=your-password
-RabbitMq__VirtualHost=/
-RabbitMq__UseSsl=true
-Observability__ServiceName=MessageBridge.Worker
-Observability__MetricsEndpointEnabled=true
-Observability__OtlpEndpoint=http://otlp-collector:4318/v1/traces
-```
-
-Then run: `docker-compose --env-file .env.prod up`
-
-## Secrets Management
-
-⚠️ **Security Critical**: Never commit secrets to version control.
-
-### Best Practices
-
-1. **Use a secrets provider**:
-   - Kubernetes Secrets (for Kubernetes deployments)
-   - Azure Key Vault (for Azure deployments)
-   - AWS Secrets Manager (for AWS deployments)
-   - HashiCorp Vault (for self-hosted)
-
-2. **Rotation**:
-   - Rotate credentials every 90 days (or per compliance policy)
-   - Update in secrets provider, restart pods
-   - Old credentials continue working during grace period
-
-3. **Access Control**:
-   - Limit service account permissions to minimum required (least privilege)
-   - Audit all secret access
-   - Alert on unusual access patterns
-
-### Kubernetes Secrets (Example)
-
-```bash
-# Create secret from literals
-kubectl create secret generic messagebridge-secrets \
-  --from-literal=ConnectionStrings__DefaultConnection="Host=postgres.cloud;..." \
-  --from-literal=MESSAGEBRIDGE_CONNECTION_STRING="Host=postgres.cloud;..." \
-  --from-literal=RabbitMq__Host=rabbitmq.cloudamqp.com \
-  --from-literal=RabbitMq__Port=5671 \
-  --from-literal=RabbitMq__Username=admin \
-  --from-literal=RabbitMq__Password=$(openssl rand -base64 32) \
-  --from-literal=RabbitMq__VirtualHost=/ \
-  --from-literal=RabbitMq__UseSsl=true
-```
-
-These literal keys are injected by `envFrom` as-is, so the pod sees the same `IConfiguration` binding names the worker already consumes.
-
-Reference in deployment:
-
-```bash
-kubectl apply -f - <<'EOF'
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: messagebridge-worker
-spec:
-  template:
-    spec:
-      containers:
-        - name: worker
-          image: ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:<published-64-character-digest>
-          envFrom:
-            - secretRef:
-                name: messagebridge-secrets
-EOF
-```
-
-### Environment Variable Protection
-
-To prevent secrets from leaking in logs:
-
-```csharp
-// In Program.cs
-builder.Services.Configure<LoggerFilterOptions>(opts =>
-{
-    // Redact sensitive patterns in logs
-    opts.Rules.Add(new LoggerFilterRule
-    {
-        CategoryName = "Microsoft.*",
-        LogLevel = LogLevel.Debug,
-    });
-});
-```
-
-## CloudAMQP Configuration
-
-MessageBridge connects to CloudAMQP (managed RabbitMQ) in production.
-
-### Instance Setup
-
-1. **Create CloudAMQP instance**:
-   - Plan: Lemur (free), Tiger, Rabbit, Panda (depending on throughput)
-   - Region: closest to application servers
-   - TLS: enabled (required for security)
-
-2. **Extract connection details**:
-   - **AMQP URL**: `amqps://user:pass@broker.cloudamqp.com:5671/vhost`
-   - **Host**: `broker.cloudamqp.com`
-   - **Port**: `5671` (TLS) or `5672` (plaintext, not recommended)
-   - **Username**: from CloudAMQP dashboard
-   - **Password**: from CloudAMQP dashboard
-   - **Virtual host**: usually `/`
-
-### TLS Configuration
-
-CloudAMQP requires TLS for production deployments.
-
-- If you configure decomposed fields (`RabbitMq:Host`, `RabbitMq:Port`, `RabbitMq:Username`, `RabbitMq:Password`, `RabbitMq:VirtualHost`), set `RabbitMq:UseSsl=true` to enable TLS.
-- If you configure `RabbitMq:ConnectionString`, use an `amqps://` URI to select TLS explicitly.
-- Port `5671` is the usual TLS port, but the port number alone does not turn TLS on in the decomposed configuration path.
-
-The current transport wiring enables TLS only when the options require it, so the documentation must match the configuration shape you choose.
-
-### Certificate Pinning (Advanced)
-
-For extra security, pin the CloudAMQP certificate:
-
-```csharp
-// Not typically required; CloudAMQP uses standard CAs
-// Only needed if using self-signed certificates (not recommended)
-```
-
-## Database Configuration
-
-### PostgreSQL Setup
-
-1. **Create cloud database** (AWS RDS, Azure Database, Google Cloud SQL, etc.)
-   - Version: PostgreSQL 14+
-   - Backups: automated daily
-   - Replication: multi-AZ (high availability)
-   - Encryption: at rest and in transit
-
-2. **Create application user** (least privilege):
-
-   ```sql
-   CREATE USER app WITH PASSWORD 'generated-secure-password';
-   CREATE DATABASE messagebridge OWNER app;
-   GRANT USAGE ON SCHEMA public TO app;
-   GRANT CREATE ON SCHEMA public TO app;
-   ```
-
-3. **Connection string**:
-
-   ```text
-   Host=postgres.rds.amazonaws.com;Port=5432;Database=messagebridge;Username=app;Password=...;SslMode=Require;
-   ```
-
-### Migrations
-
-Apply EF Core migrations as a dedicated pre-deployment action.
-Worker startup must never call `Database.Migrate*`.
-
-The migration path is:
-
-1. Build and publish the dedicated migration container image:
-   `ghcr.io/chanakya-net/whatsapp-messaging/migrate`
-2. Run the container in a manual Azure Container Apps migration job.
-3. Only start the worker Deployment after migration completes successfully.
-
-During migration, pass non-secret `Database__*` settings (for example `Database__Host`, `Database__Database`, `Database__Username`, `Database__Password`) through job environment and secrets.
-
-This image contains only the generated migration bundle and does not launch `MessageBridge.Worker`.
-
-```bash
-dotnet ef database update --project src/MessageBridge.Infrastructure --startup-project src/MessageBridge.Worker --connection "Host=prod-postgres;Database=messagebridge;Username=app;Password=...;"
-```
-
-For the current deployment process, avoid keeping schema drift at startup; migrations are handled only by the migration job.
-
-```bash
-dotnet ef database update --project src/MessageBridge.Infrastructure --startup-project src/MessageBridge.Worker --connection "Host=prod-postgres;Database=messagebridge;Username=app;Password=...;"
-```
-
-## Kubernetes Deployment
-
-### Deployment Manifest
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: messagebridge-worker
-  namespace: production
-  labels:
-    app: messagebridge
-    component: worker
-spec:
-  replicas: 3 # HA setup
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
-  selector:
-    matchLabels:
-      app: messagebridge
-      component: worker
-  template:
-    metadata:
-      labels:
-        app: messagebridge
-        component: worker
-    spec:
-      serviceAccountName: messagebridge
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-      containers:
-        - name: worker
-          image: ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:<published-64-character-digest>
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 8080
-              name: http
-          env:
-            - name: ASPNETCORE_ENVIRONMENT
-              value: "Production"
-          envFrom:
-            - secretRef:
-                name: messagebridge-secrets
-          resources:
-            requests:
-              memory: "512Mi"
-              cpu: "250m"
-            limits:
-              memory: "1Gi"
-              cpu: "1000m"
-          livenessProbe:
-            httpGet:
-              path: /health/live
-              port: http
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health/ready
-              port: http
-            initialDelaySeconds: 10
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 1
-          lifecycle:
-            preStop:
-              exec:
-                command: ["/bin/sh", "-c", "sleep 15"] # Graceful shutdown window
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: messagebridge-worker
-  namespace: production
-spec:
-  selector:
-    app: messagebridge
-    component: worker
-  ports:
-    - port: 8080
-      targetPort: http
-      protocol: TCP
-  type: ClusterIP
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: messagebridge-worker
-  namespace: production
-spec:
-  minAvailable: 2 # Always keep 2 pods running
-  selector:
-    matchLabels:
-      app: messagebridge
-      component: worker
-```
-
-### Scaling
-
-Horizontal Pod Autoscaler (HPA):
-
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: messagebridge-worker
-  namespace: production
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: messagebridge-worker
-  minReplicas: 3
-  maxReplicas: 10
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
-```
-
-## Monitoring & Observability
-
-### Observability
-
-Use the `Observability` section to control traces and the Prometheus scrape endpoint:
-
-```json
-{
-  "Observability": {
-    "ServiceName": "MessageBridge.Worker",
-    "MetricsEndpointEnabled": true,
-    "OtlpEndpoint": "http://otlp-collector:4318/v1/traces"
-  }
-}
-```
-
-### Prometheus Scrape Config
-
-```yaml
-scrape_configs:
-  - job_name: "messagebridge"
-    kubernetes_sd_configs:
-      - role: pod
-        namespaces:
-          names:
-            - production
-    relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_label_app]
-        action: keep
-        regex: messagebridge
-```
-
-### Log Aggregation
-
-Configure Serilog to output structured logs:
-
-```csharp
-// In Program.cs
-Log.Logger = new LoggerConfiguration()
-    .MinimumLevel.Information()
-    .Enrich.FromLogContext()
-    .Enrich.WithEnvironmentUserName()
-    .Enrich.WithMachineName()
-    .Enrich.WithProperty("Application", "MessageBridge.Worker")
-    .WriteTo.Console(new JsonFormatter())  // JSON to stdout
-    .CreateLogger();
-```
-
-Forward logs to your aggregation platform (Datadog, Splunk, ELK, etc.):
-
-```bash
-# Example: Datadog agent in sidecar
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: datadog-config
-data:
-  datadog.yaml: |
-    logs_enabled: true
-    container_collect_all: true
-EOF
-```
-
-## Graceful Shutdown
-
-MessageBridge handles graceful shutdown to avoid message loss:
-
-```csharp
-// In Program.cs
-var app = builder.Build();
-
-var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
-
-lifetime.ApplicationStopping.Register(() =>
-{
-    // BackgroundService instances are stopped by the host.
-    app.Logger.LogInformation("Application stopping; hosted outbox services will drain during shutdown.");
-});
-
-app.Run();
-```
-
-Kubernetes sends SIGTERM on pod termination:
-
-1. `preStop` hook waits 15 seconds (for load balancer drain)
-2. Application processes in-flight requests
-3. Pod is forcibly killed after `terminationGracePeriodSeconds` (default 30s)
-
-## Package Feed Configuration
-
-**MessageBridge.Publisher** is distributed via a private NuGet feed.
-
-### Client Setup
-
-Configure `nuget.config` in your consuming application:
-
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-<configuration>
-  <packageSources>
-    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />
-    <add key="messagebridge" value="https://your-feed.pkgs.visualstudio.com/_packaging/messagebridge/nuget/v3/index.json" />
-  </packageSources>
-  <packageSourceCredentials>
-    <messagebridge>
-      <add key="Username" value="[PAT]" />
-      <add key="ClearTextPassword" value="[PAT]" />
-    </messagebridge>
-  </packageSourceCredentials>
-</configuration>
-```
-
-**HITL Decision**: Package feed location and authentication are environment-specific. Update feed URL and credentials per deployment environment.
+MessageBridge production platform uses OpenTofu for Azure Container Apps and
+GitHub Actions `delivery.yml` for application delivery. Do not use local Docker
+publication, direct Container Apps updates, or direct migration-job starts for
+an environment release.
+
+## Safe configuration model
+
+- OpenTofu owns Container Apps, PostgreSQL, Key Vault, identities, and alerting.
+- Runtime secrets use versionless Key Vault references. Values are entered only
+  through the Key Vault portal and are never retrieved, printed, or passed to a
+  command.
+- The only approved secret names are `rabbitmq-connection-string`,
+  `new-relic-otlp-headers`, `whatsapp-provider-placeholder`, and
+  `email-provider-placeholder`.
+- The repository supports only `centralindia` and its `cin` name token. Names
+  and resource groups come from OpenTofu output; never guess a serial or name.
+
+For a local worker test, use the repository's non-secret configuration template
+and a local test broker/database provisioned outside this guide. Do not place
+credentials in command arguments, environment variables, source files, or logs.
+
+## Foundation and application lifecycle
+
+The operator procedure, including all approvals and recovery boundaries, is in
+[Bootstrap and Deployment Runbook](./runbooks/deployment.md). The lifecycle is:
+
+1. Bootstrap state and OIDC with `.tofu/bootstrap`.
+2. Apply reviewed metadata-only plans for `.tofu/envs/shared`, then `dev`, then
+   `prod`.
+3. Create placeholder Key Vault entries, replace them through the portal after
+   the external systems are ready, and validate versionless references.
+4. Run the protected delivery workflow. It publishes verified immutable images,
+   migrates dev, releases dev, validates its handoff, and only then awaits the
+   protected production approval.
 
 ## Manual delivery operations
 
-Use `.github/workflows/delivery.yml` for every manual image or Azure application operation. The
-workflow accepts only the bounded `target` and `environment` choices below. It does not accept an
-image digest, tag, secret name, credential, connection string, token, or secret value.
-
-| Target | Environment input | Scope and result |
-|---|---|---|
-| `publish` | `none` | Validates, builds, scans, pushes, attests, and anonymously verifies both public GHCR images. Azure is not accessed. |
-| `dev` | `none` | Publishes when required, then runs the existing development migration, exact-digest worker release, health check, smoke check, and application rollback path. |
-| `prod` | `none` | Completes the same verified development release and immutable handoff, then waits for protected production approval and promotes those exact digests. |
-| `reload-secrets` | `dev` | Validates current versionless Key Vault references and reloads the development worker at its current digest. It does not publish, migrate, or apply infrastructure. |
-| `reload-secrets` | `prod` | Performs the same current-digest reload behind the protected production approval and concurrency boundary. |
-
-Invoke a target from an authenticated GitHub CLI session, replacing `<delivery-ref>` with the commit
-or protected branch to operate:
+`delivery.yml` is the sole ordered application-delivery path. Set
+`DELIVERY_REF` to a reviewed commit SHA or the protected delivery branch; do
+not use an unreviewed ref. The workflow accepts no digest, tag, credential, or
+secret-value input.
 
 ```bash
-gh workflow run delivery.yml --ref <delivery-ref> -f target=publish -f environment=none
-gh workflow run delivery.yml --ref <delivery-ref> -f target=dev -f environment=none
-gh workflow run delivery.yml --ref <delivery-ref> -f target=prod -f environment=none
-gh workflow run delivery.yml --ref <delivery-ref> -f target=reload-secrets -f environment=dev
-gh workflow run delivery.yml --ref <delivery-ref> -f target=reload-secrets -f environment=prod
+gh workflow run delivery.yml --ref "$DELIVERY_REF" -f target=publish -f environment=none
+gh workflow run delivery.yml --ref "$DELIVERY_REF" -f target=dev -f environment=none
+gh workflow run delivery.yml --ref "$DELIVERY_REF" -f target=prod -f environment=none
+gh workflow run delivery.yml --ref "$DELIVERY_REF" -f target=reload-secrets -f environment=dev
+gh workflow run delivery.yml --ref "$DELIVERY_REF" -f target=reload-secrets -f environment=prod
 ```
 
-Before running an operation:
+`publish` validates and anonymously verifies public GHCR artifacts. `dev`
+updates the migration image to the reviewed immutable digest, waits for the
+migration, changes the worker only after migration success, smoke-tests it, and
+rolls the worker back if later release checks fail. `prod` requires that exact
+successful dev handoff, then GitHub Environment approval and protected
+non-cancelling concurrency before production OIDC is issued. Neither release
+nor rollback reverses a database schema.
 
-1. Ensure repository validation is green and the worker and migration GHCR packages are public so
-   the publication job can perform anonymous digest verification.
-2. Configure the `dev` and `prod` GitHub Environments with their environment-specific Azure OIDC
-   client IDs and reviewed OpenTofu backend coordinates. Configure required reviewers for production;
-   apply the same reviewer policy to development if local policy requires it.
-3. Keep the workflow's stable, non-cancelling concurrency settings enabled. A manual operation is
-   serialized with automatic delivery and cannot overtake another state mutation.
-4. For a reload, update secret values in Key Vault out of band first. Operators must never pass a secret value to the workflow,
-   place one in a dispatch field, or paste one into a run summary.
+Configure **required reviewers** for the `prod` GitHub Environment. Secret
+values are updated in Key Vault **out of band**. Operators never pass a secret to a workflow. A release reload rollback restores the verified **prior revision**
+before reporting recovery, and delivery never reverses the database schema.
+Production approval occurs before production OIDC, and delivery never reverses database schema automatically.
 
-`publish` ends after anonymous digest verification. `dev` may pause for development Environment
-approval. `prod` first requires a successful development migration, healthy revision, smoke check,
-and no rollback; it then pauses for required reviewers on the `prod` GitHub Environment before any
-production OIDC token is issued. Reloads use only the selected environment identity; production
-reload approval also occurs before production OIDC issuance.
+### Mutating action contract
 
-The manual summary is deliberately limited to environment, immutable digest, execution/health/smoke
-status, and rollback status. Interpret failures as follows:
+Use this contract for every delivery, portal, or OpenTofu mutation.
 
-- Validation, scan, attestation, push, or anonymous-verification failure means no Azure deployment
-  was attempted.
-- Development failure prevents production promotion. A worker health or smoke failure invokes the
-  existing application rollback; migration failure stops before worker mutation.
-- Reload rejects missing, extra, identity-mismatched, or versioned Key Vault references before worker
-  mutation. After mutation begins, revision creation, health, or smoke failure triggers reload rollback to the captured prior revision.
-  Reload rollback succeeds only after that prior revision is active,
-  healthy at the captured digest, and passes the internal smoke job.
-- Release rollback restores only the prior worker image, and reload rollback restores the verified
-  prior revision. Neither path ever reverses the database schema; migration recovery requires a
-  forward fix or the approved database recovery procedure.
+- Target: the environment/resource resolved from its OpenTofu output.
+- Inputs: reviewed non-secret metadata and the selected workflow target/ref.
+- Safe path: the commands above or the linked runbook portal path.
+- Expected result: GitHub run summary reports the protected operation succeeded.
+- Failure interpretation: no successful completion means stop; inspect the
+  sanitized workflow summary and follow the linked recovery runbook.
+- Approval boundary: `prod` requires protected GitHub Environment approval;
+  foundation and portal changes require recorded platform-owner approval.
+- Cleanup: retain the run URL and approval record; use the linked runbook for
+  temporary-resource cleanup or recovery.
 
-## Protected production promotion
+## Operational links
 
-`.github/workflows/delivery.yml` is the sole ordered application delivery path. A successful
-development release writes a one-day, run-attempt-specific promotion artifact containing only
-the commit, development-tested worker and migration digests, and sanitized migration, health,
-smoke, and rollback results. Production validates that artifact against explicit development job
-outputs. It does not rebuild, retag, copy, or resolve either image through a mutable tag.
-
-Configure the repository's `prod` GitHub Environment before enabling promotion:
-
-1. Add required reviewers and restrict deployment branches to the intended delivery branch.
-2. Disable administrator protection-rule bypass where repository policy permits it.
-3. Prevent self-review when independent approval is required by policy.
-4. Store the production Azure client ID and production OpenTofu backend coordinates as environment
-   variables. Do not expose production deployment identity values outside protected `prod` jobs.
-
-Required reviewer identities and bypass policy live in GitHub Environment settings; workflow YAML
-can select `prod` but cannot declare those reviewers. GitHub evaluates the Environment gate before
-starting the job, so approval occurs before production OIDC issuance and every production mutation.
-Production promotions also use a stable, non-cancelling concurrency group so two approved attempts
-cannot mutate production concurrently.
-
-After approval, the workflow performs this fixed sequence:
-
-1. Validate the immutable handoff's commit, exact digests, environment, and successful results.
-2. Sign in with the production deployment identity and resolve runtime names from production state.
-3. Update and run the migration job with the exact development-tested migration digest; wait for success.
-4. Capture the current worker digest, update the worker to the exact development-tested worker digest,
-   and wait for that digest to report healthy.
-5. Run the internal production smoke job.
-
-Migration failure stops before worker mutation. Worker update, health, or smoke failure triggers one
-application rollback: restore the captured worker digest, wait for that exact prior digest to become
-healthy, then rerun internal smoke. The workflow never reverses database schema automatically.
-Migration recovery requires an operator-led forward fix or the approved database point-in-time restore
-procedure.
-
-The delivery summary reports commit, `prod` approval environment, development and production digests,
-digest identity, migration, health, smoke, prior worker digest, and rollback result. It intentionally
-omits secrets, environment configuration, backend coordinates, resource names, state, and logs.
-
-## HITL (Human-In-The-Loop) Decisions
-
-The following decisions require manual intervention and cannot be automated:
-
-### 1. Real Provider & Credentials
-
-- **Hosting target** (CloudAMQP, self-hosted RabbitMQ, etc.) — determined by ops team
-- **RabbitMQ credentials** — managed by CloudAMQP or infrastructure team
-- **Database** (cloud provider, self-hosted, etc.) — determined by architecture team
-
-**Action**: Update environment variables and secrets provider accordingly.
-
-### 2. Scaling & Capacity Planning
-
-- **Replica count** — based on message throughput
-- **Pod resource requests/limits** — based on profiling
-- **Database instance size** — based on data volume & query patterns
-
-**Action**: Monitor metrics, adjust HPA thresholds and replica counts.
-
-### 3. Retention Policies
-
-- **Outbox retention** (package default: 24 hours) — adjust based on compliance requirements
-- **Backup frequency** — per data protection policy
-
-**Action**: Update configuration, schedule backups, implement retention cleanup jobs.
-
-### 4. Alert Thresholds
-
-- **Outbox queue depth** — alert when > 1000 pending messages
-- **Error queue depth** — alert when not empty
-- **CPU/memory utilization** — alert at custom thresholds
-
-**Action**: Configure alert rules in monitoring platform; add runbooks for incident response.
-
-### 5. Secret Rotation Schedule
-
-- **Credential rotation frequency** — every 90 days (or per policy)
-- **Grace period** — how long old credentials remain valid
-
-**Action**: Schedule rotation; update secrets provider; coordinate pod restarts.
-
-## Troubleshooting Deployment
-
-### Pod not starting
-
-1. Check logs: `kubectl logs deployment/messagebridge-worker`
-2. Check events: `kubectl describe pod <pod-name>`
-3. Verify secrets exist: `kubectl get secrets | grep messagebridge`
-4. Test the local image: `docker run --rm messagebridge:local`
-
-### OutOfMemory errors
-
-1. Check usage: `kubectl top pod <pod-name>`
-2. Increase limit: edit Deployment, set `limits.memory: 2Gi`
-3. Profile in staging before deploying
-
-### Connection timeouts
-
-1. Verify CloudAMQP is reachable: `nslookup broker.cloudamqp.com`
-2. Check firewall: test port 5671 from pod
-3. Verify TLS certificate: `openssl s_client -connect broker.cloudamqp.com:5671`
-
-## See Also
-
-- [Local Development](local-development.md) — running locally with Docker Compose
-- [Operations](operations.md) — health checks, retries, error handling, cleanup
-- [Message Contracts](contracts.md) — protobuf definitions & versioning
+- [Deployment runbook](./runbooks/deployment.md)
+- [Rollback](./runbooks/rollback.md)
+- [Migration failure](./runbooks/migration-failure.md)
+- [Secret rotation](./runbooks/secret-rotation.md)
+- [CloudAMQP outage](./runbooks/cloudamqp-outage.md)
+- [Quarterly database restore drill](./runbooks/database-restore.md)
