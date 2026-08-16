@@ -65,6 +65,8 @@ variables {
     digest     = "f23f8042a2804669315fd232281d0ccecf1959332314a46e02ca2482064064a6"
   }
   migration_job_name = "mig-messagebridge-prod-cin-042"
+  smoke_job_name     = "smoke-messagebridge-prod-cin-042"
+  worker_fqdn        = "ca-messagebridge-prod-cin-042.cae-messagebridge-prod-cin-042.internal"
   migrator_identity = {
     resource_id  = "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-prod-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-migrator-prod-cin-042"
     principal_id = "00000000-0000-4000-8000-000000000005"
@@ -341,4 +343,80 @@ run "migration_job_reusing_runtime_identity_stops" {
   }
 
   expect_failures = [azurerm_container_app_job.migration]
+}
+
+run "creates_one_manual_smoke_job" {
+  command = plan
+
+  assert {
+    condition = (
+      length(azurerm_container_app_job.smoke[*]) == 1 &&
+      azurerm_container_app_job.smoke.name == var.smoke_job_name &&
+      azurerm_container_app_job.smoke.name != azurerm_container_app.worker.name &&
+      azurerm_container_app_job.smoke.container_app_environment_id == var.environment.container_app_environment_id &&
+      azurerm_container_app_job.smoke.resource_group_name == var.environment.resource_group_name &&
+      azurerm_container_app_job.smoke.location == var.environment.location &&
+      azurerm_container_app_job.smoke.workload_profile_name == "Consumption"
+    )
+    error_message = "Exactly one smoke job must be created beside the worker in the same environment and resource group."
+  }
+
+  assert {
+    condition = (
+      length(azurerm_container_app_job.smoke.manual_trigger_config) == 1 &&
+      azurerm_container_app_job.smoke.manual_trigger_config[0].parallelism == 1 &&
+      azurerm_container_app_job.smoke.manual_trigger_config[0].replica_completion_count == 1 &&
+      length(azurerm_container_app_job.smoke.schedule_trigger_config) == 0 &&
+      length(azurerm_container_app_job.smoke.event_trigger_config) == 0
+    )
+    error_message = "Smoke job must be manually triggered only, with one completion at parallelism one."
+  }
+
+  assert {
+    condition = (
+      azurerm_container_app_job.smoke.replica_timeout_in_seconds == 60 &&
+      azurerm_container_app_job.smoke.replica_retry_limit == 0
+    )
+    error_message = "Smoke job must bound each execution to 60 seconds and never retry a failed replica."
+  }
+
+  assert {
+    condition = (
+      length(azurerm_container_app_job.smoke.identity) == 0
+    )
+    error_message = "Smoke job must attach no managed identity and receive no secrets."
+  }
+
+  assert {
+    condition = (
+      length(azurerm_container_app_job.smoke.template) == 1 &&
+      length(azurerm_container_app_job.smoke.template[0].container) == 1 &&
+      azurerm_container_app_job.smoke.template[0].container[0].name == "smoke" &&
+      azurerm_container_app_job.smoke.template[0].container[0].cpu == 0.25 &&
+      azurerm_container_app_job.smoke.template[0].container[0].memory == "0.5Gi" &&
+      strcontains(azurerm_container_app_job.smoke.template[0].container[0].image, "@sha256:")
+    )
+    error_message = "Smoke job must run one digest-pinned 0.25 CPU/0.5 GiB curl container."
+  }
+
+  assert {
+    condition = (
+      length(azurerm_container_app_job.smoke.template[0].container[0].command) == 2 &&
+      azurerm_container_app_job.smoke.template[0].container[0].command[0] == "/bin/sh" &&
+      azurerm_container_app_job.smoke.template[0].container[0].command[1] == "-c" &&
+      length(azurerm_container_app_job.smoke.template[0].container[0].args) == 1 &&
+      strcontains(azurerm_container_app_job.smoke.template[0].container[0].args[0], "/health/live") &&
+      strcontains(azurerm_container_app_job.smoke.template[0].container[0].args[0], "/health/ready") &&
+      strcontains(azurerm_container_app_job.smoke.template[0].container[0].args[0], " -f ")
+    )
+    error_message = "Smoke job must use sh -c to call both health endpoints and fail every non-2xx response."
+  }
+
+  assert {
+    condition = (
+      output.smoke_job_id == azurerm_container_app_job.smoke.id &&
+      output.smoke_job_name == var.smoke_job_name
+    )
+    error_message = "Module must export smoke job metadata for orchestration."
+  }
 }

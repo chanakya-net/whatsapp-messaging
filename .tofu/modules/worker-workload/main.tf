@@ -172,3 +172,63 @@ resource "azurerm_container_app_job" "migration" {
     }
   }
 }
+
+# Smoke job: calls worker health endpoints through internal routing.
+# Uses pinned public curl image, receives no secrets, and fails on every non-2xx response.
+# Manually triggered before deployment to verify worker is live and ready.
+resource "azurerm_container_app_job" "smoke" {
+  name                         = var.smoke_job_name
+  container_app_environment_id = var.environment.container_app_environment_id
+  resource_group_name          = var.environment.resource_group_name
+  location                      = var.environment.location
+  workload_profile_name        = "Consumption"
+  replica_timeout_in_seconds   = 60
+  replica_retry_limit          = 0
+  tags                         = var.environment.tags
+
+
+  manual_trigger_config {
+    parallelism              = 1
+    replica_completion_count = 1
+  }
+
+  template {
+    container {
+      name   = "smoke"
+      image  = "curlimages/curl@sha256:3e8d02f5449f6c9f1e42e38ca1dca4db8bb37bf0d1ebb94e39bb48e10f8bd9a2"
+      cpu    = 0.25
+      memory = "0.5Gi"
+
+      command = ["/bin/sh", "-c"]
+      args = [
+        <<-EOC
+          set -e
+          worker_fqdn="${azurerm_container_app.worker.latest_revision_fqdn}"
+
+          echo "Testing /health/live..."
+          if ! curl -sS "https://$${worker_fqdn}/health/live" -f -w "\nStatus: %%{http_code}\n"; then
+            echo "health/live check failed"
+            exit 1
+          fi
+
+          echo "Testing /health/ready..."
+          if ! curl -sS "https://$${worker_fqdn}/health/ready" -f -w "\nStatus: %%{http_code}\n"; then
+            echo "health/ready check failed"
+            exit 1
+          fi
+
+          echo "Smoke tests passed."
+        EOC
+      ]
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [template[0].container[0].image]
+
+    precondition {
+      condition = var.smoke_job_name != ""
+      error_message = "The smoke job name must not be empty."
+    }
+  }
+}

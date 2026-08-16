@@ -13,11 +13,13 @@ locals {
   runtime_identity_name          = "id-${local.project}-runtime-${local.environment}-${local.region_token}-${var.bootstrap_serial}"
   migrator_identity_name         = "id-${local.project}-migrator-${local.environment}-${local.region_token}-${var.bootstrap_serial}"
   worker_name                    = "ca-${local.project}-${local.environment}-${local.region_token}-${var.bootstrap_serial}"
+  worker_fqdn                    = "${local.worker_name}.${local.container_app_environment_name}.internal"
   worker_database_host           = "psql-${local.project}-shared-${local.region_token}-${var.bootstrap_serial}.postgres.database.azure.com"
   worker_database_name           = "messagebridge_prod"
 
   # Container Apps Job names allow at most 32 characters, so mig is the stable migration token.
   migration_job_name = "mig-${local.project}-${local.environment}-${local.region_token}-${var.bootstrap_serial}"
+  smoke_job_name     = "smoke-${local.project}-${local.environment}-${local.region_token}-${var.bootstrap_serial}"
 
   mandatory_tags = merge(var.tags, {
     project     = local.project

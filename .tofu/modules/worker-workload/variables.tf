@@ -190,6 +190,16 @@ variable "migration_image" {
   }
 }
 
+variable "smoke_job_name" {
+  description = "Name of the manually triggered smoke test job."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{0,30}[a-z0-9]$", var.smoke_job_name)) && !strcontains(var.smoke_job_name, "--")
+    error_message = "smoke_job_name must be a 2-32 character lowercase Container Apps Job name."
+  }
+}
+
 variable "runtime_configuration" {
   description = "Non-secret MessageBridge worker runtime settings."
   type = object({
