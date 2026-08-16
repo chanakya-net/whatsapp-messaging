@@ -199,9 +199,8 @@ resource "azurerm_container_app_job" "smoke" {
       cpu    = 0.25
       memory = "0.5Gi"
 
+      command = ["/bin/sh", "-c"]
       args = [
-        "/bin/sh",
-        "-c",
         <<-EOC
           set -e
           worker_fqdn="${azurerm_container_app.worker.latest_revision_fqdn}"

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Poll Container Apps Job execution until terminal state (Succeeded, Failed, Degraded, Cancelled)
-# or timeout. Returns 0 for Succeeded, 1 for terminal failures, 124 for timeout.
+# Poll Container Apps Job execution until a terminal state or bounded timeout.
 set -euo pipefail
 
 show_help() {
@@ -18,11 +17,7 @@ EOF
 }
 
 parse_args() {
-  JOB_NAME=""
-  RESOURCE_GROUP=""
-  POLL_BUDGET=30
-  TIMEOUT=300
-
+  JOB_NAME="" RESOURCE_GROUP="" POLL_BUDGET=30 TIMEOUT=300
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name) JOB_NAME="$2"; shift 2 ;;
@@ -33,58 +28,64 @@ parse_args() {
       *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
   done
-
   [ -n "$JOB_NAME" ] || { printf 'Error: --name is required\n' >&2; exit 2; }
   [ -n "$RESOURCE_GROUP" ] || { printf 'Error: --resource-group is required\n' >&2; exit 2; }
 }
 
-wait_for_job() {
-  local attempt=0 start_time status execution
+job_context() {
+  printf 'job %s execution %s' "$JOB_NAME" "$EXECUTION_NAME"
+}
 
-  # Start execution
-  execution="$(az containerapp job start --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" \
-    --output json 2>/dev/null | jq -r '.name' 2>/dev/null)" || {
-    printf 'Failed to start job execution.\n' >&2
+timed_out() {
+  [ "$(( $(date +%s) - START_TIME ))" -ge "$TIMEOUT" ]
+}
+
+sleep_until_next_poll() {
+  local remaining delay=2
+  remaining=$((TIMEOUT - ($(date +%s) - START_TIME)))
+  [ "$remaining" -gt 0 ] || return 1
+  [ "$remaining" -lt "$delay" ] && delay=$remaining
+  sleep "$delay"
+}
+
+start_execution() {
+  EXECUTION_NAME="$(az containerapp job start --name "$JOB_NAME" --resource-group "$RESOURCE_GROUP" \
+    --output json 2>/dev/null | jq -r '.name // empty' 2>/dev/null)" || {
+    printf 'Job %s failed to start an execution.\n' "$JOB_NAME" >&2
     return 1
   }
+  [ -n "$EXECUTION_NAME" ] || {
+    printf 'Job %s returned no execution identifier.\n' "$JOB_NAME" >&2
+    return 1
+  }
+}
 
-  start_time=$(date +%s)
+wait_for_job() {
+  local attempt=0 status
+  start_execution || return 1
+  START_TIME=$(date +%s)
 
   while [ "$attempt" -lt "$POLL_BUDGET" ]; do
     attempt=$((attempt + 1))
-
-    # Check wall-clock timeout
-    local now elapsed
-    now=$(date +%s)
-    elapsed=$((now - start_time))
-    if [ "$elapsed" -ge "$TIMEOUT" ]; then
-      printf 'Job execution timed out after %d seconds.\n' "$elapsed" >&2
+    if timed_out; then
+      printf '%s timed out after %d seconds.\n' "$(job_context)" "$TIMEOUT" >&2
       return 124
     fi
-
-    # Poll execution status
-    status="$(az containerapp job execution show --name "$execution" --job "$JOB_NAME" \
-      --resource-group "$RESOURCE_GROUP" --output json 2>/dev/null | jq -r '.properties.status' 2>/dev/null)" || {
-      printf 'Failed to query execution status.\n' >&2
+    status="$(az containerapp job execution show --name "$EXECUTION_NAME" --job "$JOB_NAME" \
+      --resource-group "$RESOURCE_GROUP" --output json 2>/dev/null | jq -r '.properties.status // "Unknown"' 2>/dev/null)" || {
+      printf 'Failed to query status for %s.\n' "$(job_context)" >&2
       return 1
     }
-
     case "$status" in
-      Succeeded)
-        printf 'Execution Succeeded.\n'
-        return 0
-        ;;
-      Failed|Degraded|Cancelled)
-        printf 'Execution %s.\n' "$status"
-        return 1
-        ;;
+      Succeeded) printf '%s reached status Succeeded.\n' "$(job_context)"; return 0 ;;
+      Failed|Degraded|Cancelled) printf '%s reached status %s.\n' "$(job_context)" "$status" >&2; return 1 ;;
     esac
-
-    # Brief sleep between polls
-    sleep 2
+    if [ "$attempt" -lt "$POLL_BUDGET" ] && ! sleep_until_next_poll; then
+      printf '%s timed out after %d seconds.\n' "$(job_context)" "$TIMEOUT" >&2
+      return 124
+    fi
   done
-
-  printf 'Job execution timed out after %d polls.\n' "$POLL_BUDGET" >&2
+  printf '%s timed out after %d polls.\n' "$(job_context)" "$POLL_BUDGET" >&2
   return 124
 }
 

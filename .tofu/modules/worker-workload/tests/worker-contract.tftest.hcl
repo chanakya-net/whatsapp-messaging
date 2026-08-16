@@ -401,13 +401,15 @@ run "creates_one_manual_smoke_job" {
 
   assert {
     condition = (
-      length(azurerm_container_app_job.smoke.template[0].container[0].args) >= 1 &&
-      anytrue([
-        for arg in azurerm_container_app_job.smoke.template[0].container[0].args :
-        strcontains(arg, "/health/live") && strcontains(arg, "/health/ready")
-      ])
+      length(azurerm_container_app_job.smoke.template[0].container[0].command) == 2 &&
+      azurerm_container_app_job.smoke.template[0].container[0].command[0] == "/bin/sh" &&
+      azurerm_container_app_job.smoke.template[0].container[0].command[1] == "-c" &&
+      length(azurerm_container_app_job.smoke.template[0].container[0].args) == 1 &&
+      strcontains(azurerm_container_app_job.smoke.template[0].container[0].args[0], "/health/live") &&
+      strcontains(azurerm_container_app_job.smoke.template[0].container[0].args[0], "/health/ready") &&
+      strcontains(azurerm_container_app_job.smoke.template[0].container[0].args[0], " -f ")
     )
-    error_message = "Smoke job must call both /health/live and /health/ready endpoints."
+    error_message = "Smoke job must use sh -c to call both health endpoints and fail every non-2xx response."
   }
 
   assert {

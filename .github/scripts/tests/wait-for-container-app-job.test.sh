@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 FIXTURE_DIR="$REPO_ROOT/.github/scripts/tests/fixtures/container-app-jobs"
 SCRIPT_UNDER_TEST="$REPO_ROOT/.github/scripts/wait-for-container-app-job.sh"
 JOB_NAME="mig-messagebridge-dev-cin-042"
+EXECUTION_NAME="${JOB_NAME}-execution-001"
 RESOURCE_GROUP="rg-messagebridge-dev-centralindia-042"
 POLL_BUDGET=4
 DEFAULT_TIMEOUT=30
@@ -24,6 +25,11 @@ assert_equals() {
 assert_exit_code() {
   local expected=$1 actual=$2 message=$3
   [ "$actual" -eq "$expected" ] || fail "$message (expected exit $expected, got $actual)"
+}
+
+assert_less_than() {
+  local maximum=$1 actual=$2 message=$3
+  [ "$actual" -lt "$maximum" ] || fail "$message (expected < $maximum, got $actual)"
 }
 
 assert_output_contains() {
@@ -62,6 +68,7 @@ start_stream() {
   export FAKE_AZ_STREAM="$FIXTURE_DIR/$stream"
   export FAKE_AZ_STREAM_CURSOR="$TEST_DIR/${stream%.txt}.cursor"
   export FAKE_AZ_CALL_LOG="$TEST_DIR/${stream%.txt}.calls.log"
+  export FAKE_AZ_EXECUTION_NAME="$EXECUTION_NAME"
   : >"$FAKE_AZ_STREAM_CURSOR"
   : >"$FAKE_AZ_CALL_LOG"
   [ -f "$FAKE_AZ_STREAM" ] || fail "Missing fixture stream: $FAKE_AZ_STREAM"
@@ -86,6 +93,8 @@ test_successful_execution() {
   exit_code=${exit_code:-0}
   assert_exit_code 0 "$exit_code" 'Succeeded execution must exit 0'
   assert_output_contains 'Succeeded' "$output" 'Output must indicate success'
+  assert_output_contains "$JOB_NAME" "$output" 'Success diagnostics must include the job identifier'
+  assert_output_contains "$EXECUTION_NAME" "$output" 'Success diagnostics must include the execution identifier'
 }
 
 test_failed_execution() {
@@ -118,6 +127,18 @@ test_timeout_on_nonterminal() {
   exit_code=${exit_code:-124}
   assert_exit_code 124 "$exit_code" 'Nonterminal execution must exit 124 (timeout)'
   assert_output_contains 'timed out\|timeout' "$output" 'Output must indicate timeout'
+}
+
+test_short_timeout_does_not_overrun_boundary() {
+  local output exit_code elapsed
+  SECONDS=0
+  output="$(wait_with_stream nonterminal-stream.txt 2 1)" || exit_code=$?
+  elapsed=$SECONDS
+  exit_code=${exit_code:-124}
+  assert_exit_code 124 "$exit_code" 'Short timeout must exit 124'
+  assert_less_than 2 "$elapsed" 'Short timeout must not sleep for the full poll interval'
+  assert_output_contains "$JOB_NAME" "$output" 'Timeout diagnostics must include the job identifier'
+  assert_output_contains "$EXECUTION_NAME" "$output" 'Timeout diagnostics must include the execution identifier'
 }
 
 test_bounded_poll_count() {
@@ -159,6 +180,8 @@ test_missing_execution_fails() {
   exit_code=${exit_code:-1}
   assert_exit_code 1 "$exit_code" 'Missing execution must exit 1'
   assert_output_contains 'Failed\|fail\|error' "$output" 'Output must indicate failure'
+  assert_output_contains "$JOB_NAME" "$output" 'Query diagnostics must include the job identifier'
+  assert_output_contains "$EXECUTION_NAME" "$output" 'Query diagnostics must include the execution identifier'
   # Ensure no secrets/config in diagnostics
   assert_output_excludes 'RABBITMQ\|POSTGRES\|vault\|secret' "$output" 'Diagnostics must not contain secrets'
   assert_output_excludes 'resource.group\|--resource-group' "$output" 'Diagnostics must not contain config'
@@ -169,8 +192,10 @@ test_diagnostics_include_identifiers() {
   output="$(wait_with_stream failed-stream.txt 4 5)" || exit_code=$?
   exit_code=${exit_code:-1}
   assert_exit_code 1 "$exit_code" 'Failed execution must exit 1'
-  # Output should mention job or execution for diagnostics (but not secrets)
+  assert_output_contains "$JOB_NAME" "$output" 'Diagnostics must include the job identifier'
+  assert_output_contains "$EXECUTION_NAME" "$output" 'Diagnostics must include the execution identifier'
   assert_output_excludes 'RABBITMQ\|POSTGRES\|vault\|secret' "$output" 'No secrets in diagnostics'
+  assert_output_excludes 'resource.group\|--resource-group' "$output" 'No configuration in diagnostics'
 }
 
 test_distinct_outcomes() {
@@ -192,6 +217,7 @@ test_failed_execution
 test_cancelled_execution
 test_degraded_execution
 test_timeout_on_nonterminal
+test_short_timeout_does_not_overrun_boundary
 test_bounded_poll_count
 test_sanitized_diagnostics_on_failure
 test_sanitized_diagnostics_on_timeout
