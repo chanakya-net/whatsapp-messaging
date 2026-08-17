@@ -81,6 +81,9 @@ printf 'location=centralindia token=cin serial=%s\n' "$BOOTSTRAP_SERIAL"
 
 - Target: `.tofu/bootstrap`; it owns state storage, resource groups, and GitHub
   OIDC identities for shared, dev, and prod.
+- Repository setup: follow the
+  [GitHub Actions repository variables runbook](github-actions-variables.md)
+  for the complete variable inventory, formats, validation, and CI rerun steps.
 - Inputs: `MESSAGEBRIDGE_BOOTSTRAP_SERIAL` set to Stage 2's approved serial.
 - Safe path:
 
