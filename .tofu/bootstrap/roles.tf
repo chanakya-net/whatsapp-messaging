@@ -5,13 +5,16 @@ locals {
       actions     = ["*/read"]
     }
     shared = {
-      description = "Manage MessageBridge shared network, observability, registry, identity, and vault control planes."
+      description = "Manage MessageBridge shared database, network, observability, registry, identity, and vault control planes."
       actions = [
         "Microsoft.Authorization/roleAssignments/delete",
         "Microsoft.Authorization/roleAssignments/read",
         "Microsoft.Authorization/roleAssignments/write",
         "Microsoft.ContainerRegistry/registries/*",
+        "Microsoft.DBforPostgreSQL/flexibleServers/*",
+        "Microsoft.Insights/actionGroups/*",
         "Microsoft.Insights/diagnosticSettings/*",
+        "Microsoft.Insights/metricAlerts/*",
         "Microsoft.KeyVault/vaults/*",
         "Microsoft.ManagedIdentity/userAssignedIdentities/*",
         "Microsoft.Network/*/read",

@@ -36,6 +36,9 @@ run "roles_contain_only_required_resource_families" {
     condition = alltrue([
       contains(azurerm_role_definition.operations["shared"].permissions[0].actions, "Microsoft.ContainerRegistry/registries/*"),
       contains(azurerm_role_definition.operations["shared"].permissions[0].actions, "Microsoft.Network/*/read"),
+      contains(azurerm_role_definition.operations["shared"].permissions[0].actions, "Microsoft.DBforPostgreSQL/flexibleServers/*"),
+      contains(azurerm_role_definition.operations["shared"].permissions[0].actions, "Microsoft.Insights/actionGroups/*"),
+      contains(azurerm_role_definition.operations["shared"].permissions[0].actions, "Microsoft.Insights/metricAlerts/*"),
       contains(azurerm_role_definition.operations["environment"].permissions[0].actions, "Microsoft.App/containerApps/*"),
       contains(azurerm_role_definition.operations["environment"].permissions[0].actions, "Microsoft.DBforPostgreSQL/flexibleServers/*")
     ])
