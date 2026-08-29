@@ -1,0 +1,5 @@
+environment	database	role_type	principal_template	required_grants	denied_boundary
+dev	messagebridge_dev	runtime	id-messagebridge-runtime-dev-cin-{serial}	CONNECT|SCHEMA_USAGE|TABLE_SELECT_INSERT_UPDATE_DELETE|SEQUENCE_USAGE_SELECT_UPDATE	DDL|messagebridge_prod
+dev	messagebridge_dev	migrator	id-messagebridge-migrator-dev-cin-{serial}	CONNECT|SCHEMA_USAGE_CREATE|OBJECT_OWNER|RUNTIME_DEFAULT_DML	messagebridge_prod
+prod	messagebridge_prod	runtime	id-messagebridge-runtime-prod-cin-{serial}	CONNECT|SCHEMA_USAGE|TABLE_SELECT_INSERT_UPDATE_DELETE|SEQUENCE_USAGE_SELECT_UPDATE	DDL|messagebridge_dev
+prod	messagebridge_prod	migrator	id-messagebridge-migrator-prod-cin-{serial}	CONNECT|SCHEMA_USAGE_CREATE|OBJECT_OWNER|RUNTIME_DEFAULT_DML	messagebridge_dev

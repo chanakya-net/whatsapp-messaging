@@ -8,6 +8,7 @@ namespace MessageBridge.Infrastructure.Providers;
 public sealed class ProviderOptions
 {
     public const string SectionName = "MessageBridge:Providers";
+    public const string SimulatedDeliveryStatus = "simulated";
 
     [Required]
     public string WhatsAppProviderName { get; set; } = "placeholder-whatsapp";
@@ -54,7 +55,8 @@ public sealed class ProviderOptions
             ["message_id"] = MessageId,
             ["tenant_id"] = TenantId,
             ["template_name"] = TemplateName,
-            ["recipient_masked"] = RecipientMasked
+            ["recipient_masked"] = RecipientMasked,
+            ["delivery_status"] = SimulatedDeliveryStatus
         };
     }
 }

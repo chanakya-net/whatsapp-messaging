@@ -16,9 +16,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Npgsql;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
+using OpenTelemetry.Exporter;
 using Shouldly;
 using Wolverine;
 using Xunit;
@@ -39,6 +41,24 @@ public sealed class ObservabilityRegistrationTests
 
         var validOptions = validProvider.GetRequiredService<IOptions<ObservabilityOptions>>().Value;
         validOptions.ServiceName.ShouldBe("MessageBridge.TestWorker");
+    }
+
+    [Fact]
+    public void Otlp_Uses_HttpProtobuf_Without_Mutating_Secret_Headers()
+    {
+        const string headers = "api-key=not-for-logs";
+        var exporter = new OtlpExporterOptions { Headers = headers };
+
+        ObservabilityRegistration.ConfigureOtlpExporter(
+            exporter,
+            new ObservabilityOptions
+            {
+                OtlpEndpoint = "https://otlp.nr-data.net:4318"
+            });
+
+        exporter.Endpoint.ShouldBe(new Uri("https://otlp.nr-data.net:4318"));
+        exporter.Protocol.ShouldBe(OtlpExportProtocol.HttpProtobuf);
+        exporter.Headers.ShouldBe(headers);
     }
 
     [Fact]
@@ -85,7 +105,7 @@ public sealed class ObservabilityRegistrationTests
     }
 
     [Fact]
-    public async Task Metrics_Endpoint_Gated_By_Config()
+    public async Task Metrics_Endpoint_Remains_Disabled_When_Configured()
     {
         await using var disabled = await ObservabilityTestHost.StartAsync(
             new Dictionary<string, string?>
@@ -98,7 +118,7 @@ public sealed class ObservabilityRegistrationTests
 
         (await disabled.Client.GetAsync("/metrics")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
 
-        await using var enabled = await ObservabilityTestHost.StartAsync(
+        await using var configured = await ObservabilityTestHost.StartAsync(
             new Dictionary<string, string?>
             {
                 ["Observability:MetricsEndpointEnabled"] = "true",
@@ -108,7 +128,7 @@ public sealed class ObservabilityRegistrationTests
             },
             AddDependencyHealthProbes);
 
-        (await enabled.Client.GetAsync("/metrics")).StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await configured.Client.GetAsync("/metrics")).StatusCode.ShouldBe(HttpStatusCode.NotFound);
     }
 
     [Fact]
@@ -120,7 +140,10 @@ public sealed class ObservabilityRegistrationTests
                 ["RabbitMq:Host"] = "localhost",
                 ["RabbitMq:Username"] = "guest",
                 ["RabbitMq:Password"] = "guest",
-                ["ConnectionStrings:DefaultConnection"] = "Host=localhost;Database=messagebridge_dev;Username=db_user;Password=super_secret_pwd;"
+                ["Database:Host"] = "localhost",
+                ["Database:Database"] = "messagebridge_dev",
+                ["Database:Username"] = "db_user",
+                ["Database:Password"] = "super_secret_pwd"
             },
             AddDependencyHealthProbes);
 
@@ -285,24 +308,11 @@ public sealed class ObservabilityRegistrationTests
     }
 
     [Fact]
-    public async Task PostgresReadinessProbe_returns_false_without_connection_string()
+    public async Task PostgresReadinessProbe_uses_shared_data_source_and_honors_cancellation()
     {
-        var configuration = new ConfigurationBuilder().Build();
-        var probe = new PostgresReadinessProbe(configuration);
-
-        (await probe.IsReadyAsync(CancellationToken.None)).ShouldBeFalse();
-    }
-
-    [Fact]
-    public async Task PostgresReadinessProbe_honors_cancellation_before_database_access()
-    {
-        var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ConnectionStrings:DefaultConnection"] = "Host=unit-test;Database=bridge"
-            })
-            .Build();
-        var probe = new PostgresReadinessProbe(configuration);
+        await using var dataSource = NpgsqlDataSource.Create(
+            "Host=unit-test;Database=bridge;Username=user;Password=password");
+        var probe = new PostgresReadinessProbe(dataSource);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
 

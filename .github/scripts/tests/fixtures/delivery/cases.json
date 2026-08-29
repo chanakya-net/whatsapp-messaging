@@ -1,0 +1,338 @@
+{
+  "classification": [
+    {
+      "name": "application-only",
+      "event": "push",
+      "paths": ["src/MessageBridge.Worker/Program.cs"],
+      "expected": {"application": "true", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "application"}
+    },
+    {
+      "name": "dev-infrastructure-only",
+      "event": "push",
+      "paths": [".tofu/envs/dev/worker.tf"],
+      "expected": {"application": "false", "infrastructure": "true", "shared": "false", "dev": "true", "prod": "false", "layers": "dev"}
+    },
+    {
+      "name": "combined",
+      "event": "push",
+      "paths": ["src/MessageBridge.Worker/Program.cs", ".tofu/envs/prod/worker.tf"],
+      "expected": {"application": "true", "infrastructure": "true", "shared": "false", "dev": "false", "prod": "true", "layers": "application,prod"}
+    },
+    {
+      "name": "database-module",
+      "event": "push",
+      "paths": [".tofu/modules/database/main.tf"],
+      "expected": {"application": "false", "infrastructure": "true", "shared": "true", "dev": "false", "prod": "false", "layers": "shared"}
+    },
+    {
+      "name": "environment-module",
+      "event": "push",
+      "paths": [".tofu/modules/container-environment/main.tf"],
+      "expected": {"application": "false", "infrastructure": "true", "shared": "false", "dev": "true", "prod": "true", "layers": "dev,prod"}
+    },
+    {
+      "name": "metric-alerts-module",
+      "event": "push",
+      "paths": [".tofu/modules/metric-alerts/main.tf"],
+      "expected": {"application": "false", "infrastructure": "true", "shared": "true", "dev": "true", "prod": "true", "layers": "shared,dev,prod"}
+    },
+    {
+      "name": "egress-helper-infrastructure-only",
+      "event": "push",
+      "paths": [".github/scripts/reconcile-postgres-egress.sh"],
+      "expected": {"application": "false", "infrastructure": "true", "shared": "true", "dev": "true", "prod": "true", "layers": "shared,dev,prod"}
+    },
+    {
+      "name": "delivery-release-contract-helper",
+      "event": "push",
+      "paths": [".github/scripts/tests/delivery-release-contract.inc.sh"],
+      "expected": {"application": "true", "infrastructure": "true", "shared": "true", "dev": "true", "prod": "true", "layers": "application,shared,dev,prod"}
+    },
+    {
+      "name": "documentation-only",
+      "event": "push",
+      "paths": ["docs/runbook.md"],
+      "expected": {"application": "false", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "none"}
+    },
+    {
+      "name": "manual-publish",
+      "event": "workflow_dispatch",
+      "target": "publish",
+      "environment": "none",
+      "paths": [],
+      "expected": {"application": "true", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "application"}
+    }
+  ],
+  "classification_failures": [
+    {
+      "name": "git-diff-failure",
+      "event": "push",
+      "paths": [],
+      "git_failure": true
+    }
+  ],
+  "dispatch_routing": [
+    {"name": "publish", "target": "publish", "environment": "none", "passes": true, "expected": {"delivery-target": "publish", "delivery-environment": "none", "application": "true", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "application"}},
+    {"name": "development", "target": "dev", "environment": "none", "passes": true, "expected": {"delivery-target": "dev", "delivery-environment": "none", "application": "true", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "application"}},
+    {"name": "production", "target": "prod", "environment": "none", "passes": true, "expected": {"delivery-target": "prod", "delivery-environment": "none", "application": "true", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "application"}},
+    {"name": "reload-development", "target": "reload-secrets", "environment": "dev", "passes": true, "expected": {"delivery-target": "reload-secrets", "delivery-environment": "dev", "application": "false", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "none"}},
+    {"name": "reload-production", "target": "reload-secrets", "environment": "prod", "passes": true, "expected": {"delivery-target": "reload-secrets", "delivery-environment": "prod", "application": "false", "infrastructure": "false", "shared": "false", "dev": "false", "prod": "false", "layers": "none"}},
+    {"name": "empty-target", "target": "", "environment": "none", "passes": false},
+    {"name": "empty-environment", "target": "publish", "environment": "", "passes": false},
+    {"name": "unknown-target", "target": "destroy", "environment": "none", "passes": false},
+    {"name": "unknown-environment", "target": "reload-secrets", "environment": "staging", "passes": false},
+    {"name": "publish-with-environment", "target": "publish", "environment": "dev", "passes": false},
+    {"name": "reload-without-environment", "target": "reload-secrets", "environment": "none", "passes": false}
+  ],
+  "reload": [
+    {"name": "reload-success", "metadata": {}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Healthy"}}, "smoke": {"statuses": ["Succeeded"]}, "rollback": {"activate_success": true}, "expected": {"exit": 0, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "success", "health-result": "success", "smoke-result": "success", "rollback-result": "skipped", "updates": 1, "activations": 0, "smoke-starts": 1}},
+    {"name": "versioned-reference", "metadata": {"versioned": true, "secret_value": "fixture-secret-value"}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Healthy"}}, "smoke": {"statuses": []}, "rollback": {"activate_success": true}, "expected": {"exit": 1, "current-digest": "unavailable", "execution-result": "failure", "health-result": "skipped", "smoke-result": "skipped", "rollback-result": "skipped", "updates": 0, "activations": 0, "smoke-starts": 0}},
+    {"name": "revision-copy-failure", "metadata": {}, "update_success": false, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Healthy"}}, "smoke": {"statuses": ["Succeeded"]}, "rollback": {"activate_success": true}, "expected": {"exit": 1, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "failure", "health-result": "skipped", "smoke-result": "skipped", "rollback-result": "success", "updates": 1, "activations": 1, "smoke-starts": 1}},
+    {"name": "unhealthy-revision", "metadata": {}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Unhealthy"}}, "smoke": {"statuses": ["Succeeded"]}, "rollback": {"activate_success": true}, "expected": {"exit": 1, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "success", "health-result": "failure", "smoke-result": "skipped", "rollback-result": "success", "updates": 1, "activations": 1, "smoke-starts": 1}},
+    {"name": "revision-timeout", "metadata": {}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioning", "health": "Unknown"}}, "smoke": {"statuses": ["Succeeded"]}, "rollback": {"activate_success": true}, "expected": {"exit": 1, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "success", "health-result": "failure", "smoke-result": "skipped", "rollback-result": "success", "updates": 1, "activations": 1, "smoke-starts": 1}},
+    {"name": "smoke-failure", "metadata": {}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Healthy"}}, "smoke": {"statuses": ["Failed", "Succeeded"]}, "rollback": {"activate_success": true}, "expected": {"exit": 1, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "success", "health-result": "success", "smoke-result": "failure", "rollback-result": "success", "updates": 1, "activations": 1, "smoke-starts": 2}},
+    {"name": "rollback-failure", "metadata": {}, "update_success": true, "revision": {"prior": {"provisioning": "Provisioned", "health": "Healthy"}, "new": {"provisioning": "Provisioned", "health": "Unhealthy"}}, "smoke": {"statuses": []}, "rollback": {"activate_success": false}, "expected": {"exit": 1, "current-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "execution-result": "success", "health-result": "failure", "smoke-result": "skipped", "rollback-result": "failure", "updates": 1, "activations": 1, "smoke-starts": 0}}
+  ],
+  "readiness": [
+    {"name": "application-only", "application": true, "infrastructure": false, "images": "success", "infrastructure_result": "success", "ready": true},
+    {"name": "infrastructure-only", "application": false, "infrastructure": true, "images": "skipped", "infrastructure_result": "success", "ready": false},
+    {"name": "combined-success", "application": true, "infrastructure": true, "images": "success", "infrastructure_result": "success", "ready": true},
+    {"name": "combined-infrastructure-failure", "application": true, "infrastructure": true, "images": "success", "infrastructure_result": "failure", "ready": false}
+  ],
+  "infrastructure_readiness": [
+    {"name": "intentional-skip", "infrastructure": false, "results": ["skipped", "skipped", "skipped", "skipped"], "passes": true, "state": "skipped"},
+    {"name": "ordered-success", "infrastructure": true, "results": ["success", "success", "success", "success"], "passes": true, "state": "success"},
+    {"name": "reconciliation-failure", "infrastructure": true, "results": ["success", "success", "success", "failure"], "passes": false, "state": ""},
+    {"name": "unexpected-mutation", "infrastructure": false, "results": ["success", "skipped", "skipped", "skipped"], "passes": false, "state": ""}
+  ],
+  "promotion_handoff": [
+    {
+      "name": "valid-tested-development-handoff",
+      "passes": true,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "dev",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"}
+      }
+    },
+    {
+      "name": "wrong-commit",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "environment": "dev",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"}
+      }
+    },
+    {
+      "name": "wrong-environment",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "prod",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"}
+      }
+    },
+    {
+      "name": "mismatched-worker-digest",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "dev",
+        "worker_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"}
+      }
+    },
+    {
+      "name": "malformed-migration-digest",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "dev",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"}
+      }
+    },
+    {
+      "name": "failed-development-smoke",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "dev",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "failure", "rollback": "success"}
+      }
+    },
+    {
+      "name": "unexpected-field",
+      "passes": false,
+      "manifest": {
+        "schema_version": 1,
+        "commit": "dddddddddddddddddddddddddddddddddddddddd",
+        "environment": "dev",
+        "worker_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "migration_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "results": {"migration": "success", "revision": "success", "smoke": "success", "rollback": "skipped"},
+        "configuration": "must-not-pass"
+      }
+    }
+  ],
+  "release": [
+    {
+      "name": "migration-update-failure",
+      "migration": {"status": "Succeeded", "update_success": false},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "failure", "prior-digest": "unavailable", "revision-result": "skipped", "smoke-result": "skipped", "rollback-result": "skipped"}
+    },
+    {
+      "name": "release-success",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {
+        "exit": 0,
+        "migration-result": "success",
+        "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "revision-result": "success",
+        "smoke-result": "success",
+        "rollback-result": "skipped"
+      }
+    },
+    {
+      "name": "migration-failure",
+      "migration": {"status": "Failed"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "failure", "prior-digest": "unavailable", "revision-result": "skipped", "smoke-result": "skipped", "rollback-result": "skipped"}
+    },
+    {
+      "name": "migration-timeout",
+      "migration": {"status": "Running"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "failure", "prior-digest": "unavailable", "revision-result": "skipped", "smoke-result": "skipped", "rollback-result": "skipped"}
+    },
+    {
+      "name": "revision-failure",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Failed", "health": "Unhealthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "revision-result": "failure", "smoke-result": "skipped", "rollback-result": "success", "worker-updates": 2, "smoke-starts": 1}
+    },
+    {
+      "name": "worker-update-failure",
+      "migration": {"status": "Succeeded"},
+      "worker_update_success": false,
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "revision-result": "failure", "smoke-result": "skipped", "rollback-result": "success", "worker-updates": 2, "smoke-starts": 1}
+    },
+    {
+      "name": "revision-timeout",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioning", "health": "Unknown", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "revision-result": "failure", "smoke-result": "skipped", "rollback-result": "success", "worker-updates": 2, "smoke-starts": 1}
+    },
+    {
+      "name": "smoke-failure",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Failed", "Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "revision-result": "success", "smoke-result": "failure", "rollback-result": "success", "worker-updates": 2, "smoke-starts": 2}
+    },
+    {
+      "name": "rollback-failure",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": true,
+      "revision": {
+        "new": {"provisioning": "Failed", "health": "Unhealthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Failed", "health": "Unhealthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "revision-result": "failure", "smoke-result": "skipped", "rollback-result": "failure", "worker-updates": 2, "smoke-starts": 0}
+    },
+    {
+      "name": "prior-digest-capture-failure",
+      "migration": {"status": "Succeeded"},
+      "prior_image": "ghcr.io/chanakya-net/whatsapp-messaging/worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "prior_capture_success": false,
+      "revision": {
+        "new": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        "rollback": {"provisioning": "Provisioned", "health": "Healthy", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+      },
+      "smoke": {"statuses": ["Succeeded"]},
+      "expected": {"exit": 1, "migration-result": "success", "prior-digest": "unavailable", "revision-result": "skipped", "smoke-result": "skipped", "rollback-result": "skipped"}
+    }
+  ],
+  "egress_failures": [
+    "dev-collection",
+    "prod-collection",
+    "retained-generation",
+    "retained-plan",
+    "retained-apply",
+    "exact-generation",
+    "exact-plan",
+    "exact-apply",
+    "azure-list",
+    "azure-broad-rule",
+    "final-divergence"
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "format_version": "1.2",
+  "planned_values": {
+    "outputs": {
+      "container_app_secret_references": {
+        "sensitive": false,
+        "value": {
+          "rabbitmq-connection-string": {
+            "identity": "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-worker-dev-cin-042",
+            "key_vault_secret_id": "https://kv-msgbr-dev-cin-042.vault.azure.net/secrets/rabbitmq-connection-string",
+            "name": "rabbitmq-connection-string"
+          },
+          "new-relic-otlp-headers": {
+            "identity": "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-worker-dev-cin-042",
+            "key_vault_secret_id": "https://kv-msgbr-dev-cin-042.vault.azure.net/secrets/new-relic-otlp-headers",
+            "name": "new-relic-otlp-headers"
+          },
+          "whatsapp-provider-placeholder": {
+            "identity": "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-worker-dev-cin-042",
+            "key_vault_secret_id": "https://kv-msgbr-dev-cin-042.vault.azure.net/secrets/whatsapp-provider-placeholder",
+            "name": "whatsapp-provider-placeholder"
+          },
+          "email-provider-placeholder": {
+            "identity": "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-messagebridge-dev-centralindia-042/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-worker-dev-cin-042",
+            "key_vault_secret_id": "https://kv-msgbr-dev-cin-042.vault.azure.net/secrets/email-provider-placeholder",
+            "name": "email-provider-placeholder"
+          }
+        }
+      }
+    },
+    "root_module": {
+      "resources": [
+        {
+          "address": "module.key_vault.azurerm_key_vault.this",
+          "mode": "managed",
+          "type": "azurerm_key_vault",
+          "values": {
+            "name": "kv-msgbr-dev-cin-042",
+            "purge_protection_enabled": true,
+            "rbac_authorization_enabled": true,
+            "vault_uri": "https://kv-msgbr-dev-cin-042.vault.azure.net/"
+          }
+        }
+      ]
+    }
+  }
+}

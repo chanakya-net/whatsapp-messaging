@@ -34,6 +34,25 @@ public sealed class TransportRetryOptionsTests
     }
 
     [Fact]
+    public void EffectiveDelayedRedeliveryIntervals_UsesApprovedSchedule_WhenUnset()
+    {
+        var options = new TransportRetryOptions();
+
+        options.EffectiveDelayedRedeliveryIntervals.ShouldBe(
+            TransportRetryOptions.DefaultDelayedRedeliveryIntervals);
+        options.ImmediateRetryCount.ShouldBe(3);
+    }
+
+    [Fact]
+    public void EffectiveDelayedRedeliveryIntervals_UsesConfiguredSchedule()
+    {
+        var intervals = new[] { TimeSpan.FromMinutes(2), TimeSpan.FromMinutes(20) };
+        var options = new TransportRetryOptions { DelayedRedeliveryIntervals = intervals };
+
+        options.EffectiveDelayedRedeliveryIntervals.ShouldBe(intervals);
+    }
+
+    [Fact]
     public void Options_Bind_ImmediateRetryCount_From_Configuration()
     {
         var config = new ConfigurationBuilder()

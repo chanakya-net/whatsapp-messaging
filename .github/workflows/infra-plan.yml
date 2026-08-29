@@ -1,0 +1,319 @@
+name: Infrastructure PR plan
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+    paths:
+      - ".tofu/**"
+      - "scripts/infra/**"
+      - "scripts/db/**"
+      - ".github/workflows/infra-plan.yml"
+      - ".github/scripts/upsert-infra-plan-comment.sh"
+      - ".github/scripts/tests/infra-plan-workflow-contract.test.sh"
+      - ".github/scripts/tests/upsert-infra-plan-comment.test.sh"
+      - ".github/scripts/tests/fixtures/infra-plan/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  offline-checks:
+    name: Offline format, validate, and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.12.5
+          tofu_wrapper: false
+
+      - name: Check OpenTofu formatting
+        run: tofu fmt -check -recursive .tofu
+
+      - name: Initialize, validate, and test every OpenTofu root
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          while IFS= read -r versions_file; do
+            root="${versions_file%/versions.tf}"
+            tofu -chdir="$root" init -backend=false -input=false
+            tofu -chdir="$root" validate
+            tofu -chdir="$root" test
+          done < <(find .tofu -name versions.tf -print | sort)
+
+      - name: Run OpenTofu shell contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          while IFS= read -r test_script; do
+            bash "$test_script"
+          done < <(find .tofu -path '*/tests/*.test.sh' -print | sort)
+
+      - name: Run infrastructure workflow contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash .github/scripts/tests/infra-plan-workflow-contract.test.sh
+          bash .github/scripts/tests/upsert-infra-plan-comment.test.sh
+
+  trusted-plan:
+    name: Plan ${{ matrix.layer }}
+    needs: offline-checks
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - layer: shared
+            layer_upper: SHARED
+            root: .tofu/envs/shared
+          - layer: dev
+            layer_upper: DEV
+            root: .tofu/envs/dev
+          - layer: prod
+            layer_upper: PROD
+            root: .tofu/envs/prod
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_SHARED: ${{ vars.TOFU_STATE_CONTAINER_SHARED }}
+      TOFU_STATE_CONTAINER_DEV: ${{ vars.TOFU_STATE_CONTAINER_DEV }}
+      TOFU_STATE_CONTAINER_PROD: ${{ vars.TOFU_STATE_CONTAINER_PROD }}
+      TOFU_STATE_KEY_SHARED: ${{ vars.TOFU_STATE_KEY_SHARED }}
+      TOFU_STATE_KEY_DEV: ${{ vars.TOFU_STATE_KEY_DEV }}
+      TOFU_STATE_KEY_PROD: ${{ vars.TOFU_STATE_KEY_PROD }}
+      TOFU_PLAN_VARS_SHARED: ${{ vars.TOFU_PLAN_VARS_SHARED }}
+      TOFU_PLAN_VARS_DEV: ${{ vars.TOFU_PLAN_VARS_DEV }}
+      TOFU_PLAN_VARS_PROD: ${{ vars.TOFU_PLAN_VARS_PROD }}
+    steps:
+      - name: Check out trusted pull request
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.12.5
+          tofu_wrapper: false
+
+      - name: Validate and prepare non-secret plan inputs
+        shell: bash
+        env:
+          LAYER: ${{ matrix.layer }}
+          LAYER_UPPER: ${{ matrix.layer_upper }}
+          ROOT: ${{ matrix.root }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          plan_vars_name="TOFU_PLAN_VARS_${LAYER_UPPER}"
+          state_container_name="TOFU_STATE_CONTAINER_${LAYER_UPPER}"
+          state_key_name="TOFU_STATE_KEY_${LAYER_UPPER}"
+          plan_vars_json="${!plan_vars_name-}"
+          state_container="${!state_container_name-}"
+          state_key="${!state_key_name-}"
+
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          bootstrap_serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$bootstrap_serial" ]] || exit 1
+          [[ "$state_container" == "$LAYER" ]] || exit 1
+          [[ "$state_key" == "messagebridge/$LAYER.tfstate" ]] || exit 1
+          [[ "$ARM_TENANT_ID" =~ ^[0-9a-fA-F-]{36}$ && "$ARM_SUBSCRIPTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+
+          case "$LAYER" in
+            shared)
+              allowed='["alert_email","entra_administrator","reviewed_egress_ranges","tags"]'
+              required='["alert_email","entra_administrator","reviewed_egress_ranges"]'
+              ;;
+            dev|prod)
+              allowed='["alert_email","operator_identity","migration_image","worker_image","worker_allowed_tenant_ids","worker_otlp_endpoint","tags"]'
+              required='["alert_email","operator_identity","migration_image"]'
+              ;;
+            *) exit 1 ;;
+          esac
+
+          jq -e --argjson allowed "$allowed" --argjson required "$required" '
+            type == "object" and
+            ((keys - $allowed) | length == 0) and
+            (($required - keys) | length == 0) and
+            ([paths | .[-1] | select(type == "string") | ascii_downcase |
+              select(test("secret|token|password|credential|connection"))] | length == 0)
+          ' <<<"$plan_vars_json" >/dev/null 2>&1 || exit 1
+
+          if [[ "$LAYER" == shared ]]; then
+            jq -e '
+              def uuid: type == "string" and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$");
+              (.alert_email | type == "string" and test("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$")) and
+              (.entra_administrator | type == "object" and
+                ((keys | sort) == ["object_id", "principal_name", "principal_type"]) and
+                (.object_id | uuid) and (.principal_name | type == "string" and length > 0) and
+                (.principal_type | IN("Group", "ServicePrincipal", "User"))) and
+              (.reviewed_egress_ranges | type == "object" and length > 0 and
+                ([.[]] | length == (unique | length)) and
+                all(to_entries[];
+                  (.value | test("^[0-9]{1,3}(\\.[0-9]{1,3}){3}/32$")) and
+                  ((.value | sub("/32$"; "") | split(".") | map(tonumber)) as $octets |
+                    all($octets[]; . >= 0 and . <= 255)) and
+                  (.key == ("ip-" + (.value | sub("/32$"; "") | gsub("\\."; "-")))) and
+                  (.value != "0.0.0.0/32"))) and
+              ((.tags? // {}) | type == "object" and all(values[]; type == "string"))
+            ' <<<"$plan_vars_json" >/dev/null 2>&1 || exit 1
+          else
+            jq -e '
+              def uuid: type == "string" and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$");
+              def image: type == "object" and ((keys | sort) == ["digest", "repository"]) and
+                (.repository | type == "string") and (.digest | type == "string" and test("^[0-9a-f]{64}$"));
+              (.alert_email | type == "string" and test("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$")) and
+              (.operator_identity | type == "object" and
+                ((keys | sort) == ["principal_id", "principal_type"]) and
+                (.principal_id | uuid) and (.principal_type | IN("Group", "ServicePrincipal", "User"))) and
+              (.migration_image | (image and
+                .repository == "ghcr.io/chanakya-net/whatsapp-messaging/migrate")) and
+              (.worker_image == null or (.worker_image | image)) and
+              (.worker_otlp_endpoint == null or
+                (.worker_otlp_endpoint | type == "string" and test("^https://[^[:space:]]+$"))) and
+              (.worker_allowed_tenant_ids == null or (.worker_allowed_tenant_ids |
+                type == "array" and all(.[]; type == "string" and length > 0 and (contains(",") | not)))) and
+              ((.tags? // {}) | type == "object" and all(values[]; type == "string"))
+            ' <<<"$plan_vars_json" >/dev/null 2>&1 || exit 1
+          fi
+
+      - name: Sign in with read-only plan identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Initialize remote state and create saved plan
+        id: plan
+        shell: bash
+        env:
+          LAYER: ${{ matrix.layer }}
+          LAYER_UPPER: ${{ matrix.layer_upper }}
+          ROOT: ${{ matrix.root }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          RUNTIME_DIR="$(mktemp -d "$RUNNER_TEMP/infra-plan-${LAYER}.XXXXXX")"
+          trap 'rm -rf -- "$RUNTIME_DIR"' EXIT
+          plan_vars_name="TOFU_PLAN_VARS_${LAYER_UPPER}"
+          plan_vars_json="${!plan_vars_name}"
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          bootstrap_serial="${BASH_REMATCH[1]}"
+          jq --arg tenant "$ARM_TENANT_ID" --arg subscription "$ARM_SUBSCRIPTION_ID" \
+            --arg serial "$bootstrap_serial" --arg repository "$REPOSITORY" \
+            '. + {tenant_id: $tenant, subscription_id: $subscription,
+              bootstrap_serial: $serial, repository: $repository}' \
+            <<<"$plan_vars_json" >"$RUNTIME_DIR/plan.tfvars.json"
+
+          state_container_name="TOFU_STATE_CONTAINER_${LAYER_UPPER}"
+          state_key_name="TOFU_STATE_KEY_${LAYER_UPPER}"
+          state_container="${!state_container_name}"
+          state_key="${!state_key_name}"
+
+          if ! tofu -chdir="$ROOT" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$state_container" \
+            -backend-config="key=$state_key" \
+            -backend-config="use_azuread_auth=true" >"$RUNTIME_DIR/init.log" 2>&1; then
+            printf 'OpenTofu initialization failed for %s.\n' "$LAYER" >&2
+            exit 1
+          fi
+
+          if tofu -chdir="$ROOT" plan -input=false -lock=false -detailed-exitcode \
+            -var-file="$RUNTIME_DIR/plan.tfvars.json" -out="$RUNTIME_DIR/plan.bin" \
+            >"$RUNTIME_DIR/plan.log" 2>&1; then
+            plan_exit=0
+          else
+            plan_exit=$?
+          fi
+          if [[ $plan_exit -ne 0 && $plan_exit -ne 2 ]]; then
+            printf 'OpenTofu planning failed for %s.\n' "$LAYER" >&2
+            exit 1
+          fi
+
+          if ! tofu -chdir="$ROOT" show -json "$RUNTIME_DIR/plan.bin" \
+            >"$RUNTIME_DIR/plan.json" 2>"$RUNTIME_DIR/show.log"; then
+            printf 'OpenTofu plan conversion failed for %s.\n' "$LAYER" >&2
+            exit 1
+          fi
+          summary_file="$RUNNER_TEMP/infra-plan-summary-$LAYER.md"
+          bash .github/scripts/upsert-infra-plan-comment.sh render "$LAYER" \
+            "$RUNTIME_DIR/plan.json" "$summary_file"
+
+      - name: Upload sanitized plan summary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: infra-plan-summary-${{ matrix.layer }}
+          path: ${{ runner.temp }}/infra-plan-summary-${{ matrix.layer }}.md
+          if-no-files-found: error
+          retention-days: 1
+
+  plan-comments:
+    name: Update infrastructure plan comments
+    needs: trusted-plan
+    if: >-
+      needs.trusted-plan.result == 'success' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Check out trusted pull request
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Download sanitized plan summaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: infra-plan-summary-*
+          path: ${{ runner.temp }}/infra-plan-summaries
+          merge-multiple: true
+
+      - name: Upsert one bounded comment per layer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+          SUMMARY_DIR: ${{ runner.temp }}/infra-plan-summaries
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          summaries=("$SUMMARY_DIR"/*.md)
+          ((${#summaries[@]} == 3)) || exit 1
+          for layer in shared dev prod; do
+            summary_file="$SUMMARY_DIR/infra-plan-summary-$layer.md"
+            [[ -f "$summary_file" && ! -L "$summary_file" ]] || exit 1
+            bash .github/scripts/upsert-infra-plan-comment.sh upsert "$layer" \
+              "$summary_file" "$REPOSITORY" "$PR_NUMBER"
+          done

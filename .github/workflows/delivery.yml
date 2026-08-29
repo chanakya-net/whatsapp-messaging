@@ -1,0 +1,1654 @@
+name: Ordered main delivery
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Delivery operation
+        type: choice
+        required: true
+        default: publish
+        options:
+          - publish
+          - dev
+          - prod
+          - reload-secrets
+      environment:
+        description: Secret reload environment
+        type: choice
+        required: true
+        default: none
+        options:
+          - none
+          - dev
+          - prod
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-delivery
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    name: Classify delivery changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      application: ${{ steps.classify.outputs.application }}
+      infrastructure: ${{ steps.classify.outputs.infrastructure }}
+      shared: ${{ steps.classify.outputs.shared }}
+      dev: ${{ steps.classify.outputs.dev }}
+      prod: ${{ steps.classify.outputs.prod }}
+      layers: ${{ steps.classify.outputs.layers }}
+      delivery-target: ${{ steps.classify.outputs.delivery-target }}
+      delivery-environment: ${{ steps.classify.outputs.delivery-environment }}
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed delivery layers
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DELIVERY_TARGET: ${{ github.event.inputs.target }}
+          DELIVERY_ENVIRONMENT: ${{ github.event.inputs.environment }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          application=false infrastructure=false shared=false dev=false prod=false
+          delivery_target=automatic delivery_environment=none
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            case "$DELIVERY_TARGET:$DELIVERY_ENVIRONMENT" in
+              publish:none|dev:none|prod:none)
+                application=true
+                delivery_target="$DELIVERY_TARGET" ;;
+              reload-secrets:dev|reload-secrets:prod)
+                delivery_target=reload-secrets
+                delivery_environment="$DELIVERY_ENVIRONMENT" ;;
+              *)
+                printf 'Invalid manual delivery selection.\n' >&2
+                exit 1 ;;
+            esac
+          else
+            changed_paths_file="$(mktemp "$RUNNER_TEMP/changed-paths.XXXXXX")"
+            trap 'rm -f -- "$changed_paths_file"' EXIT
+            if [[ "$BEFORE_SHA" =~ ^0{40}$ ]]; then
+              git ls-tree -r --name-only -z "$AFTER_SHA" >"$changed_paths_file"
+            else
+              git diff --name-only -z "$BEFORE_SHA" "$AFTER_SHA" >"$changed_paths_file"
+            fi
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                .tofu/envs/shared/*|.tofu/modules/database/*)
+                  infrastructure=true; shared=true ;;
+                .tofu/envs/dev/*)
+                  infrastructure=true; dev=true ;;
+                .tofu/envs/prod/*)
+                  infrastructure=true; prod=true ;;
+                .tofu/modules/container-environment/*|.tofu/modules/key-vault/*|.tofu/modules/worker-workload/*)
+                  infrastructure=true; dev=true; prod=true ;;
+                .tofu/modules/metric-alerts/*)
+                  infrastructure=true; shared=true; dev=true; prod=true ;;
+                .tofu/*|scripts/infra/*|scripts/db/*)
+                  infrastructure=true; shared=true; dev=true; prod=true ;;
+                .github/scripts/reconcile-postgres-egress.sh|.github/scripts/tests/reconcile-postgres-egress.test.sh|.github/scripts/tests/fixtures/postgres-egress/*)
+                  infrastructure=true; shared=true; dev=true; prod=true ;;
+                .github/workflows/delivery.yml|.github/scripts/tests/delivery-workflow-contract.test.sh|.github/scripts/tests/delivery-release-contract.inc.sh|.github/scripts/tests/fixtures/delivery/*)
+                  application=true; infrastructure=true; shared=true; dev=true; prod=true ;;
+                src/*|tests/*|eng/*|Directory.*|global.json|MessageBridge*.sln*|.config/*|.github/workflows/_validation.yml|.github/workflows/_publish-images.yml)
+                  application=true ;;
+              esac
+            done <"$changed_paths_file"
+          fi
+          layers=()
+          [[ "$application" == true ]] && layers+=(application)
+          [[ "$shared" == true ]] && layers+=(shared)
+          [[ "$dev" == true ]] && layers+=(dev)
+          [[ "$prod" == true ]] && layers+=(prod)
+          layer_list=none
+          ((${#layers[@]} == 0)) || layer_list="$(IFS=,; echo "${layers[*]}")"
+          {
+            printf 'application=%s\ninfrastructure=%s\n' "$application" "$infrastructure"
+            printf 'shared=%s\ndev=%s\nprod=%s\nlayers=%s\n' "$shared" "$dev" "$prod" "$layer_list"
+            printf 'delivery-target=%s\ndelivery-environment=%s\n' "$delivery_target" "$delivery_environment"
+          } >>"$GITHUB_OUTPUT"
+
+  validation:
+    name: Validate delivery commit
+    uses: ./.github/workflows/_validation.yml
+
+  publish-images:
+    name: Publish verified application images
+    needs: [changes, validation]
+    if: >-
+      needs.changes.outputs.application == 'true' && needs.validation.result == 'success' &&
+      needs.changes.outputs.delivery-target != 'reload-secrets'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/_publish-images.yml
+
+  shared-retained:
+    name: Apply shared retained egress guard
+    needs: [changes, validation]
+    if: needs.changes.outputs.infrastructure == 'true' && needs.validation.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: shared
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      plan-result: ${{ steps.apply.outputs.plan-result }}
+      apply-result: ${{ steps.apply.outputs.apply-result }}
+      retained-count: ${{ steps.apply.outputs.retained-count }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_SHARED }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_SHARED: ${{ vars.TOFU_STATE_CONTAINER_SHARED }}
+      TOFU_STATE_KEY_SHARED: ${{ vars.TOFU_STATE_KEY_SHARED }}
+      TOFU_PLAN_VARS_SHARED: ${{ vars.TOFU_PLAN_VARS_SHARED }}
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+
+      - name: Sign in with shared apply identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_SHARED }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Plan and apply retained shared firewall map
+        id: apply
+        shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/shared-retained.XXXXXX")"
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          root=.tofu/envs/shared
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_SHARED" == shared ]] || exit 1
+          [[ "$TOFU_STATE_KEY_SHARED" == messagebridge/shared.tfstate ]] || exit 1
+          [[ "$ARM_TENANT_ID" =~ ^[0-9a-fA-F-]{36}$ && "$ARM_SUBSCRIPTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+          jq -e '
+            def uuid: type == "string" and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$");
+            type == "object" and
+            ((keys - ["alert_email","entra_administrator","reviewed_egress_ranges","tags"]) | length == 0) and
+            (["alert_email","entra_administrator","reviewed_egress_ranges"] - keys | length == 0) and
+            ([paths | .[-1] | select(type == "string") | ascii_downcase |
+              select(test("secret|token|password|credential|connection"))] | length == 0) and
+            (.alert_email | type == "string" and test("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$")) and
+            (.entra_administrator | type == "object" and
+              ((keys | sort) == ["object_id","principal_name","principal_type"]) and
+              (.object_id | uuid) and (.principal_name | type == "string" and length > 0) and
+              (.principal_type | IN("Group","ServicePrincipal","User"))) and
+            ((.tags? // {}) | type == "object" and all(values[]; type == "string"))
+          ' <<<"$TOFU_PLAN_VARS_SHARED" >/dev/null 2>&1 || exit 1
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_SHARED" \
+            -backend-config="key=$TOFU_STATE_KEY_SHARED" \
+            -backend-config="use_azuread_auth=true" >"$runtime_dir/init.log" 2>&1; then
+            printf 'Shared OpenTofu initialization failed.\n' >&2; exit 1
+          fi
+          if ! tofu -chdir="$root" output -json postgres_firewall_ranges \
+            >"$runtime_dir/prior-ranges.json" 2>"$runtime_dir/output.log"; then
+            printf 'Prior shared egress state unavailable.\n' >&2; exit 1
+          fi
+          resource_group="rg-messagebridge-shared-centralindia-$serial"
+          server_name="psql-messagebridge-shared-cin-$serial"
+          bash .github/scripts/reconcile-postgres-egress.sh retained \
+            --reviewed-ranges-file "$runtime_dir/prior-ranges.json" \
+            --resource-group "$resource_group" --server-name "$server_name" \
+            --output "$runtime_dir/egress.tfvars.json" >/dev/null
+          jq --arg tenant "$ARM_TENANT_ID" --arg subscription "$ARM_SUBSCRIPTION_ID" \
+            --arg serial "$serial" --arg repository "$REPOSITORY" \
+            '. + {tenant_id: $tenant, subscription_id: $subscription,
+              bootstrap_serial: $serial, repository: $repository}' \
+            <<<"$TOFU_PLAN_VARS_SHARED" >"$runtime_dir/base.tfvars.json"
+          jq -s '.[0] + .[1]' "$runtime_dir/base.tfvars.json" \
+            "$runtime_dir/egress.tfvars.json" >"$runtime_dir/apply.tfvars.json"
+          if ! tofu -chdir="$root" plan -input=false -lock-timeout=5m \
+            -var-file="$runtime_dir/apply.tfvars.json" -out="$runtime_dir/plan.bin" \
+            >"$runtime_dir/plan.log" 2>&1; then
+            printf 'plan-result=failure\n' >>"$GITHUB_OUTPUT"
+            printf 'Shared retained planning failed.\n' >&2; exit 1
+          fi
+          printf 'plan-result=success\n' >>"$GITHUB_OUTPUT"
+          if ! tofu -chdir="$root" apply -input=false -lock-timeout=5m \
+            "$runtime_dir/plan.bin" >"$runtime_dir/apply.log" 2>&1; then
+            printf 'apply-result=failure\n' >>"$GITHUB_OUTPUT"
+            printf 'Shared retained apply failed.\n' >&2; exit 1
+          fi
+          printf 'apply-result=success\n' >>"$GITHUB_OUTPUT"
+          jq -r '"retained-count=" + (.reviewed_egress_ranges | length | tostring)' \
+            "$runtime_dir/egress.tfvars.json" >>"$GITHUB_OUTPUT"
+
+  dev-infrastructure:
+    name: Apply development infrastructure
+    needs: [changes, validation, shared-retained]
+    if: >-
+      needs.changes.outputs.infrastructure == 'true' &&
+      needs.validation.result == 'success' && needs.shared-retained.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      plan-result: ${{ steps.apply.outputs.plan-result }}
+      apply-result: ${{ steps.apply.outputs.apply-result }}
+      egress-count: ${{ steps.apply.outputs.egress-count }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEV }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_DEV: ${{ vars.TOFU_STATE_CONTAINER_DEV }}
+      TOFU_STATE_KEY_DEV: ${{ vars.TOFU_STATE_KEY_DEV }}
+      TOFU_PLAN_VARS_DEV: ${{ vars.TOFU_PLAN_VARS_DEV }}
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+      - name: Sign in with development deploy identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEV }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Apply changed development root and collect reviewed egress
+        id: apply
+        shell: bash
+        env:
+          APPLY_LAYER: ${{ needs.changes.outputs.dev }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/dev-infrastructure.XXXXXX")"
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          root=.tofu/envs/dev
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_DEV" == dev && "$TOFU_STATE_KEY_DEV" == messagebridge/dev.tfstate ]] || exit 1
+          [[ "$ARM_TENANT_ID" =~ ^[0-9a-fA-F-]{36}$ && "$ARM_SUBSCRIPTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+          jq -e '
+            def uuid: type == "string" and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$");
+            def image: type == "object" and ((keys | sort) == ["digest","repository"]) and
+              (.repository | type == "string") and (.digest | type == "string" and test("^[0-9a-f]{64}$"));
+            type == "object" and
+            ((keys - ["alert_email","operator_identity","migration_image","worker_image","worker_allowed_tenant_ids","worker_otlp_endpoint","tags"]) | length == 0) and
+            (["alert_email","operator_identity","migration_image"] - keys | length == 0) and
+            ([paths | .[-1] | select(type == "string") | ascii_downcase |
+              select(test("secret|token|password|credential|connection"))] | length == 0) and
+            (.alert_email | type == "string" and test("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$")) and
+            (.operator_identity | type == "object" and
+              ((keys | sort) == ["principal_id","principal_type"]) and (.principal_id | uuid) and
+              (.principal_type | IN("Group","ServicePrincipal","User"))) and
+            (.migration_image | image and .repository == "ghcr.io/chanakya-net/whatsapp-messaging/migrate") and
+            (.worker_image == null or (.worker_image | image)) and
+            (.worker_otlp_endpoint == null or (.worker_otlp_endpoint | type == "string" and test("^https://[^[:space:]]+$"))) and
+            (.worker_allowed_tenant_ids == null or (.worker_allowed_tenant_ids | type == "array" and
+              all(.[]; type == "string" and length > 0 and (contains(",") | not)))) and
+            ((.tags? // {}) | type == "object" and all(values[]; type == "string"))
+          ' <<<"$TOFU_PLAN_VARS_DEV" >/dev/null 2>&1 || exit 1
+          jq --arg tenant "$ARM_TENANT_ID" --arg subscription "$ARM_SUBSCRIPTION_ID" \
+            --arg serial "$serial" --arg repository "$REPOSITORY" \
+            '. + {tenant_id: $tenant, subscription_id: $subscription,
+              bootstrap_serial: $serial, repository: $repository}' \
+            <<<"$TOFU_PLAN_VARS_DEV" >"$runtime_dir/apply.tfvars.json"
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_DEV" \
+            -backend-config="key=$TOFU_STATE_KEY_DEV" -backend-config="use_azuread_auth=true" \
+            >"$runtime_dir/init.log" 2>&1; then
+            printf 'Development OpenTofu initialization failed.\n' >&2; exit 1
+          fi
+          if [[ "$APPLY_LAYER" == true ]]; then
+            if ! tofu -chdir="$root" plan -input=false -lock-timeout=5m \
+              -var-file="$runtime_dir/apply.tfvars.json" -out="$runtime_dir/plan.bin" \
+              >"$runtime_dir/plan.log" 2>&1; then
+              printf 'plan-result=failure\n' >>"$GITHUB_OUTPUT"
+              printf 'Development planning failed.\n' >&2; exit 1
+            fi
+            printf 'plan-result=success\n' >>"$GITHUB_OUTPUT"
+            if ! tofu -chdir="$root" apply -input=false -lock-timeout=5m \
+              "$runtime_dir/plan.bin" >"$runtime_dir/apply.log" 2>&1; then
+              printf 'apply-result=failure\n' >>"$GITHUB_OUTPUT"
+              printf 'Development apply failed.\n' >&2; exit 1
+            fi
+            printf 'apply-result=success\n' >>"$GITHUB_OUTPUT"
+          else
+            printf 'plan-result=skipped\napply-result=skipped\n' >>"$GITHUB_OUTPUT"
+          fi
+          if ! tofu -chdir="$root" output -json reviewed_postgres_egress \
+            >"$runtime_dir/egress.json" 2>"$runtime_dir/output.log"; then
+            printf 'Development egress collection failed.\n' >&2; exit 1
+          fi
+          jq -e --arg expected dev '
+            def cidr: type == "string" and
+              test("^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}/32$") and . != "0.0.0.0/32";
+            ["container_environment","worker","migration","smoke"] as $required | . as $root |
+            type == "object" and .environment == $expected and (.sources | keys | sort) == ($required | sort) and
+            all($required[]; . as $source | ($root.sources[$source] | type == "array" and length > 0 and all(.[]; cidr))) and
+            (.ranges | type == "array" and length > 0 and all(.[]; cidr)) and
+            (([$required[] as $source | $root.sources[$source][]] | unique | sort) == ($root.ranges | unique | sort))
+          ' "$runtime_dir/egress.json" >/dev/null || exit 1
+          install -m 600 "$runtime_dir/egress.json" "$RUNNER_TEMP/reviewed-postgres-egress-dev.json"
+          jq -r '"egress-count=" + (.ranges | unique | length | tostring)' \
+            "$runtime_dir/egress.json" >>"$GITHUB_OUTPUT"
+      - name: Upload validated development egress handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: postgres-egress-dev-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/reviewed-postgres-egress-dev.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove development handoff
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/reviewed-postgres-egress-dev.json"
+
+  prod-infrastructure:
+    name: Apply production infrastructure
+    needs: [changes, validation, shared-retained, dev-infrastructure]
+    if: >-
+      needs.changes.outputs.infrastructure == 'true' && needs.validation.result == 'success' &&
+      needs.shared-retained.result == 'success' && needs.dev-infrastructure.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      plan-result: ${{ steps.apply.outputs.plan-result }}
+      apply-result: ${{ steps.apply.outputs.apply-result }}
+      egress-count: ${{ steps.apply.outputs.egress-count }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PROD }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_PROD: ${{ vars.TOFU_STATE_CONTAINER_PROD }}
+      TOFU_STATE_KEY_PROD: ${{ vars.TOFU_STATE_KEY_PROD }}
+      TOFU_PLAN_VARS_PROD: ${{ vars.TOFU_PLAN_VARS_PROD }}
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+      - name: Sign in with production deploy identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PROD }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Apply changed production root and collect reviewed egress
+        id: apply
+        shell: bash
+        env:
+          APPLY_LAYER: ${{ needs.changes.outputs.prod }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/prod-infrastructure.XXXXXX")"
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          root=.tofu/envs/prod
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_PROD" == prod && "$TOFU_STATE_KEY_PROD" == messagebridge/prod.tfstate ]] || exit 1
+          [[ "$ARM_TENANT_ID" =~ ^[0-9a-fA-F-]{36}$ && "$ARM_SUBSCRIPTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+          jq -e '
+            def uuid: type == "string" and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$");
+            def image: type == "object" and ((keys | sort) == ["digest","repository"]) and
+              (.repository | type == "string") and (.digest | type == "string" and test("^[0-9a-f]{64}$"));
+            type == "object" and
+            ((keys - ["alert_email","operator_identity","migration_image","worker_image","worker_allowed_tenant_ids","worker_otlp_endpoint","tags"]) | length == 0) and
+            (["alert_email","operator_identity","migration_image"] - keys | length == 0) and
+            ([paths | .[-1] | select(type == "string") | ascii_downcase |
+              select(test("secret|token|password|credential|connection"))] | length == 0) and
+            (.alert_email | type == "string" and test("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$")) and
+            (.operator_identity | type == "object" and
+              ((keys | sort) == ["principal_id","principal_type"]) and (.principal_id | uuid) and
+              (.principal_type | IN("Group","ServicePrincipal","User"))) and
+            (.migration_image | image and .repository == "ghcr.io/chanakya-net/whatsapp-messaging/migrate") and
+            (.worker_image == null or (.worker_image | image)) and
+            (.worker_otlp_endpoint == null or (.worker_otlp_endpoint | type == "string" and test("^https://[^[:space:]]+$"))) and
+            (.worker_allowed_tenant_ids == null or (.worker_allowed_tenant_ids | type == "array" and
+              all(.[]; type == "string" and length > 0 and (contains(",") | not)))) and
+            ((.tags? // {}) | type == "object" and all(values[]; type == "string"))
+          ' <<<"$TOFU_PLAN_VARS_PROD" >/dev/null 2>&1 || exit 1
+          jq --arg tenant "$ARM_TENANT_ID" --arg subscription "$ARM_SUBSCRIPTION_ID" \
+            --arg serial "$serial" --arg repository "$REPOSITORY" \
+            '. + {tenant_id: $tenant, subscription_id: $subscription,
+              bootstrap_serial: $serial, repository: $repository}' \
+            <<<"$TOFU_PLAN_VARS_PROD" >"$runtime_dir/apply.tfvars.json"
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_PROD" \
+            -backend-config="key=$TOFU_STATE_KEY_PROD" -backend-config="use_azuread_auth=true" \
+            >"$runtime_dir/init.log" 2>&1; then
+            printf 'Production OpenTofu initialization failed.\n' >&2; exit 1
+          fi
+          if [[ "$APPLY_LAYER" == true ]]; then
+            if ! tofu -chdir="$root" plan -input=false -lock-timeout=5m \
+              -var-file="$runtime_dir/apply.tfvars.json" -out="$runtime_dir/plan.bin" \
+              >"$runtime_dir/plan.log" 2>&1; then
+              printf 'plan-result=failure\n' >>"$GITHUB_OUTPUT"
+              printf 'Production planning failed.\n' >&2; exit 1
+            fi
+            printf 'plan-result=success\n' >>"$GITHUB_OUTPUT"
+            if ! tofu -chdir="$root" apply -input=false -lock-timeout=5m \
+              "$runtime_dir/plan.bin" >"$runtime_dir/apply.log" 2>&1; then
+              printf 'apply-result=failure\n' >>"$GITHUB_OUTPUT"
+              printf 'Production apply failed.\n' >&2; exit 1
+            fi
+            printf 'apply-result=success\n' >>"$GITHUB_OUTPUT"
+          else
+            printf 'plan-result=skipped\napply-result=skipped\n' >>"$GITHUB_OUTPUT"
+          fi
+          if ! tofu -chdir="$root" output -json reviewed_postgres_egress \
+            >"$runtime_dir/egress.json" 2>"$runtime_dir/output.log"; then
+            printf 'Production egress collection failed.\n' >&2; exit 1
+          fi
+          jq -e --arg expected prod '
+            def cidr: type == "string" and
+              test("^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}/32$") and . != "0.0.0.0/32";
+            ["container_environment","worker","migration","smoke"] as $required | . as $root |
+            type == "object" and .environment == $expected and (.sources | keys | sort) == ($required | sort) and
+            all($required[]; . as $source | ($root.sources[$source] | type == "array" and length > 0 and all(.[]; cidr))) and
+            (.ranges | type == "array" and length > 0 and all(.[]; cidr)) and
+            (([$required[] as $source | $root.sources[$source][]] | unique | sort) == ($root.ranges | unique | sort))
+          ' "$runtime_dir/egress.json" >/dev/null || exit 1
+          install -m 600 "$runtime_dir/egress.json" "$RUNNER_TEMP/reviewed-postgres-egress-prod.json"
+          jq -r '"egress-count=" + (.ranges | unique | length | tostring)' \
+            "$runtime_dir/egress.json" >>"$GITHUB_OUTPUT"
+      - name: Upload validated production egress handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: postgres-egress-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/reviewed-postgres-egress-prod.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove production handoff
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/reviewed-postgres-egress-prod.json"
+
+  shared-reconcile:
+    name: Reconcile exact shared PostgreSQL egress
+    needs: [changes, validation, shared-retained, dev-infrastructure, prod-infrastructure]
+    if: >-
+      needs.changes.outputs.infrastructure == 'true' && needs.validation.result == 'success' &&
+      needs.shared-retained.result == 'success' && needs.dev-infrastructure.result == 'success' &&
+      needs.prod-infrastructure.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: shared
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      retained-plan-result: ${{ steps.reconcile.outputs.retained-plan-result }}
+      retained-apply-result: ${{ steps.reconcile.outputs.retained-apply-result }}
+      exact-plan-result: ${{ steps.reconcile.outputs.exact-plan-result }}
+      exact-apply-result: ${{ steps.reconcile.outputs.exact-apply-result }}
+      verification-result: ${{ steps.reconcile.outputs.verification-result }}
+      retained-count: ${{ steps.reconcile.outputs.retained-count }}
+      exact-count: ${{ steps.reconcile.outputs.exact-count }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_SHARED }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_SHARED: ${{ vars.TOFU_STATE_CONTAINER_SHARED }}
+      TOFU_STATE_KEY_SHARED: ${{ vars.TOFU_STATE_KEY_SHARED }}
+      TOFU_PLAN_VARS_SHARED: ${{ vars.TOFU_PLAN_VARS_SHARED }}
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Download development egress handoff
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: postgres-egress-dev-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/postgres-egress-dev
+      - name: Download production egress handoff
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: postgres-egress-prod-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/postgres-egress-prod
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+      - name: Sign in with shared apply identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_SHARED }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Apply retained then exact egress and verify Azure
+        id: reconcile
+        shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/shared-reconcile.XXXXXX")"
+          trap 'rm -rf -- "$runtime_dir" "$RUNNER_TEMP/postgres-egress-dev" "$RUNNER_TEMP/postgres-egress-prod"' EXIT
+          root=.tofu/envs/shared
+          dev_file="$RUNNER_TEMP/postgres-egress-dev/reviewed-postgres-egress-dev.json"
+          prod_file="$RUNNER_TEMP/postgres-egress-prod/reviewed-postgres-egress-prod.json"
+          [[ -f "$dev_file" && ! -L "$dev_file" && -f "$prod_file" && ! -L "$prod_file" ]] || exit 1
+          [[ "$(find "$RUNNER_TEMP/postgres-egress-dev" -type f | wc -l | tr -d ' ')" == 1 ]] || exit 1
+          [[ "$(find "$RUNNER_TEMP/postgres-egress-prod" -type f | wc -l | tr -d ' ')" == 1 ]] || exit 1
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_SHARED" == shared && "$TOFU_STATE_KEY_SHARED" == messagebridge/shared.tfstate ]] || exit 1
+          [[ "$ARM_TENANT_ID" =~ ^[0-9a-fA-F-]{36}$ && "$ARM_SUBSCRIPTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+          jq -e '
+            def uuid: type == "string" and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$");
+            type == "object" and
+            ((keys - ["alert_email","entra_administrator","reviewed_egress_ranges","tags"]) | length == 0) and
+            (["alert_email","entra_administrator","reviewed_egress_ranges"] - keys | length == 0) and
+            ([paths | .[-1] | select(type == "string") | ascii_downcase |
+              select(test("secret|token|password|credential|connection"))] | length == 0) and
+            (.alert_email | type == "string" and test("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$")) and
+            (.entra_administrator | type == "object" and
+              ((keys | sort) == ["object_id","principal_name","principal_type"]) and
+              (.object_id | uuid) and (.principal_name | type == "string" and length > 0) and
+              (.principal_type | IN("Group","ServicePrincipal","User"))) and
+            ((.tags? // {}) | type == "object" and all(values[]; type == "string"))
+          ' <<<"$TOFU_PLAN_VARS_SHARED" >/dev/null 2>&1 || exit 1
+          jq --arg tenant "$ARM_TENANT_ID" --arg subscription "$ARM_SUBSCRIPTION_ID" \
+            --arg serial "$serial" --arg repository "$REPOSITORY" \
+            '. + {tenant_id: $tenant, subscription_id: $subscription,
+              bootstrap_serial: $serial, repository: $repository}' \
+            <<<"$TOFU_PLAN_VARS_SHARED" >"$runtime_dir/base.tfvars.json"
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_SHARED" \
+            -backend-config="key=$TOFU_STATE_KEY_SHARED" -backend-config="use_azuread_auth=true" \
+            >"$runtime_dir/init.log" 2>&1; then
+            printf 'Shared reconciliation initialization failed.\n' >&2; exit 1
+          fi
+          plan_apply() {
+            local stage=$1 plan_file=$2 variables_file=$3
+            if ! tofu -chdir="$root" plan -input=false -lock-timeout=5m \
+              -var-file="$variables_file" -out="$plan_file" >"$runtime_dir/$stage-plan.log" 2>&1; then
+              printf '%s-plan-result=failure\n' "$stage" >>"$GITHUB_OUTPUT"
+              printf 'Shared %s planning failed.\n' "$stage" >&2; exit 1
+            fi
+            printf '%s-plan-result=success\n' "$stage" >>"$GITHUB_OUTPUT"
+            if ! tofu -chdir="$root" apply -input=false -lock-timeout=5m \
+              "$plan_file" >"$runtime_dir/$stage-apply.log" 2>&1; then
+              printf '%s-apply-result=failure\n' "$stage" >>"$GITHUB_OUTPUT"
+              printf 'Shared %s apply failed.\n' "$stage" >&2; exit 1
+            fi
+            printf '%s-apply-result=success\n' "$stage" >>"$GITHUB_OUTPUT"
+          }
+          resource_group="rg-messagebridge-shared-centralindia-$serial"
+          server_name="psql-messagebridge-shared-cin-$serial"
+          bash .github/scripts/reconcile-postgres-egress.sh retained \
+            --dev-output-file "$dev_file" --prod-output-file "$prod_file" \
+            --resource-group "$resource_group" --server-name "$server_name" \
+            --output "$runtime_dir/retained.tfvars.json" >/dev/null
+          jq -s '.[0] + .[1]' "$runtime_dir/base.tfvars.json" \
+            "$runtime_dir/retained.tfvars.json" >"$runtime_dir/retained-apply.tfvars.json"
+          plan_apply retained "$runtime_dir/retained-plan.bin" "$runtime_dir/retained-apply.tfvars.json"
+          bash .github/scripts/reconcile-postgres-egress.sh exact \
+            --dev-output-file "$dev_file" --prod-output-file "$prod_file" \
+            --output "$runtime_dir/exact.tfvars.json" >/dev/null
+          jq -s '.[0] + .[1]' "$runtime_dir/base.tfvars.json" \
+            "$runtime_dir/exact.tfvars.json" >"$runtime_dir/exact-apply.tfvars.json"
+          plan_apply exact "$runtime_dir/exact-plan.bin" "$runtime_dir/exact-apply.tfvars.json"
+          bash .github/scripts/reconcile-postgres-egress.sh verify \
+            --dev-output-file "$dev_file" --prod-output-file "$prod_file" \
+            --resource-group "$resource_group" --server-name "$server_name" >/dev/null
+          printf 'verification-result=success\n' >>"$GITHUB_OUTPUT"
+          jq -r '"retained-count=" + (.reviewed_egress_ranges | length | tostring)' \
+            "$runtime_dir/retained.tfvars.json" >>"$GITHUB_OUTPUT"
+          jq -r '"exact-count=" + (.reviewed_egress_ranges | length | tostring)' \
+            "$runtime_dir/exact.tfvars.json" >>"$GITHUB_OUTPUT"
+      - name: Remove downloaded egress handoffs
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/postgres-egress-dev" "$RUNNER_TEMP/postgres-egress-prod"
+
+  infrastructure-complete:
+    name: Confirm infrastructure completion
+    needs: [changes, shared-retained, dev-infrastructure, prod-infrastructure, shared-reconcile]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      ready: ${{ steps.gate.outputs.ready }}
+      state: ${{ steps.gate.outputs.state }}
+    steps:
+      - name: Evaluate infrastructure completion
+        id: gate
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          INFRASTRUCTURE: ${{ needs.changes.outputs.infrastructure }}
+          SHARED_RETAINED_RESULT: ${{ needs.shared-retained.result }}
+          DEV_RESULT: ${{ needs.dev-infrastructure.result }}
+          PROD_RESULT: ${{ needs.prod-infrastructure.result }}
+          SHARED_RECONCILE_RESULT: ${{ needs.shared-reconcile.result }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$CHANGES_RESULT" == success ]] || exit 1
+          results=("$SHARED_RETAINED_RESULT" "$DEV_RESULT" "$PROD_RESULT" "$SHARED_RECONCILE_RESULT")
+          if [[ "$INFRASTRUCTURE" == true ]]; then
+            for result in "${results[@]}"; do [[ "$result" == success ]] || exit 1; done
+            printf 'ready=true\nstate=success\n' >>"$GITHUB_OUTPUT"
+          elif [[ "$INFRASTRUCTURE" == false ]]; then
+            for result in "${results[@]}"; do [[ "$result" == skipped ]] || exit 1; done
+            printf 'ready=true\nstate=skipped\n' >>"$GITHUB_OUTPUT"
+          else
+            exit 1
+          fi
+
+  application-ready:
+    name: Confirm future application readiness
+    needs: [changes, validation, publish-images, infrastructure-complete]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      ready: ${{ steps.gate.outputs.ready }}
+      worker-digest: ${{ steps.gate.outputs.worker-digest }}
+      migrate-digest: ${{ steps.gate.outputs.migrate-digest }}
+    steps:
+      - name: Evaluate application readiness
+        id: gate
+        shell: bash
+        env:
+          APPLICATION: ${{ needs.changes.outputs.application }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          VALIDATION_RESULT: ${{ needs.validation.result }}
+          IMAGES_RESULT: ${{ needs.publish-images.result }}
+          INFRASTRUCTURE_RESULT: ${{ needs.infrastructure-complete.result }}
+          WORKER_DIGEST: ${{ needs.publish-images.outputs.worker-digest }}
+          MIGRATE_DIGEST: ${{ needs.publish-images.outputs.migrate-digest }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$CHANGES_RESULT" == success && "$VALIDATION_RESULT" == success ]] || exit 1
+          [[ "$INFRASTRUCTURE_RESULT" == success ]] || exit 1
+          if [[ "$APPLICATION" == true ]]; then
+            [[ "$IMAGES_RESULT" == success ]] || exit 1
+            [[ "$WORKER_DIGEST" =~ ^[0-9a-f]{64}$ && "$MIGRATE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || exit 1
+            printf 'ready=true\nworker-digest=%s\nmigrate-digest=%s\n' \
+              "$WORKER_DIGEST" "$MIGRATE_DIGEST" >>"$GITHUB_OUTPUT"
+          elif [[ "$APPLICATION" == false ]]; then
+            [[ "$IMAGES_RESULT" == skipped ]] || exit 1
+            printf 'ready=false\nworker-digest=\nmigrate-digest=\n' >>"$GITHUB_OUTPUT"
+          else
+            exit 1
+          fi
+
+  dev-release:
+    name: Release verified application to development
+    needs: [changes, validation, application-ready, infrastructure-complete]
+    if: >-
+      needs.validation.result == 'success' && needs.application-ready.result == 'success' &&
+      needs.application-ready.outputs.ready == 'true' && needs.infrastructure-complete.result == 'success' &&
+      (needs.changes.outputs.delivery-target == 'automatic' ||
+      needs.changes.outputs.delivery-target == 'dev' || needs.changes.outputs.delivery-target == 'prod')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      worker-digest: ${{ steps.handoff.outputs.worker-digest }}
+      migrate-digest: ${{ steps.handoff.outputs.migrate-digest }}
+      handoff-artifact: ${{ steps.handoff.outputs.artifact-name }}
+      migration-result: ${{ steps.release.outputs.migration-result }}
+      prior-digest: ${{ steps.release.outputs.prior-digest }}
+      revision-result: ${{ steps.release.outputs.revision-result }}
+      smoke-result: ${{ steps.release.outputs.smoke-result }}
+      rollback-result: ${{ steps.release.outputs.rollback-result }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEV }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_DEV: ${{ vars.TOFU_STATE_CONTAINER_DEV }}
+      TOFU_STATE_KEY_DEV: ${{ vars.TOFU_STATE_KEY_DEV }}
+      WORKER_DIGEST: ${{ needs.application-ready.outputs.worker-digest }}
+      MIGRATE_DIGEST: ${{ needs.application-ready.outputs.migrate-digest }}
+      IMAGE_ROOT: ghcr.io/chanakya-net/whatsapp-messaging
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+      - name: Sign in with development deploy identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEV }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Resolve development runtime names
+        id: runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/dev-release.XXXXXX")"
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          root=.tofu/envs/dev
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_DEV" == dev && "$TOFU_STATE_KEY_DEV" == messagebridge/dev.tfstate ]] || exit 1
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_DEV" \
+            -backend-config="key=$TOFU_STATE_KEY_DEV" -backend-config="use_azuread_auth=true" \
+            >"$runtime_dir/init.log" 2>&1; then
+            printf 'Development release OpenTofu initialization failed.\n' >&2; exit 1
+          fi
+          if ! tofu -chdir="$root" output -json >"$runtime_dir/outputs.json" 2>"$runtime_dir/output.log"; then
+            printf 'Development runtime names unavailable.\n' >&2; exit 1
+          fi
+          jq -e '
+            [.migration_job_name.value, .smoke_job_name.value, .worker_name.value] |
+            all(.[]; type == "string" and test("^[a-z][a-z0-9-]{0,30}[a-z0-9]$"))
+          ' "$runtime_dir/outputs.json" >/dev/null || exit 1
+          {
+            jq -r '"migration-job-name=" + .migration_job_name.value' "$runtime_dir/outputs.json"
+            jq -r '"smoke-job-name=" + .smoke_job_name.value' "$runtime_dir/outputs.json"
+            jq -r '"worker-name=" + .worker_name.value' "$runtime_dir/outputs.json"
+            printf 'resource-group=rg-messagebridge-dev-centralindia-%s\n' "$serial"
+          } >>"$GITHUB_OUTPUT"
+      - name: Migrate, deploy, smoke, and roll back development
+        id: release
+        shell: bash
+        env:
+          MIGRATION_JOB_NAME: ${{ steps.runtime.outputs.migration-job-name }}
+          SMOKE_JOB_NAME: ${{ steps.runtime.outputs.smoke-job-name }}
+          WORKER_NAME: ${{ steps.runtime.outputs.worker-name }}
+          RESOURCE_GROUP: ${{ steps.runtime.outputs.resource-group }}
+        run: |
+          set -Eeuo pipefail
+          record() { printf '%s=%s\n' "$1" "$2" >>"$GITHUB_OUTPUT"; }
+          record migration-result pending
+          record prior-digest unavailable
+          record revision-result skipped
+          record smoke-result skipped
+          record rollback-result skipped
+
+          valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}[a-z0-9]$ ]]; }
+          valid_name "$MIGRATION_JOB_NAME" && valid_name "$SMOKE_JOB_NAME" && valid_name "$WORKER_NAME" || exit 1
+          [[ "$RESOURCE_GROUP" =~ ^rg-messagebridge-dev-centralindia-[0-9]{3}$ ]] || exit 1
+          [[ "$WORKER_DIGEST" =~ ^[0-9a-f]{64}$ && "$MIGRATE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          [[ "$IMAGE_ROOT" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]] || exit 1
+
+          migration_image="$IMAGE_ROOT/migrate@sha256:$MIGRATE_DIGEST"
+          worker_image="$IMAGE_ROOT/worker@sha256:$WORKER_DIGEST"
+          if ! az containerapp job update --name "$MIGRATION_JOB_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$migration_image" --output none; then
+            record migration-result failure; exit 1
+          fi
+          if ! bash .github/scripts/wait-for-container-app-job.sh --name "$MIGRATION_JOB_NAME" \
+            --resource-group "$RESOURCE_GROUP" --poll-budget "${MIGRATION_POLL_BUDGET:-30}" \
+            --timeout "${MIGRATION_TIMEOUT:-300}"; then
+            record migration-result failure; exit 1
+          fi
+          record migration-result success
+
+          if ! prior_image="$(az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query 'properties.template.containers[0].image' --output tsv 2>/dev/null)"; then
+            exit 1
+          fi
+          [[ "$prior_image" =~ @sha256:([0-9a-f]{64})$ ]] || exit 1
+          prior_digest="sha256:${BASH_REMATCH[1]}"
+          record prior-digest "$prior_digest"
+
+          current_revision() {
+            az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --query properties.latestRevisionName --output tsv 2>/dev/null
+          }
+          wait_revision() {
+            bash .github/scripts/wait-for-container-app-revision.sh --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --digest "$2" --poll-budget "${REVISION_POLL_BUDGET:-30}" \
+              --timeout "${REVISION_TIMEOUT:-300}"
+          }
+          run_smoke() {
+            bash .github/scripts/wait-for-container-app-job.sh --name "$SMOKE_JOB_NAME" \
+              --resource-group "$RESOURCE_GROUP" --poll-budget "${SMOKE_POLL_BUDGET:-30}" \
+              --timeout "${SMOKE_TIMEOUT:-300}"
+          }
+          rollback_worker() {
+            local revision
+            az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --image "$prior_image" --output none || return 1
+            revision="$(current_revision)" || return 1
+            [[ -n "$revision" ]] || return 1
+            wait_revision "$revision" "$prior_digest" || return 1
+            run_smoke || return 1
+          }
+
+          release_failed=false
+          if ! az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$worker_image" --output none; then
+            record revision-result failure
+            release_failed=true
+          else
+            revision="$(current_revision)" || revision=""
+            if [[ -z "$revision" ]] || ! wait_revision "$revision" "sha256:$WORKER_DIGEST"; then
+              record revision-result failure
+              release_failed=true
+            else
+              record revision-result success
+              if run_smoke; then record smoke-result success; else record smoke-result failure; release_failed=true; fi
+            fi
+          fi
+          if [[ "$release_failed" == false ]]; then exit 0; fi
+          if rollback_worker; then record rollback-result success; else record rollback-result failure; fi
+          exit 1
+
+      - name: Create successful development promotion handoff
+        id: handoff
+        shell: bash
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          HANDOFF_RUN_ID: ${{ github.run_id }}
+          HANDOFF_RUN_ATTEMPT: ${{ github.run_attempt }}
+          MIGRATION_RESULT: ${{ steps.release.outputs.migration-result }}
+          REVISION_RESULT: ${{ steps.release.outputs.revision-result }}
+          SMOKE_RESULT: ${{ steps.release.outputs.smoke-result }}
+          ROLLBACK_RESULT: ${{ steps.release.outputs.rollback-result }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WORKER_DIGEST" =~ ^[0-9a-f]{64}$ && "$MIGRATE_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$MIGRATION_RESULT" == success && "$REVISION_RESULT" == success ]]
+          [[ "$SMOKE_RESULT" == success && "$ROLLBACK_RESULT" == skipped ]]
+          handoff_dir="$RUNNER_TEMP/dev-promotion"
+          install -d -m 700 "$handoff_dir"
+          jq -n --arg commit "$COMMIT_SHA" --arg environment dev \
+            --arg worker_digest "$WORKER_DIGEST" --arg migration_digest "$MIGRATE_DIGEST" \
+            --arg migration "$MIGRATION_RESULT" --arg revision "$REVISION_RESULT" \
+            --arg smoke "$SMOKE_RESULT" --arg rollback "$ROLLBACK_RESULT" \
+            '{schema_version: 1, commit: $commit, environment: $environment,
+              worker_digest: $worker_digest, migration_digest: $migration_digest,
+              results: {migration: $migration, revision: $revision, smoke: $smoke, rollback: $rollback}}' \
+            >"$handoff_dir/handoff.json"
+          jq -e '
+            type == "object" and
+            (keys == ["commit", "environment", "migration_digest", "results", "schema_version", "worker_digest"]) and
+            .schema_version == 1 and .environment == "dev" and
+            (.commit | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.worker_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+            (.migration_digest | type == "string" and test("^[0-9a-f]{64}$")) and
+            (.results == {migration: "success", revision: "success", smoke: "success", rollback: "skipped"})
+          ' "$handoff_dir/handoff.json" >/dev/null
+          printf 'worker-digest=%s\nmigrate-digest=%s\n' "$WORKER_DIGEST" "$MIGRATE_DIGEST" >>"$GITHUB_OUTPUT"
+          printf 'artifact-name=dev-promotion-%s-%s\n' \
+            "$HANDOFF_RUN_ID" "$HANDOFF_RUN_ATTEMPT" >>"$GITHUB_OUTPUT"
+      - name: Upload immutable development promotion handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.handoff.outputs.artifact-name }}
+          path: ${{ runner.temp }}/dev-promotion/handoff.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: false
+
+  prod-release:
+    name: Promote tested application to production
+    needs: [changes, dev-release]
+    if: >-
+      (needs.changes.outputs.delivery-target == 'automatic' || needs.changes.outputs.delivery-target == 'prod') &&
+      needs.dev-release.result == 'success' && needs.dev-release.outputs.migration-result == 'success' &&
+      needs.dev-release.outputs.revision-result == 'success' && needs.dev-release.outputs.smoke-result == 'success' &&
+      needs.dev-release.outputs.rollback-result == 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: prod
+    concurrency:
+      group: production-promotion
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      worker-digest: ${{ steps.handoff.outputs.worker-digest }}
+      migrate-digest: ${{ steps.handoff.outputs.migrate-digest }}
+      migration-result: ${{ steps.release.outputs.migration-result }}
+      prior-digest: ${{ steps.release.outputs.prior-digest }}
+      revision-result: ${{ steps.release.outputs.revision-result }}
+      smoke-result: ${{ steps.release.outputs.smoke-result }}
+      rollback-result: ${{ steps.release.outputs.rollback-result }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PROD }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_PROD: ${{ vars.TOFU_STATE_CONTAINER_PROD }}
+      TOFU_STATE_KEY_PROD: ${{ vars.TOFU_STATE_KEY_PROD }}
+      IMAGE_ROOT: ghcr.io/chanakya-net/whatsapp-messaging
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Download immutable development promotion handoff
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.dev-release.outputs.handoff-artifact }}
+          path: ${{ runner.temp }}/prod-promotion
+      - name: Validate exact development promotion handoff
+        id: handoff
+        shell: bash
+        env:
+          HANDOFF_FILE: ${{ runner.temp }}/prod-promotion/handoff.json
+          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_WORKER_DIGEST: ${{ needs.dev-release.outputs.worker-digest }}
+          EXPECTED_MIGRATE_DIGEST: ${{ needs.dev-release.outputs.migrate-digest }}
+        run: |
+          set -Eeuo pipefail
+          [[ -f "$HANDOFF_FILE" && ! -L "$HANDOFF_FILE" ]]
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_WORKER_DIGEST" =~ ^[0-9a-f]{64}$ && "$EXPECTED_MIGRATE_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          jq -e --arg commit "$EXPECTED_COMMIT" --arg worker "$EXPECTED_WORKER_DIGEST" \
+            --arg migration "$EXPECTED_MIGRATE_DIGEST" '
+            type == "object" and
+            (keys == ["commit", "environment", "migration_digest", "results", "schema_version", "worker_digest"]) and
+            .schema_version == 1 and .commit == $commit and .environment == "dev" and
+            (.worker_digest == $worker and (.worker_digest | test("^[0-9a-f]{64}$"))) and
+            (.migration_digest == $migration and (.migration_digest | test("^[0-9a-f]{64}$"))) and
+            (.results | type == "object" and keys == ["migration", "revision", "rollback", "smoke"]) and
+            .results == {migration: "success", revision: "success", smoke: "success", rollback: "skipped"}
+          ' "$HANDOFF_FILE" >/dev/null
+          printf 'worker-digest=%s\nmigrate-digest=%s\n' \
+            "$EXPECTED_WORKER_DIGEST" "$EXPECTED_MIGRATE_DIGEST" >>"$GITHUB_OUTPUT"
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+      - name: Sign in with production deploy identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PROD }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Resolve production runtime names
+        id: runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/prod-release.XXXXXX")"
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          root=.tofu/envs/prod
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_PROD" == prod && "$TOFU_STATE_KEY_PROD" == messagebridge/prod.tfstate ]] || exit 1
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_PROD" \
+            -backend-config="key=$TOFU_STATE_KEY_PROD" -backend-config="use_azuread_auth=true" \
+            >"$runtime_dir/init.log" 2>&1; then
+            printf 'Production release OpenTofu initialization failed.\n' >&2; exit 1
+          fi
+          if ! tofu -chdir="$root" output -json >"$runtime_dir/outputs.json" 2>"$runtime_dir/output.log"; then
+            printf 'Production runtime names unavailable.\n' >&2; exit 1
+          fi
+          jq -e '
+            [.migration_job_name.value, .smoke_job_name.value, .worker_name.value] |
+            all(.[]; type == "string" and test("^[a-z][a-z0-9-]{0,30}[a-z0-9]$"))
+          ' "$runtime_dir/outputs.json" >/dev/null || exit 1
+          {
+            jq -r '"migration-job-name=" + .migration_job_name.value' "$runtime_dir/outputs.json"
+            jq -r '"smoke-job-name=" + .smoke_job_name.value' "$runtime_dir/outputs.json"
+            jq -r '"worker-name=" + .worker_name.value' "$runtime_dir/outputs.json"
+            printf 'resource-group=rg-messagebridge-prod-centralindia-%s\n' "$serial"
+          } >>"$GITHUB_OUTPUT"
+      - name: Migrate, deploy, smoke, and roll back production
+        id: release
+        shell: bash
+        env:
+          MIGRATION_JOB_NAME: ${{ steps.runtime.outputs.migration-job-name }}
+          SMOKE_JOB_NAME: ${{ steps.runtime.outputs.smoke-job-name }}
+          WORKER_NAME: ${{ steps.runtime.outputs.worker-name }}
+          RESOURCE_GROUP: ${{ steps.runtime.outputs.resource-group }}
+          WORKER_DIGEST: ${{ steps.handoff.outputs.worker-digest }}
+          MIGRATE_DIGEST: ${{ steps.handoff.outputs.migrate-digest }}
+        run: |
+          set -Eeuo pipefail
+          record() { printf '%s=%s\n' "$1" "$2" >>"$GITHUB_OUTPUT"; }
+          record migration-result pending
+          record prior-digest unavailable
+          record revision-result skipped
+          record smoke-result skipped
+          record rollback-result skipped
+
+          valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}[a-z0-9]$ ]]; }
+          valid_name "$MIGRATION_JOB_NAME" && valid_name "$SMOKE_JOB_NAME" && valid_name "$WORKER_NAME" || exit 1
+          [[ "$RESOURCE_GROUP" =~ ^rg-messagebridge-prod-centralindia-[0-9]{3}$ ]] || exit 1
+          [[ "$WORKER_DIGEST" =~ ^[0-9a-f]{64}$ && "$MIGRATE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          [[ "$IMAGE_ROOT" =~ ^ghcr\.io/[a-z0-9._/-]+$ ]] || exit 1
+
+          migration_image="$IMAGE_ROOT/migrate@sha256:$MIGRATE_DIGEST"
+          worker_image="$IMAGE_ROOT/worker@sha256:$WORKER_DIGEST"
+          if ! az containerapp job update --name "$MIGRATION_JOB_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$migration_image" --output none; then
+            record migration-result failure; exit 1
+          fi
+          if ! bash .github/scripts/wait-for-container-app-job.sh --name "$MIGRATION_JOB_NAME" \
+            --resource-group "$RESOURCE_GROUP" --poll-budget "${MIGRATION_POLL_BUDGET:-30}" \
+            --timeout "${MIGRATION_TIMEOUT:-300}"; then
+            record migration-result failure; exit 1
+          fi
+          record migration-result success
+
+          if ! prior_image="$(az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query 'properties.template.containers[0].image' --output tsv 2>/dev/null)"; then
+            exit 1
+          fi
+          [[ "$prior_image" =~ @sha256:([0-9a-f]{64})$ ]] || exit 1
+          prior_digest="sha256:${BASH_REMATCH[1]}"
+          record prior-digest "$prior_digest"
+
+          current_revision() {
+            az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --query properties.latestRevisionName --output tsv 2>/dev/null
+          }
+          wait_revision() {
+            bash .github/scripts/wait-for-container-app-revision.sh --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --digest "$2" --poll-budget "${REVISION_POLL_BUDGET:-30}" \
+              --timeout "${REVISION_TIMEOUT:-300}"
+          }
+          run_smoke() {
+            bash .github/scripts/wait-for-container-app-job.sh --name "$SMOKE_JOB_NAME" \
+              --resource-group "$RESOURCE_GROUP" --poll-budget "${SMOKE_POLL_BUDGET:-30}" \
+              --timeout "${SMOKE_TIMEOUT:-300}"
+          }
+          rollback_worker() {
+            local revision
+            az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --image "$prior_image" --output none || return 1
+            revision="$(current_revision)" || return 1
+            [[ -n "$revision" ]] || return 1
+            wait_revision "$revision" "$prior_digest" || return 1
+            run_smoke || return 1
+          }
+
+          release_failed=false
+          if ! az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$worker_image" --output none; then
+            record revision-result failure
+            release_failed=true
+          else
+            revision="$(current_revision)" || revision=""
+            if [[ -z "$revision" ]] || ! wait_revision "$revision" "sha256:$WORKER_DIGEST"; then
+              record revision-result failure
+              release_failed=true
+            else
+              record revision-result success
+              if run_smoke; then record smoke-result success; else record smoke-result failure; release_failed=true; fi
+            fi
+          fi
+          if [[ "$release_failed" == false ]]; then exit 0; fi
+          if rollback_worker; then record rollback-result success; else record rollback-result failure; fi
+          exit 1
+
+  dev-secret-reload:
+    name: Reload development Key Vault references
+    needs: [changes, validation]
+    if: >-
+      needs.validation.result == 'success' &&
+      needs.changes.outputs.delivery-target == 'reload-secrets' &&
+      needs.changes.outputs.delivery-environment == 'dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      current-digest: ${{ steps.reload.outputs.current-digest }}
+      execution-result: ${{ steps.reload.outputs.execution-result }}
+      health-result: ${{ steps.reload.outputs.health-result }}
+      smoke-result: ${{ steps.reload.outputs.smoke-result }}
+      rollback-result: ${{ steps.reload.outputs.rollback-result }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEV }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_DEV: ${{ vars.TOFU_STATE_CONTAINER_DEV }}
+      TOFU_STATE_KEY_DEV: ${{ vars.TOFU_STATE_KEY_DEV }}
+      RELOAD_ENVIRONMENT: dev
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+      - name: Sign in with development deploy identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEV }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Resolve development reload runtime names
+        id: runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/dev-secret-runtime.XXXXXX")"
+          chmod 700 "$runtime_dir"
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          root=.tofu/envs/dev
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_DEV" == dev && "$TOFU_STATE_KEY_DEV" == messagebridge/dev.tfstate ]] || exit 1
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_DEV" \
+            -backend-config="key=$TOFU_STATE_KEY_DEV" -backend-config="use_azuread_auth=true" \
+            >"$runtime_dir/init.log" 2>&1; then
+            printf 'Development reload OpenTofu initialization failed.\n' >&2; exit 1
+          fi
+          if ! worker_name="$(tofu -chdir="$root" output -raw worker_name 2>"$runtime_dir/worker.log")" ||
+            ! smoke_name="$(tofu -chdir="$root" output -raw smoke_job_name 2>"$runtime_dir/smoke.log")"; then
+            printf 'Development reload runtime names unavailable.\n' >&2; exit 1
+          fi
+          [[ "$worker_name" =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ ]] || exit 1
+          [[ "$smoke_name" =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ ]] || exit 1
+          printf 'worker-name=%s\nsmoke-job-name=%s\n' "$worker_name" "$smoke_name" >>"$GITHUB_OUTPUT"
+          printf 'resource-group=rg-messagebridge-dev-centralindia-%s\n' "$serial" >>"$GITHUB_OUTPUT"
+      - name: Reload dev secrets and verify rollback
+        id: reload
+        shell: bash
+        env:
+          WORKER_NAME: ${{ steps.runtime.outputs.worker-name }}
+          SMOKE_JOB_NAME: ${{ steps.runtime.outputs.smoke-job-name }}
+          RESOURCE_GROUP: ${{ steps.runtime.outputs.resource-group }}
+        run: |
+          set -Eeuo pipefail
+          record() { printf '%s=%s\n' "$1" "$2" >>"$GITHUB_OUTPUT"; }
+          record current-digest unavailable
+          record execution-result pending
+          record health-result skipped
+          record smoke-result skipped
+          record rollback-result skipped
+          valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}[a-z0-9]$ ]]; }
+          valid_name "$WORKER_NAME" && valid_name "$SMOKE_JOB_NAME" || exit 1
+          [[ "$RESOURCE_GROUP" =~ ^rg-messagebridge-dev-centralindia-([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$ARM_SUBSCRIPTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+          expected_identity="/subscriptions/$ARM_SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-runtime-dev-cin-$serial"
+          metadata_file="$(mktemp "$RUNNER_TEMP/dev-secret-metadata.XXXXXX")"
+          chmod 600 "$metadata_file"
+          trap 'rm -f -- "$metadata_file"' EXIT
+          if ! az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query '{secrets:properties.configuration.secrets,identities:identity.userAssignedIdentities}' \
+            --output json >"$metadata_file" 2>/dev/null; then
+            record execution-result failure; exit 1
+          fi
+          if ! jq -e --arg identity "$expected_identity" '
+            type == "object" and (.secrets | type == "array" and length == 2) and
+            ([.secrets[].name] | sort) == ["new-relic-otlp-headers", "rabbitmq-connection-string"] and
+            all(.secrets[];
+              . as $secret | $secret.identity == $identity and ($secret.value? == null) and
+              ($secret.keyVaultUrl | type == "string" and
+                test("^https://[a-z0-9-]+\\.vault\\.azure\\.net/secrets/" + $secret.name + "$"))) and
+            (.identities | type == "object" and keys == [$identity])
+          ' "$metadata_file" >/dev/null 2>&1; then
+            record execution-result failure; exit 1
+          fi
+          current_revision() {
+            az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --query properties.latestRevisionName --output tsv 2>/dev/null
+          }
+          revision_active() {
+            az containerapp revision show --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --query properties.active --output tsv 2>/dev/null
+          }
+          wait_revision() {
+            bash .github/scripts/wait-for-container-app-revision.sh --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --digest "$2" --poll-budget "${REVISION_POLL_BUDGET:-30}" \
+              --timeout "${REVISION_TIMEOUT:-300}"
+          }
+          run_smoke() {
+            bash .github/scripts/wait-for-container-app-job.sh --name "$SMOKE_JOB_NAME" \
+              --resource-group "$RESOURCE_GROUP" --poll-budget "${SMOKE_POLL_BUDGET:-30}" \
+              --timeout "${SMOKE_TIMEOUT:-300}"
+          }
+          prior_revision="$(current_revision)" || prior_revision=""
+          prior_image="$(az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query 'properties.template.containers[0].image' --output tsv 2>/dev/null)" || prior_image=""
+          [[ "$prior_revision" =~ ^${WORKER_NAME}--[a-z0-9][a-z0-9-]{0,62}$ ]] || { record execution-result failure; exit 1; }
+          [[ "$prior_image" =~ ^ghcr\.io/chanakya-net/whatsapp-messaging/worker@sha256:([0-9a-f]{64})$ ]] || { record execution-result failure; exit 1; }
+          current_digest="sha256:${BASH_REMATCH[1]}"
+          record current-digest "$current_digest"
+          if [[ "$(revision_active "$prior_revision")" != true ]] || ! wait_revision "$prior_revision" "$current_digest"; then
+            record execution-result failure; exit 1
+          fi
+          rollback_prior() {
+            az containerapp revision activate --name "$WORKER_NAME" --revision "$prior_revision" \
+              --resource-group "$RESOURCE_GROUP" --output none || return 1
+            [[ "$(revision_active "$prior_revision")" == true ]] || return 1
+            wait_revision "$prior_revision" "$current_digest" || return 1
+            run_smoke || return 1
+          }
+          reload_marker="reload-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "$reload_marker" =~ ^reload-[0-9]+-[0-9]+$ ]] || exit 1
+          reload_failed=false
+          if ! az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$prior_image" --revision-suffix "$reload_marker" \
+            --set-env-vars "MESSAGEBRIDGE_SECRET_RELOAD=$reload_marker" --output none; then
+            record execution-result failure; reload_failed=true
+          else
+            new_revision="$(current_revision)" || new_revision=""
+            if [[ -z "$new_revision" || "$new_revision" == "$prior_revision" ]]; then
+              record execution-result failure; reload_failed=true
+            else
+              record execution-result success
+              if wait_revision "$new_revision" "$current_digest"; then
+                record health-result success
+                if run_smoke; then record smoke-result success; else record smoke-result failure; reload_failed=true; fi
+              else
+                record health-result failure; reload_failed=true
+              fi
+            fi
+          fi
+          [[ "$reload_failed" == true ]] || exit 0
+          if rollback_prior; then record rollback-result success; else record rollback-result failure; fi
+          exit 1
+
+  prod-secret-reload:
+    name: Reload production Key Vault references
+    needs: [changes, validation]
+    if: >-
+      needs.validation.result == 'success' &&
+      needs.changes.outputs.delivery-target == 'reload-secrets' &&
+      needs.changes.outputs.delivery-environment == 'prod'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: prod
+    concurrency:
+      group: production-promotion
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      current-digest: ${{ steps.reload.outputs.current-digest }}
+      execution-result: ${{ steps.reload.outputs.execution-result }}
+      health-result: ${{ steps.reload.outputs.health-result }}
+      smoke-result: ${{ steps.reload.outputs.smoke-result }}
+      rollback-result: ${{ steps.reload.outputs.rollback-result }}
+    env:
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PROD }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TOFU_STATE_RESOURCE_GROUP: ${{ vars.TOFU_STATE_RESOURCE_GROUP }}
+      TOFU_STATE_STORAGE_ACCOUNT: ${{ vars.TOFU_STATE_STORAGE_ACCOUNT }}
+      TOFU_STATE_CONTAINER_PROD: ${{ vars.TOFU_STATE_CONTAINER_PROD }}
+      TOFU_STATE_KEY_PROD: ${{ vars.TOFU_STATE_KEY_PROD }}
+      RELOAD_ENVIRONMENT: prod
+    steps:
+      - name: Check out delivery commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@000eeb8522f0572907c393e8151076c205fdba1b # v1.0.6
+        with:
+          tofu_version: 1.9.1
+          tofu_wrapper: false
+      - name: Sign in with production deploy identity
+        uses: Azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_PROD }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Resolve production reload runtime names
+        id: runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          runtime_dir="$(mktemp -d "$RUNNER_TEMP/prod-secret-runtime.XXXXXX")"
+          chmod 700 "$runtime_dir"
+          trap 'rm -rf -- "$runtime_dir"' EXIT
+          root=.tofu/envs/prod
+          [[ "$TOFU_STATE_STORAGE_ACCOUNT" =~ ^messagebridgetfstate([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$TOFU_STATE_RESOURCE_GROUP" == "rg-messagebridge-bootstrap-centralindia-$serial" ]] || exit 1
+          [[ "$TOFU_STATE_CONTAINER_PROD" == prod && "$TOFU_STATE_KEY_PROD" == messagebridge/prod.tfstate ]] || exit 1
+          if ! tofu -chdir="$root" init -reconfigure -input=false \
+            -backend-config="resource_group_name=$TOFU_STATE_RESOURCE_GROUP" \
+            -backend-config="storage_account_name=$TOFU_STATE_STORAGE_ACCOUNT" \
+            -backend-config="container_name=$TOFU_STATE_CONTAINER_PROD" \
+            -backend-config="key=$TOFU_STATE_KEY_PROD" -backend-config="use_azuread_auth=true" \
+            >"$runtime_dir/init.log" 2>&1; then
+            printf 'Production reload OpenTofu initialization failed.\n' >&2; exit 1
+          fi
+          if ! worker_name="$(tofu -chdir="$root" output -raw worker_name 2>"$runtime_dir/worker.log")" ||
+            ! smoke_name="$(tofu -chdir="$root" output -raw smoke_job_name 2>"$runtime_dir/smoke.log")"; then
+            printf 'Production reload runtime names unavailable.\n' >&2; exit 1
+          fi
+          [[ "$worker_name" =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ ]] || exit 1
+          [[ "$smoke_name" =~ ^[a-z][a-z0-9-]{0,30}[a-z0-9]$ ]] || exit 1
+          printf 'worker-name=%s\nsmoke-job-name=%s\n' "$worker_name" "$smoke_name" >>"$GITHUB_OUTPUT"
+          printf 'resource-group=rg-messagebridge-prod-centralindia-%s\n' "$serial" >>"$GITHUB_OUTPUT"
+      - name: Reload prod secrets and verify rollback
+        id: reload
+        shell: bash
+        env:
+          WORKER_NAME: ${{ steps.runtime.outputs.worker-name }}
+          SMOKE_JOB_NAME: ${{ steps.runtime.outputs.smoke-job-name }}
+          RESOURCE_GROUP: ${{ steps.runtime.outputs.resource-group }}
+        run: |
+          set -Eeuo pipefail
+          record() { printf '%s=%s\n' "$1" "$2" >>"$GITHUB_OUTPUT"; }
+          record current-digest unavailable
+          record execution-result pending
+          record health-result skipped
+          record smoke-result skipped
+          record rollback-result skipped
+          valid_name() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}[a-z0-9]$ ]]; }
+          valid_name "$WORKER_NAME" && valid_name "$SMOKE_JOB_NAME" || exit 1
+          [[ "$RESOURCE_GROUP" =~ ^rg-messagebridge-prod-centralindia-([0-9]{3})$ ]] || exit 1
+          serial="${BASH_REMATCH[1]}"
+          [[ "$ARM_SUBSCRIPTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+          expected_identity="/subscriptions/$ARM_SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-messagebridge-runtime-prod-cin-$serial"
+          metadata_file="$(mktemp "$RUNNER_TEMP/prod-secret-metadata.XXXXXX")"
+          chmod 600 "$metadata_file"
+          trap 'rm -f -- "$metadata_file"' EXIT
+          if ! az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query '{secrets:properties.configuration.secrets,identities:identity.userAssignedIdentities}' \
+            --output json >"$metadata_file" 2>/dev/null; then
+            record execution-result failure; exit 1
+          fi
+          if ! jq -e --arg identity "$expected_identity" '
+            type == "object" and (.secrets | type == "array" and length == 2) and
+            ([.secrets[].name] | sort) == ["new-relic-otlp-headers", "rabbitmq-connection-string"] and
+            all(.secrets[];
+              . as $secret | $secret.identity == $identity and ($secret.value? == null) and
+              ($secret.keyVaultUrl | type == "string" and
+                test("^https://[a-z0-9-]+\\.vault\\.azure\\.net/secrets/" + $secret.name + "$"))) and
+            (.identities | type == "object" and keys == [$identity])
+          ' "$metadata_file" >/dev/null 2>&1; then
+            record execution-result failure; exit 1
+          fi
+          current_revision() {
+            az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+              --query properties.latestRevisionName --output tsv 2>/dev/null
+          }
+          revision_active() {
+            az containerapp revision show --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --query properties.active --output tsv 2>/dev/null
+          }
+          wait_revision() {
+            bash .github/scripts/wait-for-container-app-revision.sh --name "$WORKER_NAME" --revision "$1" \
+              --resource-group "$RESOURCE_GROUP" --digest "$2" --poll-budget "${REVISION_POLL_BUDGET:-30}" \
+              --timeout "${REVISION_TIMEOUT:-300}"
+          }
+          run_smoke() {
+            bash .github/scripts/wait-for-container-app-job.sh --name "$SMOKE_JOB_NAME" \
+              --resource-group "$RESOURCE_GROUP" --poll-budget "${SMOKE_POLL_BUDGET:-30}" \
+              --timeout "${SMOKE_TIMEOUT:-300}"
+          }
+          prior_revision="$(current_revision)" || prior_revision=""
+          prior_image="$(az containerapp show --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --query 'properties.template.containers[0].image' --output tsv 2>/dev/null)" || prior_image=""
+          [[ "$prior_revision" =~ ^${WORKER_NAME}--[a-z0-9][a-z0-9-]{0,62}$ ]] || { record execution-result failure; exit 1; }
+          [[ "$prior_image" =~ ^ghcr\.io/chanakya-net/whatsapp-messaging/worker@sha256:([0-9a-f]{64})$ ]] || { record execution-result failure; exit 1; }
+          current_digest="sha256:${BASH_REMATCH[1]}"
+          record current-digest "$current_digest"
+          if [[ "$(revision_active "$prior_revision")" != true ]] || ! wait_revision "$prior_revision" "$current_digest"; then
+            record execution-result failure; exit 1
+          fi
+          rollback_prior() {
+            az containerapp revision activate --name "$WORKER_NAME" --revision "$prior_revision" \
+              --resource-group "$RESOURCE_GROUP" --output none || return 1
+            [[ "$(revision_active "$prior_revision")" == true ]] || return 1
+            wait_revision "$prior_revision" "$current_digest" || return 1
+            run_smoke || return 1
+          }
+          reload_marker="reload-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "$reload_marker" =~ ^reload-[0-9]+-[0-9]+$ ]] || exit 1
+          reload_failed=false
+          if ! az containerapp update --name "$WORKER_NAME" --resource-group "$RESOURCE_GROUP" \
+            --image "$prior_image" --revision-suffix "$reload_marker" \
+            --set-env-vars "MESSAGEBRIDGE_SECRET_RELOAD=$reload_marker" --output none; then
+            record execution-result failure; reload_failed=true
+          else
+            new_revision="$(current_revision)" || new_revision=""
+            if [[ -z "$new_revision" || "$new_revision" == "$prior_revision" ]]; then
+              record execution-result failure; reload_failed=true
+            else
+              record execution-result success
+              if wait_revision "$new_revision" "$current_digest"; then
+                record health-result success
+                if run_smoke; then record smoke-result success; else record smoke-result failure; reload_failed=true; fi
+              else
+                record health-result failure; reload_failed=true
+              fi
+            fi
+          fi
+          [[ "$reload_failed" == true ]] || exit 0
+          if rollback_prior; then record rollback-result success; else record rollback-result failure; fi
+          exit 1
+
+  delivery-summary:
+    name: Publish secret-safe delivery summary
+    needs: [changes, validation, publish-images, shared-retained, dev-infrastructure, prod-infrastructure, shared-reconcile, infrastructure-complete, application-ready, dev-release, prod-release, dev-secret-reload, prod-secret-reload]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Summarize delivery results
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DELIVERY_TARGET: ${{ needs.changes.outputs.delivery-target }}
+          DELIVERY_ENVIRONMENT: ${{ needs.changes.outputs.delivery-environment }}
+          COMMIT_SHA: ${{ github.sha }}
+          CHANGED_LAYERS: ${{ needs.changes.outputs.layers }}
+          VALIDATION_RESULT: ${{ needs.validation.result }}
+          IMAGES_RESULT: ${{ needs.publish-images.result }}
+          SHARED_JOB_RESULT: ${{ needs.shared-retained.result }}
+          DEV_JOB_RESULT: ${{ needs.dev-infrastructure.result }}
+          PROD_JOB_RESULT: ${{ needs.prod-infrastructure.result }}
+          RECONCILE_JOB_RESULT: ${{ needs.shared-reconcile.result }}
+          SHARED_GUARD_PLAN: ${{ needs.shared-retained.outputs.plan-result }}
+          SHARED_GUARD_APPLY: ${{ needs.shared-retained.outputs.apply-result }}
+          DEV_PLAN: ${{ needs.dev-infrastructure.outputs.plan-result }}
+          DEV_APPLY: ${{ needs.dev-infrastructure.outputs.apply-result }}
+          PROD_PLAN: ${{ needs.prod-infrastructure.outputs.plan-result }}
+          PROD_APPLY: ${{ needs.prod-infrastructure.outputs.apply-result }}
+          RETAINED_PLAN: ${{ needs.shared-reconcile.outputs.retained-plan-result }}
+          RETAINED_APPLY: ${{ needs.shared-reconcile.outputs.retained-apply-result }}
+          EXACT_PLAN: ${{ needs.shared-reconcile.outputs.exact-plan-result }}
+          EXACT_APPLY: ${{ needs.shared-reconcile.outputs.exact-apply-result }}
+          VERIFICATION_RESULT: ${{ needs.shared-reconcile.outputs.verification-result }}
+          RETAINED_COUNT: ${{ needs.shared-reconcile.outputs.retained-count }}
+          EXACT_COUNT: ${{ needs.shared-reconcile.outputs.exact-count }}
+          INFRASTRUCTURE_RESULT: ${{ needs.infrastructure-complete.result }}
+          APPLICATION_RESULT: ${{ needs.application-ready.result }}
+          DEV_RELEASE_JOB_RESULT: ${{ needs.dev-release.result }}
+          DEV_WORKER_DIGEST: ${{ needs.application-ready.outputs.worker-digest }}
+          DEV_MIGRATION_DIGEST: ${{ needs.application-ready.outputs.migrate-digest }}
+          DEV_MIGRATION_RESULT: ${{ needs.dev-release.outputs.migration-result }}
+          DEV_HEALTH_RESULT: ${{ needs.dev-release.outputs.revision-result }}
+          DEV_SMOKE_RESULT: ${{ needs.dev-release.outputs.smoke-result }}
+          DEV_ROLLBACK_RESULT: ${{ needs.dev-release.outputs.rollback-result }}
+          PROD_RELEASE_JOB_RESULT: ${{ needs.prod-release.result }}
+          PROD_APPROVAL_ENVIRONMENT: prod
+          PROD_WORKER_DIGEST: ${{ needs.prod-release.outputs.worker-digest }}
+          PROD_MIGRATION_DIGEST: ${{ needs.prod-release.outputs.migrate-digest }}
+          PROD_MIGRATION_RESULT: ${{ needs.prod-release.outputs.migration-result }}
+          PROD_HEALTH_RESULT: ${{ needs.prod-release.outputs.revision-result }}
+          PROD_SMOKE_RESULT: ${{ needs.prod-release.outputs.smoke-result }}
+          PROD_PRIOR_DIGEST: ${{ needs.prod-release.outputs.prior-digest }}
+          PROD_ROLLBACK_RESULT: ${{ needs.prod-release.outputs.rollback-result }}
+          DEV_RELOAD_DIGEST: ${{ needs.dev-secret-reload.outputs.current-digest }}
+          DEV_RELOAD_EXECUTION: ${{ needs.dev-secret-reload.outputs.execution-result }}
+          DEV_RELOAD_HEALTH: ${{ needs.dev-secret-reload.outputs.health-result }}
+          DEV_RELOAD_SMOKE: ${{ needs.dev-secret-reload.outputs.smoke-result }}
+          DEV_RELOAD_ROLLBACK: ${{ needs.dev-secret-reload.outputs.rollback-result }}
+          PROD_RELOAD_DIGEST: ${{ needs.prod-secret-reload.outputs.current-digest }}
+          PROD_RELOAD_EXECUTION: ${{ needs.prod-secret-reload.outputs.execution-result }}
+          PROD_RELOAD_HEALTH: ${{ needs.prod-secret-reload.outputs.health-result }}
+          PROD_RELOAD_SMOKE: ${{ needs.prod-secret-reload.outputs.smoke-result }}
+          PROD_RELOAD_ROLLBACK: ${{ needs.prod-secret-reload.outputs.rollback-result }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            manual_environment=none manual_digest=unavailable execution_status=skipped
+            health_status=skipped smoke_status=skipped rollback_status=skipped
+            case "$DELIVERY_TARGET:$DELIVERY_ENVIRONMENT" in
+              publish:none)
+                manual_digest="worker:${DEV_WORKER_DIGEST:-unavailable},migration:${DEV_MIGRATION_DIGEST:-unavailable}"
+                execution_status="$IMAGES_RESULT" ;;
+              dev:none)
+                manual_environment=dev
+                manual_digest="worker:${DEV_WORKER_DIGEST:-unavailable},migration:${DEV_MIGRATION_DIGEST:-unavailable}"
+                execution_status="$DEV_RELEASE_JOB_RESULT"
+                health_status="${DEV_HEALTH_RESULT:-skipped}" smoke_status="${DEV_SMOKE_RESULT:-skipped}"
+                rollback_status="${DEV_ROLLBACK_RESULT:-skipped}" ;;
+              prod:none)
+                manual_environment=prod
+                manual_digest="worker:${PROD_WORKER_DIGEST:-unavailable},migration:${PROD_MIGRATION_DIGEST:-unavailable}"
+                execution_status="$PROD_RELEASE_JOB_RESULT"
+                health_status="${PROD_HEALTH_RESULT:-skipped}" smoke_status="${PROD_SMOKE_RESULT:-skipped}"
+                rollback_status="${PROD_ROLLBACK_RESULT:-skipped}" ;;
+              reload-secrets:dev)
+                manual_environment=dev manual_digest="${DEV_RELOAD_DIGEST:-unavailable}"
+                execution_status="${DEV_RELOAD_EXECUTION:-skipped}" health_status="${DEV_RELOAD_HEALTH:-skipped}"
+                smoke_status="${DEV_RELOAD_SMOKE:-skipped}" rollback_status="${DEV_RELOAD_ROLLBACK:-skipped}" ;;
+              reload-secrets:prod)
+                manual_environment=prod manual_digest="${PROD_RELOAD_DIGEST:-unavailable}"
+                execution_status="${PROD_RELOAD_EXECUTION:-skipped}" health_status="${PROD_RELOAD_HEALTH:-skipped}"
+                smoke_status="${PROD_RELOAD_SMOKE:-skipped}" rollback_status="${PROD_RELOAD_ROLLBACK:-skipped}" ;;
+              *) exit 1 ;;
+            esac
+            [[ "$manual_environment" =~ ^(none|dev|prod)$ ]] || exit 1
+            [[ "$manual_digest" == unavailable || "$manual_digest" =~ ^sha256:[0-9a-f]{64}$ ||
+              "$manual_digest" =~ ^worker:([0-9a-f]{64}|unavailable),migration:([0-9a-f]{64}|unavailable)$ ]] ||
+              manual_digest=unavailable
+            for status in execution_status health_status smoke_status rollback_status; do
+              [[ "${!status}" =~ ^(success|failure|skipped|cancelled|pending|unavailable)$ ]] || printf -v "$status" unavailable
+            done
+            {
+              printf '### Manual delivery\n'
+              printf -- '- environment: `%s`\n- digest: `%s`\n' "$manual_environment" "$manual_digest"
+              printf -- '- execution_status: `%s`\n- health_status: `%s`\n' "$execution_status" "$health_status"
+              printf -- '- smoke_status: `%s`\n- rollback_status: `%s`\n' "$smoke_status" "$rollback_status"
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            printf '### Ordered delivery\n'
+            printf -- '- commit: `%s`\n- changed_layers: `%s`\n' "$COMMIT_SHA" "${CHANGED_LAYERS:-none}"
+            printf -- '- validation: `%s`\n- images: `%s`\n' "$VALIDATION_RESULT" "$IMAGES_RESULT"
+            printf -- '- infrastructure_jobs: `shared=%s dev=%s prod=%s reconcile=%s`\n' \
+              "$SHARED_JOB_RESULT" "$DEV_JOB_RESULT" "$PROD_JOB_RESULT" "$RECONCILE_JOB_RESULT"
+            printf -- '- shared_guard_plan/apply: `%s/%s`\n' "${SHARED_GUARD_PLAN:-skipped}" "${SHARED_GUARD_APPLY:-skipped}"
+            printf -- '- dev_plan/apply: `%s/%s`\n' "${DEV_PLAN:-skipped}" "${DEV_APPLY:-skipped}"
+            printf -- '- prod_plan/apply: `%s/%s`\n' "${PROD_PLAN:-skipped}" "${PROD_APPLY:-skipped}"
+            printf -- '- retained_plan/apply: `%s/%s`\n' "${RETAINED_PLAN:-skipped}" "${RETAINED_APPLY:-skipped}"
+            printf -- '- exact_plan/apply: `%s/%s`\n' "${EXACT_PLAN:-skipped}" "${EXACT_APPLY:-skipped}"
+            printf -- '- egress_verification: `%s`\n' "${VERIFICATION_RESULT:-skipped}"
+            printf -- '- retained_egress_count: `%s`\n- exact_egress_count: `%s`\n' "${RETAINED_COUNT:-0}" "${EXACT_COUNT:-0}"
+            printf -- '- infrastructure_gate: `%s`\n- application_gate: `%s`\n' \
+              "$INFRASTRUCTURE_RESULT" "$APPLICATION_RESULT"
+            printf -- '- development_release: `%s`\n' "$DEV_RELEASE_JOB_RESULT"
+            printf -- '- dev_worker_digest: `%s`\n- dev_migration_digest: `%s`\n' \
+              "${DEV_WORKER_DIGEST:-unavailable}" "${DEV_MIGRATION_DIGEST:-unavailable}"
+            printf -- '- dev_migration/health/smoke/rollback: `%s/%s/%s/%s`\n' \
+              "${DEV_MIGRATION_RESULT:-skipped}" "${DEV_HEALTH_RESULT:-skipped}" \
+              "${DEV_SMOKE_RESULT:-skipped}" "${DEV_ROLLBACK_RESULT:-skipped}"
+            # Production digests come from the revalidated development handoff; this publishes that guarantee.
+            identical=unavailable
+            if [[ -n "$PROD_WORKER_DIGEST" && -n "$PROD_MIGRATION_DIGEST" ]]; then
+              if [[ "$DEV_WORKER_DIGEST" == "$PROD_WORKER_DIGEST" && \
+                "$DEV_MIGRATION_DIGEST" == "$PROD_MIGRATION_DIGEST" ]]; then
+                identical=true
+              else
+                identical=false
+              fi
+            fi
+            printf -- '- production_release: `%s`\n- approval_environment: `%s`\n' \
+              "$PROD_RELEASE_JOB_RESULT" "$PROD_APPROVAL_ENVIRONMENT"
+            printf -- '- prod_worker_digest: `%s`\n- prod_migration_digest: `%s`\n- identical_digests: `%s`\n' \
+              "${PROD_WORKER_DIGEST:-unavailable}" "${PROD_MIGRATION_DIGEST:-unavailable}" "$identical"
+            printf -- '- prod_migration/health/smoke: `%s/%s/%s`\n' \
+              "${PROD_MIGRATION_RESULT:-skipped}" "${PROD_HEALTH_RESULT:-skipped}" "${PROD_SMOKE_RESULT:-skipped}"
+            printf -- '- prod_prior_digest: `%s`\n- prod_rollback_result: `%s`\n' \
+              "${PROD_PRIOR_DIGEST:-unavailable}" "${PROD_ROLLBACK_RESULT:-skipped}"
+          } >>"$GITHUB_STEP_SUMMARY"

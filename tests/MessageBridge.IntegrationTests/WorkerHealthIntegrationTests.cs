@@ -5,6 +5,7 @@ using FluentAssertions;
 using MessageBridge.IntegrationTests.Fixtures;
 using MessageBridge.IntegrationTests.Persistence;
 using MessageBridge.Infrastructure.Messaging.Options;
+using MessageBridge.Infrastructure;
 using MessageBridge.Worker.Observability;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -22,21 +23,21 @@ namespace MessageBridge.IntegrationTests;
 public sealed class WorkerHealthIntegrationTests(IntegrationEnvironmentFixture fixture)
 {
     [Fact]
-    public async Task WorkerHealth_LiveAndReady_WhenSharedDependenciesAvailable()
+    public async Task WorkerHealth_StartupLivenessAndReadiness_AreSanitized()
     {
         await using var harness = await WorkerHealthHarness.StartAsync(fixture);
 
-        var live = await harness.Client.GetAsync("/health/live");
+        await AssertLiveAsync(harness.Client);
         var ready = await harness.WaitForReadinessAsync(
             HttpStatusCode.OK,
             rabbitMqStatus: "Healthy",
             postgresStatus: "Healthy");
+        await AssertLiveAsync(harness.Client);
 
-        live.StatusCode.Should().Be(HttpStatusCode.OK);
-        ready.StatusCode.Should().Be(HttpStatusCode.OK);
-        ready.OverallStatus.Should().Be("Healthy");
-        ready.Checks["rabbitmq"].Should().Be("Healthy");
-        ready.Checks["postgres"].Should().Be("Healthy");
+        AssertReadiness(ready, HttpStatusCode.OK, "Healthy", "Healthy", "Healthy");
+        AssertSecretsAbsent(
+            [ready.Body, ready.Describe(), harness.Logs.CombinedEntries],
+            harness.SensitiveConfiguration);
     }
 
     [Fact]
@@ -59,20 +60,22 @@ public sealed class WorkerHealthIntegrationTests(IntegrationEnvironmentFixture f
                 return builder.ConnectionString;
             });
 
-        var live = await harness.Client.GetAsync("/health/live");
+        await AssertLiveAsync(harness.Client);
         var ready = await harness.WaitForReadinessAsync(
             HttpStatusCode.ServiceUnavailable,
             rabbitMqStatus: "Healthy",
             postgresStatus: "Unhealthy");
+        await AssertLiveAsync(harness.Client);
 
-        live.StatusCode.Should().Be(HttpStatusCode.OK);
-        ready.OverallStatus.Should().Be("Unhealthy");
-        ready.Checks["rabbitmq"].Should().Be("Healthy");
-        ready.Checks["postgres"].Should().Be("Unhealthy");
+        AssertReadiness(
+            ready,
+            HttpStatusCode.ServiceUnavailable,
+            "Unhealthy",
+            "Healthy",
+            "Unhealthy");
         AssertSecretsAbsent(
             [ready.Body, ready.Describe(), harness.Logs.CombinedEntries],
-            invalidUsername,
-            invalidPassword);
+            harness.SensitiveConfiguration);
     }
 
     [Fact]
@@ -92,29 +95,61 @@ public sealed class WorkerHealthIntegrationTests(IntegrationEnvironmentFixture f
                 return builder.Uri.AbsoluteUri;
             });
 
-        var live = await harness.Client.GetAsync("/health/live");
+        await AssertLiveAsync(harness.Client);
         var ready = await harness.WaitForReadinessAsync(
             HttpStatusCode.ServiceUnavailable,
             rabbitMqStatus: "Unhealthy",
             postgresStatus: "Healthy");
+        await AssertLiveAsync(harness.Client);
 
-        live.StatusCode.Should().Be(HttpStatusCode.OK);
-        ready.OverallStatus.Should().Be("Unhealthy");
-        ready.Checks["rabbitmq"].Should().Be("Unhealthy");
-        ready.Checks["postgres"].Should().Be("Healthy");
+        AssertReadiness(
+            ready,
+            HttpStatusCode.ServiceUnavailable,
+            "Unhealthy",
+            "Unhealthy",
+            "Healthy");
         AssertSecretsAbsent(
             [ready.Body, ready.Describe(), harness.Logs.CombinedEntries],
-            invalidUsername,
-            invalidPassword);
+            harness.SensitiveConfiguration);
+    }
+
+    private static async Task AssertLiveAsync(HttpClient client)
+    {
+        using var response = await client.GetAsync("/health/live");
+        var body = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(body);
+        var root = document.RootElement;
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        root.EnumerateObject().Select(property => property.Name)
+            .Should().BeEquivalentTo(["status"]);
+        root.GetProperty("status").GetString().Should().Be("live");
+    }
+
+    private static void AssertReadiness(
+        ReadinessObservation ready,
+        HttpStatusCode statusCode,
+        string overallStatus,
+        string rabbitMqStatus,
+        string postgresStatus)
+    {
+        ready.StatusCode.Should().Be(statusCode);
+        ready.OverallStatus.Should().Be(overallStatus);
+        ready.PropertyNames.Should().BeEquivalentTo(["status", "checks"]);
+        ready.Checks.Keys.Should().BeEquivalentTo(["rabbitmq", "postgres"]);
+        ready.Checks["rabbitmq"].Should().Be(rabbitMqStatus);
+        ready.Checks["postgres"].Should().Be(postgresStatus);
+        ready.Body.ToLowerInvariant().Should().NotContain("description");
+        ready.Body.ToLowerInvariant().Should().NotContain("exception");
     }
 
     private static void AssertSecretsAbsent(
         IEnumerable<string> observations,
-        params string[] secrets)
+        IEnumerable<string> secrets)
     {
         foreach (var observation in observations)
         {
-            foreach (var secret in secrets)
+            foreach (var secret in secrets.Where(value => !string.IsNullOrWhiteSpace(value)))
             {
                 observation.Should().NotContain(secret);
             }
@@ -130,17 +165,21 @@ public sealed class WorkerHealthIntegrationTests(IntegrationEnvironmentFixture f
             WebApplication app,
             HttpClient client,
             MigratedDatabaseScenario database,
-            CapturingLoggerProvider logs)
+            CapturingLoggerProvider logs,
+            IReadOnlyList<string> sensitiveConfiguration)
         {
             _app = app;
             Client = client;
             _database = database;
             Logs = logs;
+            SensitiveConfiguration = sensitiveConfiguration;
         }
 
         public HttpClient Client { get; }
 
         public CapturingLoggerProvider Logs { get; }
+
+        public IReadOnlyList<string> SensitiveConfiguration { get; }
 
         public static async Task<WorkerHealthHarness> StartAsync(
             IntegrationEnvironmentFixture fixture,
@@ -150,9 +189,9 @@ public sealed class WorkerHealthIntegrationTests(IntegrationEnvironmentFixture f
             var database = await MigratedDatabaseScenario.CreateAsync(fixture);
             var postgres = database.DbContext.Database.GetConnectionString()!;
             var rabbitMq = fixture.GetRabbitMqConnectionString();
-            var settings = CreateSettings(
-                configurePostgres?.Invoke(postgres) ?? postgres,
-                configureRabbitMq?.Invoke(rabbitMq) ?? rabbitMq);
+            var configuredPostgres = configurePostgres?.Invoke(postgres) ?? postgres;
+            var configuredRabbitMq = configureRabbitMq?.Invoke(rabbitMq) ?? rabbitMq;
+            var settings = CreateSettings(configuredPostgres, configuredRabbitMq);
             var logs = new CapturingLoggerProvider();
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
@@ -161,6 +200,7 @@ public sealed class WorkerHealthIntegrationTests(IntegrationEnvironmentFixture f
             builder.Logging.AddProvider(logs);
             builder.Services.Configure<RabbitMqOptions>(
                 builder.Configuration.GetSection(RabbitMqOptions.SectionName));
+            builder.Services.AddMessageBridgeProcessingStore(builder.Configuration);
             builder.Services.AddMessageBridgeObservability(builder.Configuration);
             var app = builder.Build();
             app.MapMessageBridgeHealthAndMetrics();
@@ -171,7 +211,12 @@ public sealed class WorkerHealthIntegrationTests(IntegrationEnvironmentFixture f
                 var address = app.Services.GetRequiredService<IServer>().Features
                     .Get<IServerAddressesFeature>()!.Addresses.Single();
                 var client = new HttpClient { BaseAddress = new Uri(address) };
-                return new WorkerHealthHarness(app, client, database, logs);
+                return new WorkerHealthHarness(
+                    app,
+                    client,
+                    database,
+                    logs,
+                    GetSensitiveConfiguration(configuredPostgres, configuredRabbitMq));
             }
             catch
             {
@@ -238,22 +283,43 @@ public sealed class WorkerHealthIntegrationTests(IntegrationEnvironmentFixture f
 
         private static Dictionary<string, string?> CreateSettings(
             string postgres,
-            string rabbitMq) =>
-            new()
+            string rabbitMq)
+        {
+            var settings = IntegrationEnvironmentFixture.CreateDatabaseSettings(postgres);
+            settings.Add("RabbitMq:ConnectionString", rabbitMq);
+            settings.Add(
+                "MessageBridge:Topology:EnvironmentPrefix",
+                IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix());
+            settings.Add("MessageBridge:ProcessingHistory:RecoveryEnabled", "false");
+            settings.Add("Observability:MetricsEndpointEnabled", "false");
+            return settings;
+        }
+
+        private static IReadOnlyList<string> GetSensitiveConfiguration(
+            string postgres,
+            string rabbitMq)
+        {
+            var postgresBuilder = new NpgsqlConnectionStringBuilder(postgres);
+            var rabbitUri = new Uri(rabbitMq);
+            var rabbitCredentials = Uri.UnescapeDataString(rabbitUri.UserInfo).Split(':', 2);
+
+            return new[]
             {
-                ["ConnectionStrings:DefaultConnection"] = postgres,
-                ["MESSAGEBRIDGE_CONNECTION_STRING"] = postgres,
-                ["RabbitMq:ConnectionString"] = rabbitMq,
-                ["MessageBridge:Topology:EnvironmentPrefix"] =
-                    IntegrationEnvironmentFixture.CreateUniqueTopologyPrefix(),
-                ["Observability:MetricsEndpointEnabled"] = "false"
+                postgres,
+                postgresBuilder.Username ?? string.Empty,
+                postgresBuilder.Password ?? string.Empty,
+                rabbitMq,
+                rabbitCredentials.ElementAtOrDefault(0) ?? string.Empty,
+                rabbitCredentials.ElementAtOrDefault(1) ?? string.Empty
             };
+        }
     }
 
     private sealed record ReadinessObservation(
         HttpStatusCode StatusCode,
         string OverallStatus,
         IReadOnlyDictionary<string, string> Checks,
+        IReadOnlySet<string> PropertyNames,
         string Body)
     {
         public static async Task<ReadinessObservation> ReadAsync(HttpClient client)
@@ -273,6 +339,9 @@ public sealed class WorkerHealthIntegrationTests(IntegrationEnvironmentFixture f
                 response.StatusCode,
                 root.GetProperty("status").GetString() ?? string.Empty,
                 checks,
+                root.EnumerateObject()
+                    .Select(property => property.Name)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase),
                 body);
         }
 

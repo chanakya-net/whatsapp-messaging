@@ -1,5 +1,6 @@
 using FluentValidation.Results;
 using MessageBridge.Infrastructure.Messaging.Options;
+using Microsoft.Extensions.Configuration;
 using Shouldly;
 
 namespace MessageBridge.Infrastructure.Tests.Messaging;
@@ -21,6 +22,38 @@ public sealed class RabbitMqTopologyOptionsTests
     {
         var opts = new MessageBridgeTopologyOptions { EnvironmentPrefix = "prod" };
         opts.ExchangeName("whatsapp.outbound").ShouldBe("prod.whatsapp.outbound");
+    }
+
+    [Theory]
+    [InlineData("dev", "dev.whatsapp.outbound")]
+    [InlineData("prod", "prod.whatsapp.outbound")]
+    public void ExchangeName_UsesEnvironmentSpecificPrefix(string prefix, string expected)
+    {
+        var opts = new MessageBridgeTopologyOptions { EnvironmentPrefix = prefix };
+
+        opts.ExchangeName("whatsapp.outbound").ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Durable_DefaultsToTrue()
+    {
+        new MessageBridgeTopologyOptions().Durable.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Durable_BindsFromConfiguration()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["MessageBridge:Topology:Durable"] = "false"
+            })
+            .Build();
+        var options = config.GetSection(MessageBridgeTopologyOptions.SectionName)
+            .Get<MessageBridgeTopologyOptions>();
+
+        options.ShouldNotBeNull();
+        options.Durable.ShouldBeFalse();
     }
 
     [Fact]

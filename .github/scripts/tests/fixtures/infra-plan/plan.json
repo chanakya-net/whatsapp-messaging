@@ -1,0 +1,60 @@
+{
+  "format_version": "1.2",
+  "provider_config": {
+    "azurerm": { "expressions": { "client_secret": { "constant_value": "super-secret" } } }
+  },
+  "resource_changes": [
+    {
+      "address": "azurerm_resource_group.shared",
+      "mode": "managed",
+      "type": "azurerm_resource_group",
+      "name": "shared",
+      "provider_name": "registry.opentofu.org/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": { "password": "hunter2", "name": "after-value" }
+      }
+    },
+    {
+      "address": "azurerm_container_app.worker[\"dynamic-secret<script>malicious\"]",
+      "mode": "managed",
+      "type": "azurerm_container_app",
+      "name": "worker",
+      "index": "dynamic-secret<script>malicious",
+      "change": {
+        "actions": ["update"],
+        "before": { "token": "before-value" },
+        "after": { "token": "after-value" }
+      }
+    },
+    {
+      "address": "azurerm_postgresql_flexible_server_database.database",
+      "mode": "managed",
+      "type": "azurerm_postgresql_flexible_server_database",
+      "name": "database",
+      "change": {
+        "actions": ["delete", "create"],
+        "before": { "connection_string": "super-secret" },
+        "after": { "connection_string": "super-secret" }
+      }
+    },
+    {
+      "address": "data.azurerm_client_config.current",
+      "mode": "data",
+      "type": "azurerm_client_config",
+      "name": "current",
+      "change": { "actions": ["read"], "before": null, "after": { "tenant_id": "super-secret" } }
+    },
+    {
+      "address": "azurerm_resource_group.unchanged",
+      "mode": "managed",
+      "type": "azurerm_resource_group",
+      "name": "unchanged",
+      "change": { "actions": ["no-op"], "before": {}, "after": {} }
+    }
+  ],
+  "output_changes": {
+    "credential": { "after": "output-secret", "after_sensitive": true }
+  }
+}
