@@ -172,7 +172,7 @@ collect_reviewed_ranges() {
 
 collect_azure_ranges() {
   az postgres flexible-server firewall-rule list \
-    --resource-group "$RESOURCE_GROUP" --name "$SERVER_NAME" --output json \
+    --resource-group "$RESOURCE_GROUP" --server-name "$SERVER_NAME" --output json \
     >"$WORK_DIR/azure.json" 2>"$WORK_DIR/azure-list.log" ||
     fail 'unable to list PostgreSQL firewall rules'
   jq -e '

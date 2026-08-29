@@ -7,7 +7,15 @@ if [ "${FAKE_SCENARIO:?}" = azure_list_failure ]; then
   exit 42
 fi
 case "$*" in
-  "postgres flexible-server firewall-rule list "*) ;;
+  "postgres flexible-server firewall-rule list "*)
+    case " $* " in
+      *" --server-name "*) ;;
+      *)
+        printf 'Server must be selected with --server-name: %s\n' "$*" >&2
+        exit 96
+        ;;
+    esac
+    ;;
   *) printf 'Forbidden Azure mutation or query: %s\n' "$*" >&2; exit 97 ;;
 esac
 
