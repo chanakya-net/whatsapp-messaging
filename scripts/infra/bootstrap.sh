@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 readonly EXPECTED_REPOSITORY="chanakya-net/whatsapp-messaging"
+readonly STATE_DATA_ROLE="Storage Blob Data Contributor"
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 BOOTSTRAP_DIR="${BOOTSTRAP_DIR_OVERRIDE:-$REPO_ROOT/.tofu/bootstrap}"
 BOOTSTRAP_RUNTIME_DIR="${BOOTSTRAP_RUNTIME_DIR:-$BOOTSTRAP_DIR}"
@@ -79,7 +80,6 @@ init_remote_backend() {
     -backend-config="container_name=bootstrap" \
     -backend-config="key=messagebridge/bootstrap.tfstate" \
     -backend-config="subscription_id=$AZURE_SUBSCRIPTION_ID" \
-    -backend-config="tenant_id=$AZURE_TENANT_ID" \
     -backend-config="use_azuread_auth=true"
 }
 
@@ -108,6 +108,36 @@ plan_bootstrap() {
   tofu -chdir="$BOOTSTRAP_DIR" show "$PLAN_FILE"
 }
 
+grant_operator_state_access() {
+  local operator_object_id scope existing
+  operator_object_id=$(az ad signed-in-user show --query id -o tsv) ||
+    fail "unable to resolve the signed-in operator object id"
+  [[ -n "$operator_object_id" ]] || fail "signed-in operator object id is empty"
+  scope="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${STATE_RESOURCE_GROUP}"
+  scope="${scope}/providers/Microsoft.Storage/storageAccounts/${STATE_ACCOUNT}"
+  existing=$(az role assignment list --assignee-object-id "$operator_object_id" \
+    --scope "$scope" --role "$STATE_DATA_ROLE" --query '[0].id' -o tsv 2>/dev/null || true)
+  [[ -z "$existing" ]] || return 0
+  az role assignment create --assignee-object-id "$operator_object_id" \
+    --assignee-principal-type User --role "$STATE_DATA_ROLE" \
+    --scope "$scope" --output none ||
+    fail "could not grant the operator data-plane access to the state account"
+  await_state_data_plane
+}
+
+await_state_data_plane() {
+  local attempt=0
+  while ((attempt < 20)); do
+    if az storage blob list --auth-mode login --account-name "$STATE_ACCOUNT" \
+      --container-name bootstrap --output none 2>/dev/null; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 15
+  done
+  fail "operator data-plane access did not propagate to the state account"
+}
+
 migrate_local_state() {
   : >"$MIGRATION_MARKER"
   write_remote_backend_override
@@ -117,7 +147,6 @@ migrate_local_state() {
     -backend-config="container_name=bootstrap" \
     -backend-config="key=messagebridge/bootstrap.tfstate" \
     -backend-config="subscription_id=$AZURE_SUBSCRIPTION_ID" \
-    -backend-config="tenant_id=$AZURE_TENANT_ID" \
     -backend-config="use_azuread_auth=true"; then
     fail "backend migration failed; local state retained and future plans blocked"
   fi
@@ -139,6 +168,7 @@ apply_bootstrap() {
   read -r confirmation
   [[ "$confirmation" == "$expected" ]] || fail "confirmation did not match"
   tofu -chdir="$BOOTSTRAP_DIR" apply -input=false "$PLAN_FILE"
+  grant_operator_state_access
   [[ "$had_remote" == true ]] || migrate_local_state
 }
 
@@ -197,9 +227,10 @@ configure_github() {
   load_azure_context
   check_storage_name
   local actual_repo output_json name value
-  actual_repo=$(gh repo view --repo "$EXPECTED_REPOSITORY" --json nameWithOwner --jq .nameWithOwner)
+  actual_repo=$(gh repo view "$EXPECTED_REPOSITORY" --json nameWithOwner --jq .nameWithOwner)
   [[ "$actual_repo" == "$EXPECTED_REPOSITORY" ]] || fail "GitHub repository mismatch"
   remote_backend_exists || fail "remote bootstrap state must exist before GitHub configuration"
+  grant_operator_state_access
   init_remote_backend
   output_json=$(mktemp "$BOOTSTRAP_RUNTIME_DIR/bootstrap-outputs.XXXXXX.json")
   tofu -chdir="$BOOTSTRAP_DIR" output -json >"$output_json"

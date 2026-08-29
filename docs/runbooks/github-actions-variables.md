@@ -230,6 +230,15 @@ bash scripts/infra/bootstrap.sh plan
 bash scripts/infra/bootstrap.sh apply
 ```
 
+The state account sets `shared_access_key_enabled = false`, so all state access
+is Entra-only. Subscription `Owner` grants control-plane rights but no blob
+data-plane rights, so `apply` and `configure-github` grant the signed-in
+operator `Storage Blob Data Contributor` on the state account and wait for that
+assignment to propagate. The grant is idempotent and is skipped when the
+assignment already exists. The bootstrap OpenTofu roots deliberately grant blob
+data roles only to the four workflow identities; the operator grant stays in
+the driver script so the applied RBAC contract keeps describing CI access only.
+
 If bootstrap has already been applied and its remote state is readable, do not
 apply it again merely to repair GitHub variables. Continue to Step 3.
 
@@ -389,7 +398,54 @@ state, and create sanitized plan summaries.
 | Azure login fails. | Client ID, tenant ID, subscription ID, or federated credential does not match the bootstrap output. | Rerun `configure-github`; do not add a client secret. |
 | OpenTofu initialization fails. | State resource group, account, container, key, or plan-identity data access is incorrect. | Compare repository variables with applied bootstrap outputs and confirm the plan identity's scoped state access. |
 | OpenTofu plan fails after successful initialization. | An approved input is invalid for the root, an image digest is unavailable, or Azure state differs from the expected platform record. | Inspect the sanitized failure message, correct the approved metadata or Azure state, and rerun. |
+| `apply` ends with `AzureCLICredential: ERROR: Please specify only one of subscription and tenant, not both`. | A backend configuration passed both `subscription_id` and `tenant_id`, which Azure CLI 2.6x and newer reject when minting a token. | Pass only `subscription_id` in `-backend-config`. The subscription already selects the tenant. |
+| `apply` ends with `AuthorizationPermissionMismatch` while migrating state. | The operator holds no blob data-plane role on the state account, and the account has no shared-key fallback. | Confirm the `Storage Blob Data Contributor` assignment on the state account, then follow the incomplete-migration recovery below. |
+| `plan` stops with `incomplete backend migration; recover preserved local state before planning`. | A previous `apply` created Azure resources but failed to copy local state to the remote backend, leaving `.tofu/bootstrap/.bootstrap-migration-required`. | Recover with the procedure below. Never delete the local state file; it is the only record of the applied resources. |
 | The workflow reports Node.js action deprecation warnings. | A pinned third-party action targets an older Node runtime. | Track the warning separately; it is not the empty-variable failure described by this runbook. |
 
 Do not weaken workflow validation, add fake UUIDs, use mutable image tags, or
 skip the bootstrap approval process to make a check appear green.
+
+## Incomplete backend migration recovery
+
+A failed migration leaves the applied Azure resources recorded only in
+`.tofu/bootstrap/terraform.tfstate`, writes `backend_override.tf`, and creates
+`.tofu/bootstrap/.bootstrap-migration-required`, which blocks further planning.
+Rerunning `apply` is refused by design. Recover deliberately:
+
+1. Back up `.tofu/bootstrap/terraform.tfstate` outside the repository and
+   record its resource count. This file is the only record of applied
+   resources until the migration completes.
+2. Fix the reported cause. Missing operator blob access is the common one; see
+   the troubleshooting table above.
+3. Copy the preserved state into the remote backend:
+
+   ```bash
+   tofu -chdir=.tofu/bootstrap init -input=false -migrate-state -force-copy \
+     -backend-config="resource_group_name=rg-messagebridge-bootstrap-centralindia-NNN" \
+     -backend-config="storage_account_name=messagebridgetfstateNNN" \
+     -backend-config="container_name=bootstrap" \
+     -backend-config="key=messagebridge/bootstrap.tfstate" \
+     -backend-config="subscription_id=<subscription-uuid>" \
+     -backend-config="use_azuread_auth=true"
+   ```
+
+4. Confirm the remote state is readable and complete before clearing the
+   marker. The lineage must match the backed-up file and the resource count
+   must be identical:
+
+   ```bash
+   tofu -chdir=.tofu/bootstrap state pull |
+     jq '{serial, lineage, resources: ([.resources[].instances | length] | add)}'
+   ```
+
+5. Only after that check passes, clear the marker and continue:
+
+   ```bash
+   rm -f .tofu/bootstrap/.bootstrap-migration-required
+   bash scripts/infra/bootstrap.sh configure-github
+   ```
+
+Do not clear the marker before Step 4 confirms the remote copy. Doing so hides
+an incomplete migration and risks a later apply planning to recreate resources
+that already exist.

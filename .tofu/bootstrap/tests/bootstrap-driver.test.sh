@@ -117,6 +117,23 @@ case " $* " in
   *" storage container exists "*)
     [[ -f "$STUB_STATE_DIR/remote-ready" ]] && printf 'true\n' || printf 'false\n'
     ;;
+  *" ad signed-in-user show "*)
+    printf '00000000-0000-4000-8000-000000000003\n'
+    ;;
+  *" role assignment list "*)
+    if [[ -f "$STUB_STATE_DIR/operator-state-access" ]]; then
+      printf '/subscriptions/x/providers/Microsoft.Authorization/roleAssignments/existing\n'
+    fi
+    ;;
+  *" role assignment create "*)
+    touch "$STUB_STATE_DIR/operator-state-access"
+    ;;
+  *" storage blob list "*)
+    if [[ ! -f "$STUB_STATE_DIR/operator-state-access" ]]; then
+      printf 'AuthorizationPermissionMismatch\n' >&2
+      exit 1
+    fi
+    ;;
   *) printf '{}\n' ;;
 esac
 STUB
@@ -198,6 +215,9 @@ saved_plan_happy_path() {
   assert_not_contains "$CALL_LOG" "-migrate-state -force-copy -reconfigure"
   assert_contains "$BOOTSTRAP_CONFIG_DIR/backend_override.tf" 'backend "azurerm" {}'
   assert_contains "$CALL_LOG" "state pull"
+  assert_not_contains "$CALL_LOG" "-backend-config=tenant_id="
+  assert_contains "$CALL_LOG" "role assignment create"
+  assert_contains "$CALL_LOG" "Storage Blob Data Contributor"
 
   : >"$CALL_LOG"
   run_bootstrap plan
@@ -250,7 +270,10 @@ configure_github() {
   run_bootstrap configure-github
   run_bootstrap configure-github
 
-  assert_contains "$CALL_LOG" "gh repo view --repo chanakya-net/whatsapp-messaging"
+  assert_contains "$CALL_LOG" "gh repo view chanakya-net/whatsapp-messaging"
+  assert_not_contains "$CALL_LOG" "gh repo view --repo"
+  assert_contains "$CALL_LOG" "role assignment create"
+  assert_count "$CALL_LOG" "role assignment create" 1
   assert_contains "$CALL_LOG" "gh variable set AZURE_CLIENT_ID_PROD"
   assert_contains "$CALL_LOG" "gh variable set TOFU_STATE_KEY_DEV"
   assert_not_contains "$CALL_LOG" "gh secret"
